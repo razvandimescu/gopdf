@@ -8,22 +8,27 @@ import (
 )
 
 func main() {
-	output := "sample.pdf"
-	if len(os.Args) > 1 {
-		output = os.Args[1]
+	samples := []struct {
+		name string
+		fn   func() ([]byte, error)
+	}{
+		{"sample-invoice.pdf", createSampleInvoice},
+		{"sample-report.pdf", createSampleReport},
 	}
 
-	data, err := createSampleInvoice()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+	for _, s := range samples {
+		output := s.name
+		data, err := s.fn()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error creating %s: %v\n", s.name, err)
+			os.Exit(1)
+		}
+		if err := os.WriteFile(output, data, 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "error writing %s: %v\n", output, err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "Created %s (%d bytes)\n", output, len(data))
 	}
-
-	if err := os.WriteFile(output, data, 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "error writing: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Fprintf(os.Stderr, "Created %s (%d bytes)\n", output, len(data))
 }
 
 func createSampleInvoice() ([]byte, error) {
@@ -31,13 +36,11 @@ func createSampleInvoice() ([]byte, error) {
 	p := c.NewPage(595, 842) // A4
 
 	// Color palette.
-	navy := [3]float64{0.102, 0.137, 0.208}       // #1A2335
-	accent := [3]float64{0.259, 0.522, 0.957}      // #4285F4
-	darkText := [3]float64{0.133, 0.133, 0.133}    // #222
-	medText := [3]float64{0.400, 0.400, 0.400}     // #666
-	lightBg := [3]float64{0.965, 0.969, 0.976}     // #F6F7F9
-	white := [3]float64{1, 1, 1}
-	_ = white
+	navy := [3]float64{0.102, 0.137, 0.208}
+	accent := [3]float64{0.259, 0.522, 0.957}
+	darkText := [3]float64{0.133, 0.133, 0.133}
+	medText := [3]float64{0.400, 0.400, 0.400}
+	lightBg := [3]float64{0.965, 0.969, 0.976}
 
 	pageW := 595.0
 	marginL := 50.0
@@ -48,21 +51,16 @@ func createSampleInvoice() ([]byte, error) {
 	headerH := 120.0
 	headerY := 842 - headerH
 	p.FillRect(0, headerY, pageW, headerH, navy[0], navy[1], navy[2])
-
-	// Accent stripe on left.
 	p.FillRect(0, headerY, 6, headerH, accent[0], accent[1], accent[2])
 
-	// Company name.
 	p.SetColor(1, 1, 1)
 	p.SetFont("Helvetica-Bold", 28)
 	p.DrawText(marginL+10, headerY+70, "ACME CORPORATION")
 
-	// Company details.
 	p.SetFont("Helvetica", 9)
 	p.DrawText(marginL+10, headerY+48, "1234 Innovation Drive, San Francisco, CA 94107")
 	p.DrawText(marginL+10, headerY+36, "hello@acmecorp.com  |  +1 (415) 555-0199  |  acmecorp.com")
 
-	// INVOICE label (right side).
 	p.SetFont("Helvetica-Bold", 36)
 	p.DrawText(395, headerY+68, "INVOICE")
 	p.SetFont("Helvetica", 10)
@@ -93,7 +91,6 @@ func createSampleInvoice() ([]byte, error) {
 	colX := []float64{marginL, marginL + 260, marginL + 340, marginL + 420}
 	headers := []string{"Description", "Qty", "Rate", "Amount"}
 
-	// Table header.
 	p.FillRect(marginL, tableTop-rowH+4, contentW, rowH, navy[0], navy[1], navy[2])
 	p.SetColor(1, 1, 1)
 	p.SetFont("Helvetica-Bold", 9)
@@ -101,7 +98,6 @@ func createSampleInvoice() ([]byte, error) {
 		p.DrawText(colX[i]+8, tableTop-rowH+16, h)
 	}
 
-	// Table rows.
 	type row struct {
 		desc, qty, rate, amount string
 	}
@@ -116,7 +112,6 @@ func createSampleInvoice() ([]byte, error) {
 	y := tableTop - rowH
 	for i, r := range rows {
 		y -= rowH
-		// Alternating row background.
 		if i%2 == 0 {
 			p.FillRect(marginL, y+4, contentW, rowH, lightBg[0], lightBg[1], lightBg[2])
 		}
@@ -125,7 +120,6 @@ func createSampleInvoice() ([]byte, error) {
 		p.DrawText(colX[0]+8, y+14, r.desc)
 		p.DrawText(colX[1]+8, y+14, r.qty)
 		p.DrawText(colX[2]+8, y+14, r.rate)
-
 		p.SetFont("Helvetica-Bold", 10)
 		p.DrawText(colX[3]+8, y+14, r.amount)
 	}
@@ -135,7 +129,6 @@ func createSampleInvoice() ([]byte, error) {
 	totalsX := colX[2]
 	totalsW := contentW - (totalsX - marginL)
 
-	// Separator line.
 	p.FillRect(totalsX, totalsY, totalsW, 1, medText[0], medText[1], medText[2])
 
 	p.SetFont("Helvetica", 10)
@@ -149,10 +142,8 @@ func createSampleInvoice() ([]byte, error) {
 	p.SetColor(darkText[0], darkText[1], darkText[2])
 	p.DrawText(colX[3]+8, totalsY-36, "$2,670.00")
 
-	// Separator before total.
 	p.FillRect(totalsX, totalsY-50, totalsW, 1, medText[0], medText[1], medText[2])
 
-	// Total highlight bar — extra 15pt right padding so amount doesn't clip.
 	totalBarY := totalsY - 80
 	p.FillRect(totalsX, totalBarY, totalsW+15, 32, accent[0], accent[1], accent[2])
 	p.SetColor(1, 1, 1)
@@ -185,8 +176,6 @@ func createSampleInvoice() ([]byte, error) {
 
 	// ─── FOOTER ─────────────────────────────────────────────────────
 	footerY := 40.0
-
-	// Footer line.
 	p.FillRect(marginL, footerY+15, contentW, 1, lightBg[0], lightBg[1], lightBg[2])
 
 	p.SetColor(medText[0], medText[1], medText[2])

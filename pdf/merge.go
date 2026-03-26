@@ -92,13 +92,18 @@ func (m *Merger) Merge() ([]byte, error) {
 		}
 
 		// Determine which pages to include.
+		// Negative indices count from the end: -1 = last page, -2 = second-to-last.
 		var selectedPages []Dict
 		if src.pages == nil {
 			selectedPages = allPages
 		} else {
+			n := len(allPages)
 			for _, idx := range src.pages {
-				if idx < 0 || idx >= len(allPages) {
-					return nil, fmt.Errorf("source %d: page %d out of range (0-%d)", srcIdx, idx, len(allPages)-1)
+				if idx < 0 {
+					idx = n + idx
+				}
+				if idx < 0 || idx >= n {
+					return nil, fmt.Errorf("source %d: page %d out of range (0-%d)", srcIdx, idx, n-1)
 				}
 				selectedPages = append(selectedPages, allPages[idx])
 			}

@@ -75,12 +75,25 @@ func createSampleInvoice() ([]byte, error) {
 	// Gold bar under title.
 	p.FillRect(marginL+10, titleY-12, 100, 4, gold[0], gold[1], gold[2])
 
+	// Invoice no + date — right side, above the meta cards.
+	rightX := marginL + contentW // right edge of content area
+	p.SetColor(medText[0], medText[1], medText[2])
+	p.SetFont("Helvetica", 9)
+	p.DrawText(rightX-100, titleY+36, "INVOICE NO.")
+	p.SetColor(teal[0], teal[1], teal[2])
+	p.SetFont("Helvetica-Bold", 22)
+	p.DrawText(rightX-100, titleY+10, "#0042")
+	p.SetColor(medText[0], medText[1], medText[2])
+	p.SetFont("Helvetica", 9)
+	p.DrawText(rightX-100, titleY-8, "March 26, 2026")
+
 	// ─── META CARDS ─────────────────────────────────────────────────
 	metaY := titleY - 55
 	cardH := 65.0
+	badgeW := 70.0
 
 	// Bill To card.
-	p.FillRect(marginL+10, metaY-52, 220, cardH, lightBg[0], lightBg[1], lightBg[2])
+	p.FillRect(marginL+10, metaY-52, 280, cardH, lightBg[0], lightBg[1], lightBg[2])
 	p.SetColor(medText[0], medText[1], medText[2])
 	p.SetFont("Helvetica", 8)
 	p.DrawText(marginL+18, metaY, "BILL TO")
@@ -91,23 +104,20 @@ func createSampleInvoice() ([]byte, error) {
 	p.DrawText(marginL+18, metaY-30, "42 Thames Wharf, London SE1 7PB")
 	p.DrawText(marginL+18, metaY-42, "United Kingdom")
 
-	// Invoice no + date card.
-	p.FillRect(marginL+250, metaY-52, 150, cardH, lightBg[0], lightBg[1], lightBg[2])
+	// Due date card.
+	p.FillRect(marginL+300, metaY-52, 130, cardH, lightBg[0], lightBg[1], lightBg[2])
 	p.SetColor(medText[0], medText[1], medText[2])
 	p.SetFont("Helvetica", 8)
-	p.DrawText(marginL+258, metaY, "INVOICE NO.")
-	p.SetColor(teal[0], teal[1], teal[2])
-	p.SetFont("Helvetica-Bold", 18)
-	p.DrawText(marginL+258, metaY-20, "#0042")
-	p.SetColor(medText[0], medText[1], medText[2])
-	p.SetFont("Helvetica", 9)
-	p.DrawText(marginL+258, metaY-40, "Mar 26, 2026  |  Due Apr 25")
+	p.DrawText(marginL+308, metaY, "DUE DATE")
+	p.SetColor(darkText[0], darkText[1], darkText[2])
+	p.SetFont("Helvetica-Bold", 14)
+	p.DrawText(marginL+308, metaY-20, "Apr 25, 2026")
 
-	// Status badge.
-	p.FillRect(marginL+420, metaY-52, 70, cardH, gold[0], gold[1], gold[2])
+	// UNPAID badge — right-aligned to content edge.
+	p.FillRect(rightX-badgeW, metaY-52, badgeW, cardH, gold[0], gold[1], gold[2])
 	p.SetColor(teal[0], teal[1], teal[2])
 	p.SetFont("Helvetica-Bold", 10)
-	p.DrawText(marginL+432, metaY-14, "UNPAID")
+	p.DrawText(rightX-badgeW+12, metaY-14, "UNPAID")
 
 	// ─── TABLE ──────────────────────────────────────────────────────
 	tableTop := metaY - 80
@@ -115,7 +125,7 @@ func createSampleInvoice() ([]byte, error) {
 	colDesc := marginL + 10.0
 	colQty := marginL + 290.0
 	colRate := marginL + 360.0
-	colAmt := marginL + 440.0
+	colAmt := marginL + 420.0
 
 	// Table header.
 	p.FillRect(marginL+10, tableTop-rowH+6, contentW-10, rowH, teal[0], teal[1], teal[2])
@@ -177,16 +187,17 @@ func createSampleInvoice() ([]byte, error) {
 	// Separator.
 	p.FillRect(totalsX, totalsY-35, totalsW, 1, tableBorder[0], tableBorder[1], tableBorder[2])
 
-	// Total bar.
+	// Total bar — right edge aligned with content edge.
 	totalBarY := totalsY - 60
-	p.FillRect(totalsX-5, totalBarY, totalsW+40, 30, teal[0], teal[1], teal[2])
+	totalBarW := (marginL + contentW) - (totalsX - 5)
+	p.FillRect(totalsX-5, totalBarY, totalBarW, 30, teal[0], teal[1], teal[2])
 	// Gold accent on left edge of total bar.
 	p.FillRect(totalsX-5, totalBarY, 4, 30, gold[0], gold[1], gold[2])
 	p.SetColor(1, 1, 1)
-	p.SetFont("Helvetica-Bold", 11)
+	p.SetFont("Helvetica-Bold", 10)
 	p.DrawText(totalsX+8, totalBarY+10, "TOTAL DUE")
-	p.SetFont("Helvetica-Bold", 14)
-	p.DrawText(colAmt, totalBarY+10, "$29,370.00")
+	p.SetFont("Helvetica-Bold", 13)
+	p.DrawText(colAmt+5, totalBarY+10, "$29,370.00")
 
 	// ─── PAYMENT + NOTES ────────────────────────────────────────────
 	payY := totalBarY - 50

@@ -27,16 +27,28 @@ func ExtractText(content []byte, fonts map[Name]Dict, reader *Reader) []TextSpan
 	lex := NewLexer(content)
 	var spans []TextSpan
 
-	// Text state.
-	var (
-		tm      [6]float64 // text matrix
-		lm      [6]float64 // line matrix
+	// Graphics state (persists across text objects, saved/restored by q/Q).
+	type graphicsState struct {
+		ctm      [6]float64
 		fontSize float64
 		fontName string
-		tl      float64 // leading
-		tc      float64 // character spacing
-		tw      float64 // word spacing
-		th      float64 = 100 // horizontal scaling (percentage)
+		tc       float64
+		tw       float64
+		th       float64
+		tl       float64
+	}
+
+	var (
+		ctm      = [6]float64{1, 0, 0, 1, 0, 0} // current transformation matrix
+		tm       [6]float64                       // text matrix
+		lm       [6]float64                       // line matrix
+		fontSize float64
+		fontName string
+		tl       float64     // leading
+		tc       float64     // character spacing
+		tw       float64     // word spacing
+		th       float64 = 100 // horizontal scaling (percentage)
+		gsStack  []graphicsState
 	)
 
 	// Font-specific decoding.
@@ -45,6 +57,7 @@ func ExtractText(content []byte, fonts map[Name]Dict, reader *Reader) []TextSpan
 	fontWidths := make(map[string]map[int]float64)
 	fontFirstChars := make(map[string]int)
 	fontMissingWidths := make(map[string]float64)
+	compositeFont := make(map[string]bool) // Type0 (CIDFont) → 2-byte codes
 
 	for name, fd := range fonts {
 		sname := string(name)
@@ -54,7 +67,42 @@ func ExtractText(content []byte, fonts map[Name]Dict, reader *Reader) []TextSpan
 		if diffs := reader.FontEncoding(fd); diffs != nil {
 			encodingDiffs[sname] = diffs
 		}
-		// Extract font widths for accurate positioning.
+
+		subtype, _ := fd.Name("Subtype")
+
+		if subtype == "Type0" {
+			// Composite (CID) font — 2-byte character codes.
+			compositeFont[sname] = true
+			if descArr, ok := fd.Array("DescendantFonts"); ok && len(descArr) > 0 {
+				cidFont, ok := reader.ResolveDict(descArr[0])
+				if ok {
+					// Default width.
+					dw := 1000.0
+					if v, ok := cidFont.Float("DW"); ok {
+						dw = v
+					}
+					fontMissingWidths[sname] = dw / 1000.0
+
+					// Sparse width array /W.
+					if wArr, ok := cidFont.Array("W"); ok {
+						wm := parseCIDWidths(wArr)
+						fontWidths[sname] = wm
+					}
+
+					// Font descriptor MissingWidth.
+					if descRef, ok := cidFont["FontDescriptor"]; ok {
+						if desc, ok := reader.ResolveDict(descRef); ok {
+							if mw, ok := desc.Float("MissingWidth"); ok {
+								fontMissingWidths[sname] = mw / 1000.0
+							}
+						}
+					}
+				}
+			}
+			continue
+		}
+
+		// Simple font — extract widths from Widths array.
 		if widths, ok := fd.Array("Widths"); ok {
 			wm := make(map[int]float64)
 			fc, _ := fd.Int("FirstChar")
@@ -75,6 +123,15 @@ func ExtractText(content []byte, fonts map[Name]Dict, reader *Reader) []TextSpan
 				}
 			}
 		}
+
+		// Standard 14 font fallback.
+		if _, ok := fontWidths[sname]; !ok {
+			if baseName, ok := fd.Name("BaseFont"); ok {
+				if stdW := stdFontWidths(string(baseName)); stdW != nil {
+					fontWidths[sname] = stdW
+				}
+			}
+		}
 	}
 
 	identity := [6]float64{1, 0, 0, 1, 0, 0}
@@ -82,27 +139,39 @@ func ExtractText(content []byte, fonts map[Name]Dict, reader *Reader) []TextSpan
 	// operand stack for content stream parsing.
 	var stack []any
 
-	charWidth := func(code byte) float64 {
+	// cidCharWidth returns width for a character code (CID or byte code).
+	cidCharWidth := func(code int) float64 {
 		if wm, ok := fontWidths[fontName]; ok {
-			if w, ok := wm[int(code)]; ok {
+			if w, ok := wm[code]; ok {
+				if compositeFont[fontName] {
+					return w // already divided by 1000 during parsing
+				}
 				return w / 1000.0
 			}
 		}
 		if mw, ok := fontMissingWidths[fontName]; ok {
+			if compositeFont[fontName] {
+				return mw // already divided by 1000
+			}
 			return mw / 1000.0
 		}
-		return 0.6 // reasonable default
+		return 0.6
+	}
+
+	isComposite := func() bool {
+		return compositeFont[fontName]
 	}
 
 	decodeString := func(s string) string {
+		raw := []byte(s)
+		isTwoByte := isComposite()
+
 		// Try ToUnicode map first.
 		if umap, ok := toUnicodeMaps[fontName]; ok && umap != nil {
 			var result strings.Builder
-			raw := []byte(s)
-			// Detect if this is a 2-byte encoding.
-			isTwoByte := false
-			if len(raw) >= 2 {
-				// Check if any 2-byte code matches.
+			// For composite fonts, always use 2-byte.
+			// For simple fonts, detect based on map contents.
+			if !isTwoByte && len(raw) >= 2 {
 				code := uint16(raw[0])<<8 | uint16(raw[1])
 				if _, ok := umap[code]; ok {
 					isTwoByte = true
@@ -132,7 +201,7 @@ func ExtractText(content []byte, fonts map[Name]Dict, reader *Reader) []TextSpan
 		// Try encoding differences.
 		if diffs, ok := encodingDiffs[fontName]; ok && diffs != nil {
 			var result strings.Builder
-			for _, b := range []byte(s) {
+			for _, b := range raw {
 				if name, ok := diffs[b]; ok {
 					result.WriteString(glyphToString(name))
 				} else {
@@ -150,15 +219,29 @@ func ExtractText(content []byte, fonts map[Name]Dict, reader *Reader) []TextSpan
 		raw := []byte(s)
 		hScale := th / 100.0
 		var totalWidth float64
-		for _, b := range raw {
-			w := charWidth(b)
-			totalWidth += (w*fontSize + tc) * hScale
-			if b == ' ' {
-				totalWidth += tw * hScale
+		if isComposite() && len(raw)%2 == 0 {
+			for i := 0; i+1 < len(raw); i += 2 {
+				code := int(raw[i])<<8 | int(raw[i+1])
+				w := cidCharWidth(code)
+				totalWidth += (w*fontSize + tc) * hScale
+			}
+		} else {
+			for _, b := range raw {
+				w := cidCharWidth(int(b))
+				totalWidth += (w*fontSize + tc) * hScale
+				if b == ' ' {
+					totalWidth += tw * hScale
+				}
 			}
 		}
 		tm[4] += totalWidth * tm[0]
 		tm[5] += totalWidth * tm[1]
+	}
+
+	// transformPos applies CTM to a text-space position.
+	transformPos := func(tx, ty float64) (float64, float64) {
+		return ctm[0]*tx + ctm[2]*ty + ctm[4],
+			ctm[1]*tx + ctm[3]*ty + ctm[5]
 	}
 
 	showString := func(s string) {
@@ -166,13 +249,13 @@ func ExtractText(content []byte, fonts map[Name]Dict, reader *Reader) []TextSpan
 		if decoded == "" {
 			return
 		}
-		x := tm[4]
-		y := tm[5]
+		x, y := transformPos(tm[4], tm[5])
 		advanceTextMatrix(s)
+		endX, _ := transformPos(tm[4], tm[5])
 		spans = append(spans, TextSpan{
 			X:        x,
 			Y:        y,
-			EndX:     tm[4],
+			EndX:     endX,
 			FontSize: fontSize,
 			Font:     fontName,
 			Text:     decoded,
@@ -337,15 +420,40 @@ func ExtractText(content []byte, fonts map[Name]Dict, reader *Reader) []TextSpan
 				}
 			}
 
+		case "q":
+			gsStack = append(gsStack, graphicsState{
+				ctm: ctm, fontSize: fontSize, fontName: fontName,
+				tc: tc, tw: tw, th: th, tl: tl,
+			})
+
+		case "Q":
+			if len(gsStack) > 0 {
+				gs := gsStack[len(gsStack)-1]
+				gsStack = gsStack[:len(gsStack)-1]
+				ctm = gs.ctm
+				fontSize = gs.fontSize
+				fontName = gs.fontName
+				tc = gs.tc
+				tw = gs.tw
+				th = gs.th
+				tl = gs.tl
+			}
+
 		case "cm":
-			// Ignore CTM changes for text extraction (we'd need full
-			// graphics state tracking for accuracy, but Tm resets text matrix).
+			if len(stack) >= 6 {
+				n := len(stack)
+				m := [6]float64{
+					asFloat(stack[n-6]), asFloat(stack[n-5]),
+					asFloat(stack[n-4]), asFloat(stack[n-3]),
+					asFloat(stack[n-2]), asFloat(stack[n-1]),
+				}
+				ctm = matMul6(m, ctm)
+			}
 
 		case "Do":
-			// Form XObject reference — skip for now.
+			// Form XObject reference — skip for now (Phase 4).
 
 		case "BI":
-			// Begin inline image — skip until EI.
 			skipInlineImage(lex)
 		}
 
@@ -553,4 +661,39 @@ var winansiMap = map[byte]rune{
 	0x94: '\u201D', 0x95: '\u2022', 0x96: '\u2013', 0x97: '\u2014',
 	0x98: '\u02DC', 0x99: '\u2122', 0x9A: '\u0161', 0x9B: '\u203A',
 	0x9C: '\u0153', 0x9E: '\u017E', 0x9F: '\u0178',
+}
+
+// parseCIDWidths parses a CIDFont /W array into a cid→width map.
+// Format: [ cid_start [w1 w2 ...] ] or [ cid_start cid_end w ]
+func parseCIDWidths(wArr Array) map[int]float64 {
+	wm := make(map[int]float64)
+	i := 0
+	for i < len(wArr) {
+		cid := asInt(wArr[i])
+		i++
+		if i >= len(wArr) {
+			break
+		}
+		switch v := wArr[i].(type) {
+		case Array:
+			// cid_start [w1 w2 w3 ...]
+			for j, w := range v {
+				wm[cid+j] = asFloat(w) / 1000.0
+			}
+			i++
+		default:
+			// cid_start cid_end width
+			if i+1 >= len(wArr) {
+				break
+			}
+			cidEnd := asInt(wArr[i])
+			i++
+			width := asFloat(wArr[i]) / 1000.0
+			i++
+			for c := cid; c <= cidEnd; c++ {
+				wm[c] = width
+			}
+		}
+	}
+	return wm
 }

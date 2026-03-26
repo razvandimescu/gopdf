@@ -5,13 +5,13 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/razvandimescu/gopdf)](https://goreportcard.com/report/github.com/razvandimescu/gopdf)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Pure Go library for PDF text extraction, merging, search, and editing — no CGo, no external dependencies.
+Pure Go library for PDF text extraction, creation, merging, search, and editing — no CGo, no external dependencies.
 
-Extract text with accurate spatial positioning and font metadata. Search with bounding rectangles. Merge files with page selection. Overlay text and redact regions. All from a single, MIT-licensed package with zero dependencies outside the Go standard library.
+Extract text with accurate spatial positioning and font metadata. Create PDFs with text, shapes, and multiple fonts. Search with bounding rectangles. Merge files with page selection. Overlay text and redact regions. All from a single, MIT-licensed package with zero dependencies outside the Go standard library.
 
 ## Why gopdf?
 
-If you need to read, search, or edit PDFs in Go without CGo or AGPL licensing constraints, gopdf is the only option that combines positioned text extraction, search with bounding rectangles, merge, overlay, and redaction in a single zero-dependency MIT-licensed package.
+If you need to create, read, search, or edit PDFs in Go without CGo or AGPL licensing constraints, gopdf is the only option that combines PDF creation, positioned text extraction, search with bounding rectangles, merge, overlay, and redaction in a single zero-dependency MIT-licensed package.
 
 | | gopdf | unipdf | pdfcpu | ledongthuc/pdf | MuPDF bindings |
 |---|---|---|---|---|---|
@@ -22,7 +22,7 @@ If you need to read, search, or edit PDFs in Go without CGo or AGPL licensing co
 | **PDF merge** | Yes | Yes | Yes | No | No |
 | **Text overlay** | Yes | Yes | Watermark | No | No |
 | **Visual redaction** | Yes | Yes | No | No | No |
-| **PDF creation** | No | Yes | Yes | No | Yes |
+| **PDF creation** | Yes | Yes | Yes | No | Yes |
 | **Encryption** | No | Yes | Yes | No | Yes |
 | **Dependencies** | 0 | Many | 0 | 0 | System lib |
 
@@ -34,6 +34,7 @@ If you need to read, search, or edit PDFs in Go without CGo or AGPL licensing co
 - PDF merge with page selection
 - Text overlay (Helvetica, configurable size and color)
 - Visual redaction (filled rectangles with configurable color)
+- PDF creation with text, rectangles, lines, and multiple fonts
 - Pure Go — no CGo, no system dependencies
 
 ## Installation
@@ -120,6 +121,25 @@ m.Add(otherPDFBytes)           // all pages
 result, err := m.Merge()
 ```
 
+### Create a PDF from scratch
+
+```go
+c := pdf.NewCreator()
+page := c.NewPage(595, 842) // A4
+
+page.SetFont("Helvetica-Bold", 24)
+page.DrawText(72, 750, "Invoice #12345")
+
+page.SetFont("Helvetica", 12)
+page.DrawText(72, 720, "Date: 2026-03-26")
+page.DrawText(72, 704, "Total: $500.00")
+
+page.FillRect(72, 690, 200, 1, 0, 0, 0) // separator line
+
+data, err := c.Build()
+os.WriteFile("invoice.pdf", data, 0644)
+```
+
 ### Text overlay
 
 ```go
@@ -175,6 +195,21 @@ result, err := ed.Apply()
 | `page.Search(query)` | `[]SearchResult` | Find text on this page |
 | `page.Rotation()` | `int` | Rotation in degrees (0/90/180/270) |
 | `page.MediaBox()` | `[4]float64` | Page bounds [llx, lly, urx, ury] |
+
+### Creator
+
+| Method | Returns | Description |
+|---|---|---|
+| `pdf.NewCreator()` | `*Creator` | Create empty PDF builder |
+| `c.NewPage(w, h)` | `*PageBuilder` | Add blank page (points) |
+| `c.Build()` | `[]byte, error` | Produce PDF bytes |
+| `page.SetFont(name, size)` | | Set font (Helvetica, Times, Courier + variants) |
+| `page.SetColor(r, g, b)` | | Set fill color (0-1) |
+| `page.DrawText(x, y, text)` | | Draw text at position |
+| `page.DrawRect(x, y, w, h)` | | Stroked rectangle |
+| `page.FillRect(x, y, w, h, r, g, b)` | | Filled rectangle |
+| `page.DrawLine(x1, y1, x2, y2, w)` | | Line with width |
+| `page.TextWidth(text)` | `float64` | Measure text width in current font |
 
 ### Merger
 
@@ -245,7 +280,7 @@ type Rect struct {
 
 - No encryption/password support (planned)
 - No image extraction
-- No PDF creation from scratch (read/edit/merge only)
+- PDF creation supports standard 14 fonts only (no font embedding)
 - Merge drops interactive features (forms, bookmarks, JS)
 - Redaction is visual only (rectangle drawn over text, not removed from stream)
 - Text overlay uses Helvetica only
@@ -260,6 +295,7 @@ pdf/
   writer.go     PDF object serializer, xref generation, FlateDecode compression
   merge.go      PDF merge: deep object copy with ref remapping, page tree construction
   edit.go       Text search, text overlay, visual redaction
+  creator.go    PDF creation from scratch (text, shapes, fonts)
   lexer.go      PDF byte stream tokenizer
   parser.go     Token -> object parser (dicts, arrays, refs)
   objects.go    Types: Dict, Array, Name, Ref, Stream; matrix math helpers

@@ -35,8 +35,22 @@ func (w *Writer) AllocRef() Ref {
 	return ref
 }
 
-// WriteObject writes an indirect object (not a stream).
+// WriteObject writes an indirect object. If obj is a *Stream, the stream
+// is written with its existing Data and Dict (no recompression).
 func (w *Writer) WriteObject(ref Ref, obj any) error {
+	// Handle raw streams (e.g., image streams with passthrough filters).
+	if stream, ok := obj.(*Stream); ok {
+		w.offsets[ref.Num] = w.buf.Len()
+		fmt.Fprintf(&w.buf, "%d 0 obj\n", ref.Num)
+		if err := writeValue(&w.buf, stream.Dict); err != nil {
+			return err
+		}
+		w.buf.WriteString("\nstream\n")
+		w.buf.Write(stream.Data)
+		w.buf.WriteString("\nendstream\nendobj\n")
+		return nil
+	}
+
 	w.offsets[ref.Num] = w.buf.Len()
 	fmt.Fprintf(&w.buf, "%d 0 obj\n", ref.Num)
 	if err := writeValue(&w.buf, obj); err != nil {

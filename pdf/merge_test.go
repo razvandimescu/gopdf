@@ -85,6 +85,51 @@ func TestMergePageSelection(t *testing.T) {
 	}
 }
 
+func TestMergeNegativePageIndex(t *testing.T) {
+	data := testMultiPagePDF(t, "First", "Middle", "Last")
+
+	m := NewMerger()
+	m.Add(data, -1) // last page only
+	merged, err := m.Merge()
+	if err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+
+	doc, _ := OpenBytes(merged)
+	if doc.NumPages() != 1 {
+		t.Errorf("page count: got %d, want 1", doc.NumPages())
+	}
+
+	text, _ := doc.Text()
+	if !strings.Contains(text, "Last") {
+		t.Error("should contain 'Last' (page -1)")
+	}
+	if strings.Contains(text, "First") {
+		t.Error("should not contain 'First'")
+	}
+}
+
+func TestMergeNegativePageRange(t *testing.T) {
+	data := testMultiPagePDF(t, "P1", "P2", "P3", "P4")
+
+	m := NewMerger()
+	m.Add(data, 0, -2, -1) // first, second-to-last, last
+	merged, err := m.Merge()
+	if err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+
+	doc, _ := OpenBytes(merged)
+	if doc.NumPages() != 3 {
+		t.Errorf("page count: got %d, want 3", doc.NumPages())
+	}
+
+	text, _ := doc.Text()
+	if !strings.Contains(text, "P1") || !strings.Contains(text, "P3") || !strings.Contains(text, "P4") {
+		t.Errorf("missing expected pages, got: %s", text)
+	}
+}
+
 func TestMergeFiveFiles(t *testing.T) {
 	var pdfs [][]byte
 	for i := 0; i < 5; i++ {

@@ -7,6 +7,12 @@
 
 Pure Go library for PDF text extraction, creation, merging, search, and editing — no CGo, no external dependencies.
 
+<p align="center">
+  <img src="assets/sample-invoice.png" width="380" alt="Sample Invoice" />
+  <img src="assets/sample-report.png" width="380" alt="Sample Report" />
+</p>
+<p align="center"><em>Generated entirely from Go code — <code>go run ./cmd/sample/</code></em></p>
+
 Extract text with accurate spatial positioning and font metadata. Create PDFs with text, shapes, and multiple fonts. Search with bounding rectangles. Merge files with page selection. Overlay text and redact regions. All from a single, MIT-licensed package with zero dependencies outside the Go standard library.
 
 ## Why gopdf?

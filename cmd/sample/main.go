@@ -131,34 +131,38 @@ func createSampleInvoice() ([]byte, error) {
 	}
 
 	// ─── TOTALS ─────────────────────────────────────────────────────
-	totalsY := y - 20
+	totalsY := y - 15
 	totalsX := colX[2]
+	totalsW := contentW - (totalsX - marginL)
 
 	// Separator line.
-	p.FillRect(totalsX, totalsY+12, contentW-(totalsX-marginL), 1, medText[0], medText[1], medText[2])
+	p.FillRect(totalsX, totalsY, totalsW, 1, medText[0], medText[1], medText[2])
 
 	p.SetFont("Helvetica", 10)
 	p.SetColor(medText[0], medText[1], medText[2])
-	p.DrawText(totalsX+8, totalsY-5, "Subtotal")
+	p.DrawText(totalsX+8, totalsY-18, "Subtotal")
 	p.SetColor(darkText[0], darkText[1], darkText[2])
-	p.DrawText(colX[3]+8, totalsY-5, "$26,700.00")
+	p.DrawText(colX[3]+8, totalsY-18, "$26,700.00")
 
 	p.SetColor(medText[0], medText[1], medText[2])
-	p.DrawText(totalsX+8, totalsY-22, "Tax (10%)")
+	p.DrawText(totalsX+8, totalsY-36, "Tax (10%)")
 	p.SetColor(darkText[0], darkText[1], darkText[2])
-	p.DrawText(colX[3]+8, totalsY-22, "$2,670.00")
+	p.DrawText(colX[3]+8, totalsY-36, "$2,670.00")
 
-	// Total highlight.
-	totalBarY := totalsY - 50
-	p.FillRect(totalsX, totalBarY, contentW-(totalsX-marginL), 30, accent[0], accent[1], accent[2])
+	// Separator before total.
+	p.FillRect(totalsX, totalsY-50, totalsW, 1, medText[0], medText[1], medText[2])
+
+	// Total highlight bar.
+	totalBarY := totalsY - 80
+	p.FillRect(totalsX, totalBarY, totalsW, 32, accent[0], accent[1], accent[2])
 	p.SetColor(1, 1, 1)
 	p.SetFont("Helvetica-Bold", 12)
-	p.DrawText(totalsX+8, totalBarY+10, "TOTAL DUE")
+	p.DrawText(totalsX+10, totalBarY+11, "TOTAL DUE")
 	p.SetFont("Helvetica-Bold", 14)
-	p.DrawText(colX[3]+8, totalBarY+10, "$29,370.00")
+	p.DrawText(colX[3]+8, totalBarY+11, "$29,370.00")
 
 	// ─── PAYMENT INFO ───────────────────────────────────────────────
-	payY := totalBarY - 50
+	payY := totalBarY - 45
 
 	p.SetColor(medText[0], medText[1], medText[2])
 	p.SetFont("Helvetica", 9)

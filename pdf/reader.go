@@ -302,7 +302,18 @@ func (r *Reader) readStreamData(lex *Lexer, d Dict) ([]byte, error) {
 		dataStart++
 	}
 
-	length, ok := d.Int("Length")
+	// Resolve indirect Length references (e.g. /Length 42 0 R).
+	var length int
+	var ok bool
+	if lengthObj, has := d["Length"]; has {
+		resolved := r.Resolve(lengthObj)
+		switch v := resolved.(type) {
+		case int:
+			length, ok = v, true
+		case float64:
+			length, ok = int(v), true
+		}
+	}
 	if !ok {
 		// Try to find endstream.
 		endIdx := bytes.Index(r.data[dataStart:], []byte("endstream"))

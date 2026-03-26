@@ -24,6 +24,69 @@ type TextLine struct {
 
 // ExtractText extracts positioned text spans from a PDF content stream.
 func ExtractText(content []byte, fonts map[Name]Dict, reader *Reader) []TextSpan {
+	return ExtractTextWithResources(content, fonts, reader, nil)
+}
+
+// ExtractTextWithResources extracts text with access to full page resources
+// (needed for Form XObject extraction via the Do operator).
+func ExtractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reader, resources Dict) []TextSpan {
+	return extractTextWithResources(content, fonts, reader, resources, 0)
+}
+
+// ExtractPageText extracts text from a page, handling rotation and resources automatically.
+func ExtractPageText(page Dict, reader *Reader) []TextSpan {
+	content, err := reader.PageContent(page)
+	if err != nil || content == nil {
+		return nil
+	}
+	fonts := reader.PageFonts(page)
+	resources := reader.PageResources(page)
+	spans := extractTextWithResources(content, fonts, reader, resources, 0)
+
+	// Apply page rotation to all span positions.
+	rotate, _ := page.Int("Rotate")
+	if rotate == 0 {
+		return spans
+	}
+
+	// Get page dimensions from MediaBox [llx lly urx ury].
+	var width, height float64
+	if mb, ok := page.Array("MediaBox"); ok && len(mb) >= 4 {
+		width = asFloat(mb[2]) - asFloat(mb[0])
+		height = asFloat(mb[3]) - asFloat(mb[1])
+	}
+
+	var rotM [6]float64
+	switch rotate % 360 {
+	case 90:
+		rotM = [6]float64{0, -1, 1, 0, 0, width}
+	case 180:
+		rotM = [6]float64{-1, 0, 0, -1, width, height}
+	case 270:
+		rotM = [6]float64{0, 1, -1, 0, height, 0}
+	default:
+		return spans
+	}
+
+	for i := range spans {
+		x := rotM[0]*spans[i].X + rotM[2]*spans[i].Y + rotM[4]
+		y := rotM[1]*spans[i].X + rotM[3]*spans[i].Y + rotM[5]
+		spans[i].X = x
+		spans[i].Y = y
+		if spans[i].EndX != 0 {
+			ex := rotM[0]*spans[i].EndX + rotM[2]*spans[i].Y + rotM[4]
+			spans[i].EndX = ex
+		}
+	}
+
+	return spans
+}
+
+func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reader, resources Dict, depth int) []TextSpan {
+	const maxDepth = 10
+	if depth > maxDepth {
+		return nil
+	}
 	lex := NewLexer(content)
 	var spans []TextSpan
 
@@ -50,6 +113,16 @@ func ExtractText(content []byte, fonts map[Name]Dict, reader *Reader) []TextSpan
 		th       float64 = 100 // horizontal scaling (percentage)
 		gsStack  []graphicsState
 	)
+
+	// Marked content state for ActualText extraction.
+	type markedEntry struct {
+		actualText string
+		hasActual  bool
+		startX     float64
+		startY     float64
+		suppress   bool // suppress glyph output when ActualText active
+	}
+	var markedStack []markedEntry
 
 	// Font-specific decoding.
 	toUnicodeMaps := make(map[string]map[uint16]string)
@@ -251,6 +324,13 @@ func ExtractText(content []byte, fonts map[Name]Dict, reader *Reader) []TextSpan
 		}
 		x, y := transformPos(tm[4], tm[5])
 		advanceTextMatrix(s)
+		// Suppress glyph output when ActualText is active — the EMC handler
+		// will emit the ActualText string instead.
+		for _, m := range markedStack {
+			if m.suppress {
+				return
+			}
+		}
 		endX, _ := transformPos(tm[4], tm[5])
 		spans = append(spans, TextSpan{
 			X:        x,
@@ -451,7 +531,83 @@ func ExtractText(content []byte, fonts map[Name]Dict, reader *Reader) []TextSpan
 			}
 
 		case "Do":
-			// Form XObject reference — skip for now (Phase 4).
+			if len(stack) >= 1 && resources != nil && reader != nil {
+				if xobjName, ok := stack[len(stack)-1].(Name); ok {
+					xobjDict, _ := reader.ResolveDict(resources["XObject"])
+					if xobjDict != nil {
+						xobjRef := xobjDict[xobjName]
+						resolved := reader.Resolve(xobjRef)
+						if stream, ok := resolved.(*Stream); ok {
+							subtype, _ := stream.Dict.Name("Subtype")
+							if subtype == "Form" {
+								// Get Form's resources (fall back to page resources).
+								formFonts := reader.fontsFromDict(stream.Dict)
+								if len(formFonts) == 0 {
+									formFonts = fonts
+								}
+								// Apply Form's Matrix if present.
+								formCTM := ctm
+								if mArr, ok := stream.Dict.Array("Matrix"); ok && len(mArr) == 6 {
+									fm := [6]float64{
+										asFloat(mArr[0]), asFloat(mArr[1]),
+										asFloat(mArr[2]), asFloat(mArr[3]),
+										asFloat(mArr[4]), asFloat(mArr[5]),
+									}
+									formCTM = matMul6(fm, ctm)
+								}
+								formResources, _ := reader.ResolveDict(stream.Dict["Resources"])
+								formSpans := extractTextWithResources(stream.Data, formFonts, reader, formResources, depth+1)
+								// Transform form spans through the form's CTM.
+								for i := range formSpans {
+									x := formCTM[0]*formSpans[i].X + formCTM[2]*formSpans[i].Y + formCTM[4]
+									y := formCTM[1]*formSpans[i].X + formCTM[3]*formSpans[i].Y + formCTM[5]
+									formSpans[i].X = x
+									formSpans[i].Y = y
+								}
+								spans = append(spans, formSpans...)
+							}
+						}
+					}
+				}
+			}
+
+		case "BMC":
+			// Begin marked content (no properties).
+			markedStack = append(markedStack, markedEntry{})
+
+		case "BDC":
+			// Begin marked content with properties dict.
+			entry := markedEntry{}
+			if len(stack) >= 2 {
+				if props, ok := stack[len(stack)-1].(Dict); ok {
+					if at, ok := props.String("ActualText"); ok {
+						entry.actualText = decodeActualText(at)
+						entry.hasActual = true
+						entry.suppress = true
+						entry.startX = tm[4]
+						entry.startY = tm[5]
+					}
+				}
+			}
+			markedStack = append(markedStack, entry)
+
+		case "EMC":
+			// End marked content.
+			if len(markedStack) > 0 {
+				top := markedStack[len(markedStack)-1]
+				markedStack = markedStack[:len(markedStack)-1]
+				if top.hasActual && top.actualText != "" {
+					x, y := transformPos(top.startX, top.startY)
+					spans = append(spans, TextSpan{
+						X:        x,
+						Y:        y,
+						EndX:     x, // approximate
+						FontSize: fontSize,
+						Font:     fontName,
+						Text:     top.actualText,
+					})
+				}
+			}
 
 		case "BI":
 			skipInlineImage(lex)
@@ -486,6 +642,29 @@ func parseInlineArray(lex *Lexer) Array {
 		}
 	}
 	return arr
+}
+
+// decodeActualText handles ActualText strings which may be UTF-16BE with BOM.
+func decodeActualText(s string) string {
+	raw := []byte(s)
+	if len(raw) >= 2 && raw[0] == 0xFE && raw[1] == 0xFF {
+		// UTF-16BE with BOM.
+		var runes []rune
+		for i := 2; i+1 < len(raw); i += 2 {
+			u := rune(raw[i])<<8 | rune(raw[i+1])
+			// Handle surrogate pairs.
+			if u >= 0xD800 && u <= 0xDBFF && i+3 < len(raw) {
+				lo := rune(raw[i+2])<<8 | rune(raw[i+3])
+				if lo >= 0xDC00 && lo <= 0xDFFF {
+					u = 0x10000 + (u-0xD800)*0x400 + (lo - 0xDC00)
+					i += 2
+				}
+			}
+			runes = append(runes, u)
+		}
+		return string(runes)
+	}
+	return s
 }
 
 func skipInlineDict(lex *Lexer) {

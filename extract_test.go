@@ -149,7 +149,8 @@ func extractFromFile(t *testing.T, path string) QuoteData {
 			continue
 		}
 		fonts := reader.PageFonts(page)
-		spans := pdf.ExtractText(content, fonts, reader)
+		resources := reader.PageResources(page)
+		spans := pdf.ExtractTextWithResources(content, fonts, reader, resources)
 		allSpans = append(allSpans, spans)
 	}
 

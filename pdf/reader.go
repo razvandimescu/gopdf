@@ -823,9 +823,25 @@ func (r *Reader) PageContent(page Dict) ([]byte, error) {
 
 // PageFonts returns the font dictionary for a page (from Resources).
 func (r *Reader) PageFonts(page Dict) map[Name]Dict {
-	fonts := make(map[Name]Dict)
+	return r.fontsFromDict(page)
+}
 
+// PageResources returns the resolved Resources dict for a page.
+func (r *Reader) PageResources(page Dict) Dict {
 	res, ok := page["Resources"]
+	if !ok {
+		return nil
+	}
+	resDict, ok := r.ResolveDict(res)
+	if !ok {
+		return nil
+	}
+	return resDict
+}
+
+func (r *Reader) fontsFromDict(d Dict) map[Name]Dict {
+	fonts := make(map[Name]Dict)
+	res, ok := d["Resources"]
 	if !ok {
 		return fonts
 	}

@@ -28,6 +28,8 @@ Pipeline: **Lexer** (bytes→tokens) → **Parser** (tokens→objects) → **Rea
 - `document.go` — Public API: `Document`/`Page` types wrapping the internals
 - `reader.go` — PDF structure: xref tables/streams, object resolution with caching, stream decompression (FlateDecode/LZW/ASCII85/ASCIIHex), filter chains, PNG predictors, compressed object streams (ObjStm), font/CMap/encoding helpers, resource inheritance
 - `text.go` — Content stream interpretation: all text operators (BT/ET/Tf/Tm/Td/TJ/Tj/T\*/'/"), graphics state stack (q/Q), CTM tracking (cm), Form XObject recursion (Do), MarkedContent/ActualText (BMC/BDC/EMC), CIDFont 2-byte handling, page rotation
+- `writer.go` — PDF serializer: object writing, FlateDecode compression, xref table generation
+- `merge.go` — PDF merge: deep object graph copy with Ref remapping, page tree construction, `MergeFiles`/`MergeBytes`/`Merger` API
 - `glyphlist.go` — Generated: 4200-entry Adobe Glyph List (glyph name→rune)
 - `stdfonts.go` — Width tables for standard 14 fonts (Courier, Helvetica, Times)
 

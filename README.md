@@ -1,8 +1,8 @@
 # gopdf
 
-Pure Go PDF text extraction library. Zero external dependencies, no CGo.
+Pure Go PDF text extraction and merging library. Zero external dependencies, no CGo.
 
-Built from scratch as an alternative to [MuPDF](https://mupdf.com/) bindings and [unipdf](https://github.com/unidoc/unipdf) (AGPL). Extracts text with accurate spatial positioning — useful for parsing tables, forms, and structured documents.
+Built from scratch as an alternative to [MuPDF](https://mupdf.com/) bindings and [unipdf](https://github.com/unidoc/unipdf) (AGPL). Extracts text with accurate spatial positioning — useful for parsing tables, forms, and structured documents. Merges multiple PDFs with page selection.
 
 ## Install
 
@@ -72,6 +72,25 @@ data, _ := os.ReadFile("document.pdf")
 doc, err := pdf.OpenBytes(data)
 ```
 
+### Merge PDFs
+
+```go
+combined, err := pdf.MergeFiles("a.pdf", "b.pdf", "c.pdf")
+if err != nil {
+    log.Fatal(err)
+}
+os.WriteFile("merged.pdf", combined, 0644)
+```
+
+### Merge with page selection
+
+```go
+m := pdf.NewMerger()
+m.AddFile("big.pdf", 0, 2, 5) // pages 0, 2, 5 only
+m.Add(otherPDFBytes)           // all pages
+result, err := m.Merge()
+```
+
 ## API
 
 ### Document
@@ -93,6 +112,17 @@ doc, err := pdf.OpenBytes(data)
 | `page.TextSpans()` | `[]TextSpan, error` | Raw positioned spans |
 | `page.Rotation()` | `int` | Rotation in degrees (0/90/180/270) |
 | `page.MediaBox()` | `[4]float64` | Page bounds [llx, lly, urx, ury] |
+
+### Merge
+
+| Method | Returns | Description |
+|---|---|---|
+| `pdf.MergeFiles(paths...)` | `[]byte, error` | Merge PDF files by path |
+| `pdf.MergeBytes(pdfs...)` | `[]byte, error` | Merge in-memory PDFs |
+| `pdf.NewMerger()` | `*Merger` | Create merger for page selection |
+| `m.AddFile(path, pages...)` | `error` | Add file (0-indexed pages; empty = all) |
+| `m.Add(data, pages...)` | `error` | Add bytes (0-indexed pages; empty = all) |
+| `m.Merge()` | `[]byte, error` | Produce combined PDF |
 
 ### Types
 
@@ -126,7 +156,7 @@ type TextLine struct {
 
 | Library | License | Text Extraction | Positional Data | Pure Go |
 |---|---|---|---|---|
-| **gopdf** | MIT | Yes | Yes (per-span X/Y) | Yes |
+| **gopdf** | MIT | Yes, + merge | Yes (per-span X/Y) | Yes |
 | unipdf | AGPL/Commercial | Yes | Yes (TextMark) | Yes |
 | ledongthuc/pdf | BSD-3 | Basic | Partial | Yes |
 | pdfcpu | Apache-2.0 | Raw streams only | No | Yes |
@@ -144,12 +174,15 @@ pdf/
   objects.go    Types: Dict, Array, Name, Ref, Stream; matrix math helpers
   glyphlist.go  Adobe Glyph List (generated, 4200 entries)
   stdfonts.go   Standard 14 font width tables
+  writer.go     PDF object serializer, xref generation, FlateDecode compression
+  merge.go      PDF merge: deep object copy with ref remapping, page tree construction
 ```
 
 ## Limitations
 
 - No encryption/password support yet
-- Text extraction only (no images)
+- No image extraction (text and merge only)
+- Merge drops interactive features (forms, bookmarks, JS)
 - TIFF predictor not implemented
 - DCTDecode/JPXDecode passed through (irrelevant for text)
 

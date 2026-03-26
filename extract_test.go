@@ -15,7 +15,7 @@ type expectedQuote struct {
 	QuoteName     string
 	QuotationRef  string
 	SupplierCodes []string
-	TableHeaders  []string // expected subset of headers
+	TableHeaders  []string
 }
 
 var testCases = []expectedQuote{
@@ -127,34 +127,11 @@ var testCases = []expectedQuote{
 
 func extractFromFile(t *testing.T, path string) QuoteData {
 	t.Helper()
-	data, err := os.ReadFile(path)
+	doc, err := pdf.OpenFile(path)
 	if err != nil {
-		t.Fatalf("reading %s: %v", path, err)
+		t.Fatalf("opening %s: %v", path, err)
 	}
-
-	reader, err := pdf.Open(data)
-	if err != nil {
-		t.Fatalf("parsing %s: %v", path, err)
-	}
-
-	pages, err := reader.Pages()
-	if err != nil {
-		t.Fatalf("getting pages from %s: %v", path, err)
-	}
-
-	var allSpans [][]pdf.TextSpan
-	for _, page := range pages {
-		content, err := reader.PageContent(page)
-		if err != nil {
-			continue
-		}
-		fonts := reader.PageFonts(page)
-		resources := reader.PageResources(page)
-		spans := pdf.ExtractTextWithResources(content, fonts, reader, resources)
-		allSpans = append(allSpans, spans)
-	}
-
-	return ExtractQuote(allSpans)
+	return ExtractQuote(doc)
 }
 
 func TestSupplierCodes(t *testing.T) {

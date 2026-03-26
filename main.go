@@ -13,38 +13,12 @@ func main() {
 		path = os.Args[1]
 	}
 
-	data, err := os.ReadFile(path)
+	doc, err := pdf.OpenFile(path)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error reading %s: %v\n", path, err)
+		fmt.Fprintf(os.Stderr, "error opening %s: %v\n", path, err)
 		os.Exit(1)
 	}
 
-	reader, err := pdf.Open(data)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error parsing PDF: %v\n", err)
-		os.Exit(1)
-	}
-
-	pages, err := reader.Pages()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error getting pages: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Extract positioned text spans from all pages.
-	var allSpans [][]pdf.TextSpan
-	for _, page := range pages {
-		content, err := reader.PageContent(page)
-		if err != nil {
-			continue
-		}
-		fonts := reader.PageFonts(page)
-		resources := reader.PageResources(page)
-		spans := pdf.ExtractTextWithResources(content, fonts, reader, resources)
-		allSpans = append(allSpans, spans)
-	}
-
-	// Structured extraction.
-	quote := ExtractQuote(allSpans)
+	quote := ExtractQuote(doc)
 	fmt.Print(quote)
 }

@@ -135,3 +135,21 @@ func asString(v any) string {
 	}
 	return fmt.Sprintf("%v", v)
 }
+
+// matMul6 multiplies two 6-element affine matrices [a b c d e f].
+// Represents: [a b 0; c d 0; e f 1] (PDF row-major convention).
+func matMul6(a, b [6]float64) [6]float64 {
+	return [6]float64{
+		a[0]*b[0] + a[1]*b[2],
+		a[0]*b[1] + a[1]*b[3],
+		a[2]*b[0] + a[3]*b[2],
+		a[2]*b[1] + a[3]*b[3],
+		a[4]*b[0] + a[5]*b[2] + b[4],
+		a[4]*b[1] + a[5]*b[3] + b[5],
+	}
+}
+
+// translateMatrix returns a translation matrix for (tx, ty).
+func translateMatrix(tx, ty float64) [6]float64 {
+	return [6]float64{1, 0, 0, 1, tx, ty}
+}

@@ -9,6 +9,7 @@ import (
 // TextSpan is a piece of text with its position on the page.
 type TextSpan struct {
 	X, Y     float64
+	EndX     float64 // X position after this span (for accurate gap detection)
 	FontSize float64
 	Font     string
 	Text     string
@@ -156,7 +157,8 @@ func ExtractText(content []byte, fonts map[Name]Dict, reader *Reader) []TextSpan
 				totalWidth += tw * hScale
 			}
 		}
-		tm[4] += totalWidth
+		tm[4] += totalWidth * tm[0]
+		tm[5] += totalWidth * tm[1]
 	}
 
 	showString := func(s string) {
@@ -166,14 +168,15 @@ func ExtractText(content []byte, fonts map[Name]Dict, reader *Reader) []TextSpan
 		}
 		x := tm[4]
 		y := tm[5]
+		advanceTextMatrix(s)
 		spans = append(spans, TextSpan{
 			X:        x,
 			Y:        y,
+			EndX:     tm[4],
 			FontSize: fontSize,
 			Font:     fontName,
 			Text:     decoded,
 		})
-		advanceTextMatrix(s)
 	}
 
 	for {
@@ -218,8 +221,6 @@ func ExtractText(content []byte, fonts map[Name]Dict, reader *Reader) []TextSpan
 		case "BT":
 			tm = identity
 			lm = identity
-			tc = 0
-			tw = 0
 
 		case "ET":
 			// End text object.
@@ -254,35 +255,26 @@ func ExtractText(content []byte, fonts map[Name]Dict, reader *Reader) []TextSpan
 			}
 
 		case "Td":
-			// tx ty Td — move to next line.
+			// tx ty Td — move to next line (PDF spec 9.4.2).
 			if len(stack) >= 2 {
 				tx := asFloat(stack[len(stack)-2])
 				ty := asFloat(stack[len(stack)-1])
-				lm[4] += tx * lm[0]
-				lm[5] += ty * lm[3]
-				if tx != 0 {
-					lm[4] = lm[4] + tx - tx*lm[0] + tx
-					lm[4] = roundTo(lm[4], 6)
-				}
-				// Simpler approach: just add offsets.
-				lm[4] = tm[4] + tx
-				lm[5] = tm[5] + ty
+				lm = matMul6(translateMatrix(tx, ty), lm)
 				tm = lm
 			}
 
 		case "TD":
-			// tx ty TD — same as -ty TL; tx ty Td
+			// tx ty TD — same as: -ty TL; tx ty Td
 			if len(stack) >= 2 {
 				tx := asFloat(stack[len(stack)-2])
 				ty := asFloat(stack[len(stack)-1])
 				tl = -ty
-				lm[4] = tm[4] + tx
-				lm[5] = tm[5] + ty
+				lm = matMul6(translateMatrix(tx, ty), lm)
 				tm = lm
 			}
 
 		case "Tm":
-			// a b c d e f Tm — set text matrix.
+			// a b c d e f Tm — set text matrix directly.
 			if len(stack) >= 6 {
 				n := len(stack)
 				tm = [6]float64{
@@ -291,18 +283,14 @@ func ExtractText(content []byte, fonts map[Name]Dict, reader *Reader) []TextSpan
 					asFloat(stack[n-2]), asFloat(stack[n-1]),
 				}
 				lm = tm
-				// Update effective font size from matrix.
-				// fontSize already set by Tf.
 			}
 
 		case "T*":
-			// Move to start of next line (using TL).
-			lm[4] = lm[4]
-			lm[5] = lm[5] - tl
+			// Move to start of next line — equivalent to 0 -tl Td.
+			lm = matMul6(translateMatrix(0, -tl), lm)
 			tm = lm
 
 		case "Tj":
-			// Show string.
 			if len(stack) >= 1 {
 				if s, ok := stack[len(stack)-1].(string); ok {
 					showString(s)
@@ -311,7 +299,7 @@ func ExtractText(content []byte, fonts map[Name]Dict, reader *Reader) []TextSpan
 
 		case "'":
 			// T* then Tj.
-			lm[5] = lm[5] - tl
+			lm = matMul6(translateMatrix(0, -tl), lm)
 			tm = lm
 			if len(stack) >= 1 {
 				if s, ok := stack[len(stack)-1].(string); ok {
@@ -324,7 +312,7 @@ func ExtractText(content []byte, fonts map[Name]Dict, reader *Reader) []TextSpan
 			if len(stack) >= 3 {
 				tw = asFloat(stack[len(stack)-3])
 				tc = asFloat(stack[len(stack)-2])
-				lm[5] = lm[5] - tl
+				lm = matMul6(translateMatrix(0, -tl), lm)
 				tm = lm
 				if s, ok := stack[len(stack)-1].(string); ok {
 					showString(s)
@@ -409,15 +397,30 @@ func skipInlineDict(lex *Lexer) {
 }
 
 func skipInlineImage(lex *Lexer) {
-	// Skip until "EI" keyword preceded by whitespace.
+	// Parse the inline image dict until ID keyword.
 	for {
 		tok, err := lex.NextToken()
 		if err != nil || tok.Type == TEOF {
 			return
 		}
-		if tok.Type == TKeyword && tok.Str == "EI" {
-			return
+		if tok.Type == TKeyword && tok.Str == "ID" {
+			break
 		}
+	}
+	// Skip single whitespace byte after ID.
+	if !lex.AtEnd() {
+		lex.read()
+	}
+	// Scan raw bytes for whitespace + "EI" + (whitespace or delimiter or EOF).
+	for lex.pos < len(lex.data)-2 {
+		if isWhitespace(lex.data[lex.pos]) &&
+			lex.data[lex.pos+1] == 'E' && lex.data[lex.pos+2] == 'I' {
+			if lex.pos+3 >= len(lex.data) || isWhitespace(lex.data[lex.pos+3]) || isDelimiter(lex.data[lex.pos+3]) {
+				lex.pos += 3
+				return
+			}
+		}
+		lex.pos++
 	}
 }
 
@@ -475,7 +478,11 @@ func BuildLines(spans []TextSpan) []TextLine {
 			}
 			buf.WriteString(span.Text)
 			// Estimate where this span ends.
-			prevEnd = span.X + float64(len(span.Text))*span.FontSize*0.5
+			if span.EndX > span.X {
+				prevEnd = span.EndX
+			} else {
+				prevEnd = span.X + float64(len([]rune(span.Text)))*span.FontSize*0.5
+			}
 		}
 		lines[i].Text = buf.String()
 	}
@@ -483,10 +490,7 @@ func BuildLines(spans []TextSpan) []TextLine {
 	return lines
 }
 
-func roundTo(v float64, decimals int) float64 {
-	p := math.Pow(10, float64(decimals))
-	return math.Round(v*p) / p
-}
+
 
 // glyphToString converts a PostScript glyph name to its Unicode string.
 func glyphToString(name string) string {
@@ -525,25 +529,7 @@ func parseHexRune(s string) (rune, error) {
 	return v, nil
 }
 
-// Common PostScript glyph name → Unicode mapping.
-var glyphMap = map[string]rune{
-	"space": ' ', "exclam": '!', "quotedbl": '"', "numbersign": '#',
-	"dollar": '$', "percent": '%', "ampersand": '&', "quotesingle": '\'',
-	"parenleft": '(', "parenright": ')', "asterisk": '*', "plus": '+',
-	"comma": ',', "hyphen": '-', "period": '.', "slash": '/',
-	"zero": '0', "one": '1', "two": '2', "three": '3', "four": '4',
-	"five": '5', "six": '6', "seven": '7', "eight": '8', "nine": '9',
-	"colon": ':', "semicolon": ';', "less": '<', "equal": '=',
-	"greater": '>', "question": '?', "at": '@',
-	"bracketleft": '[', "backslash": '\\', "bracketright": ']',
-	"asciicircum": '^', "underscore": '_', "grave": '`',
-	"braceleft": '{', "bar": '|', "braceright": '}', "asciitilde": '~',
-	"bullet": '\u2022', "endash": '\u2013', "emdash": '\u2014',
-	"ellipsis": '\u2026', "quotedblleft": '\u201C', "quotedblright": '\u201D',
-	"quoteleft": '\u2018', "quoteright": '\u2019',
-	"fi": '\uFB01', "fl": '\uFB02',
-	"sterling": '\u00A3', "Euro": '\u20AC',
-}
+// glyphMap is defined in glyphlist.go (generated from Adobe Glyph List).
 
 // winansiDecode converts a WinAnsiEncoding string to UTF-8.
 func winansiDecode(s string) string {

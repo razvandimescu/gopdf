@@ -1,2 +1,4 @@
 gopdf
 *.pdf
+example_out/
+.DS_Store

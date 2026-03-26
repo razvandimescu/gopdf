@@ -20,7 +20,7 @@ type expectedQuote struct {
 
 var testCases = []expectedQuote{
 	{
-		File:         "example_out/Northgate Academy.pdf",
+		File:         "../../example_out/Northgate Academy.pdf",
 		Company:      "Nova Facilities",
 		QuoteName:    "Northgate Academy",
 		QuotationRef: "QT10001",
@@ -31,7 +31,7 @@ var testCases = []expectedQuote{
 		TableHeaders: []string{"Quantity", "Product Code", "Suppliers Code", "Product Description", "Unit Price", "Total Price"},
 	},
 	{
-		File:         "example_out/10 Market St.pdf",
+		File:         "../../example_out/10 Market St.pdf",
 		Company:      "Apex Build LTD/ Apex Group",
 		QuoteName:    "10 Market St",
 		QuotationRef: "QT10002",
@@ -43,7 +43,7 @@ var testCases = []expectedQuote{
 		TableHeaders: []string{"Quantity", "Product Code", "Suppliers Code", "Product Description"},
 	},
 	{
-		File:         "example_out/Oakwood House_1.pdf",
+		File:         "../../example_out/Oakwood House_1.pdf",
 		Company:      "Summit Building Services Ltd",
 		QuoteName:    "Oakwood House",
 		QuotationRef: "QT10003/2",
@@ -57,7 +57,7 @@ var testCases = []expectedQuote{
 		TableHeaders: []string{"Quantity", "Product Code", "Suppliers Code", "Product Description"},
 	},
 	{
-		File:         "example_out/Oakwood House_2.pdf",
+		File:         "../../example_out/Oakwood House_2.pdf",
 		Company:      "Summit Building Services Ltd",
 		QuoteName:    "Oakwood House",
 		QuotationRef: "QT10004",
@@ -67,7 +67,7 @@ var testCases = []expectedQuote{
 		TableHeaders: []string{"Quantity", "Product Code", "Suppliers Code", "Product Description", "List Price", "Cost Price", "Selling Price", "Total Selling Price"},
 	},
 	{
-		File:         "example_out/P2 Wing 2 Showers.pdf",
+		File:         "../../example_out/P2 Wing 2 Showers.pdf",
 		Company:      "Delta Engineering",
 		QuoteName:    "P2 Wing 2 Showers",
 		QuotationRef: "QT10005",
@@ -76,7 +76,7 @@ var testCases = []expectedQuote{
 		},
 	},
 	{
-		File:         "example_out/M2001 WHB_.pdf",
+		File:         "../../example_out/M2001 WHB_.pdf",
 		Company:      "Delta Engineering",
 		QuoteName:    "M2001 WHB",
 		QuotationRef: "QT10006",
@@ -85,7 +85,7 @@ var testCases = []expectedQuote{
 		},
 	},
 	{
-		File:         "example_out/DEPOT A- X6454AB.pdf",
+		File:         "../../example_out/DEPOT A- X6454AB.pdf",
 		Company:      "Delta Engineering",
 		QuoteName:    "DEPOT A- X6454AB",
 		QuotationRef: "QT10007",
@@ -94,7 +94,7 @@ var testCases = []expectedQuote{
 		},
 	},
 	{
-		File:         "example_out/DEPOT A SHOWER TRAY.pdf",
+		File:         "../../example_out/DEPOT A SHOWER TRAY.pdf",
 		Company:      "Delta Engineering",
 		QuoteName:    "DEPOT A SHOWER TRAY",
 		QuotationRef: "QT10008",
@@ -103,7 +103,7 @@ var testCases = []expectedQuote{
 		},
 	},
 	{
-		File:         "example_out/Depot B Southend 20001_NL1.pdf",
+		File:         "../../example_out/Depot B Southend 20001_NL1.pdf",
 		Company:      "Delta Engineering",
 		QuoteName:    "Depot B Southend 20001/NL1",
 		QuotationRef: "QT10009",
@@ -112,7 +112,7 @@ var testCases = []expectedQuote{
 		},
 	},
 	{
-		File:         "example_out/Riverside Shower Block Park Lane Leeds LS1 2AB.pdf",
+		File:         "../../example_out/Riverside Shower Block Park Lane Leeds LS1 2AB.pdf",
 		Company:      "Greenfield Mechanical Services Limited",
 		QuoteName:    "Riverside Shower Block, Park Lane, Leeds, LS1 2AB",
 		QuotationRef: "QT10010/2",

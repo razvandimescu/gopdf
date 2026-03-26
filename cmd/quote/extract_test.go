@@ -20,7 +20,7 @@ type expectedQuote struct {
 
 var testCases = []expectedQuote{
 	{
-		File:         "example_out/King David Sixth Form.pdf",
+		File:         "../../example_out/King David Sixth Form.pdf",
 		Company:      "Optimus Facilities",
 		QuoteName:    "King David Sixth Form",
 		QuotationRef: "MG74703",
@@ -31,7 +31,7 @@ var testCases = []expectedQuote{
 		TableHeaders: []string{"Quantity", "Product Code", "Suppliers Code", "Product Description", "Unit Price", "Total Price"},
 	},
 	{
-		File:         "example_out/43 Whitfield St.pdf",
+		File:         "../../example_out/43 Whitfield St.pdf",
 		Company:      "Sale Nugen LTD/ Sale Group",
 		QuoteName:    "43 Whitfield St",
 		QuotationRef: "RE75371",
@@ -43,7 +43,7 @@ var testCases = []expectedQuote{
 		TableHeaders: []string{"Quantity", "Product Code", "Suppliers Code", "Product Description"},
 	},
 	{
-		File:         "example_out/Lynton House_1.pdf",
+		File:         "../../example_out/Lynton House_1.pdf",
 		Company:      "Pip Building Services Ltd",
 		QuoteName:    "Lynton House",
 		QuotationRef: "SR73905/2",
@@ -57,7 +57,7 @@ var testCases = []expectedQuote{
 		TableHeaders: []string{"Quantity", "Product Code", "Suppliers Code", "Product Description"},
 	},
 	{
-		File:         "example_out/Lynton House_2.pdf",
+		File:         "../../example_out/Lynton House_2.pdf",
 		Company:      "Pip Building Services Ltd",
 		QuoteName:    "Lynton House",
 		QuotationRef: "SR77665",
@@ -67,7 +67,7 @@ var testCases = []expectedQuote{
 		TableHeaders: []string{"Quantity", "Product Code", "Suppliers Code", "Product Description", "List Price", "Cost Price", "Selling Price", "Total Selling Price"},
 	},
 	{
-		File:         "example_out/P2 Block 2 Showers.pdf",
+		File:         "../../example_out/P2 Block 2 Showers.pdf",
 		Company:      "MPE Engineering",
 		QuoteName:    "P2 Block 2 Showers",
 		QuotationRef: "RE74491",
@@ -76,7 +76,7 @@ var testCases = []expectedQuote{
 		},
 	},
 	{
-		File:         "example_out/M1951 WHB_.pdf",
+		File:         "../../example_out/M1951 WHB_.pdf",
 		Company:      "MPE Engineering",
 		QuoteName:    "M1951 WHB",
 		QuotationRef: "DK75237",
@@ -85,7 +85,7 @@ var testCases = []expectedQuote{
 		},
 	},
 	{
-		File:         "example_out/AMAZON LTN4- S6454MY.pdf",
+		File:         "../../example_out/AMAZON LTN4- S6454MY.pdf",
 		Company:      "MPE Engineering",
 		QuoteName:    "AMAZON LTN4- S6454MY",
 		QuotationRef: "DK74700",
@@ -94,7 +94,7 @@ var testCases = []expectedQuote{
 		},
 	},
 	{
-		File:         "example_out/AMAZON LTN4 SHOWER TRAY.pdf",
+		File:         "../../example_out/AMAZON LTN4 SHOWER TRAY.pdf",
 		Company:      "MPE Engineering",
 		QuoteName:    "AMAZON LTN4 SHOWER TRAY",
 		QuotationRef: "DK75234",
@@ -103,7 +103,7 @@ var testCases = []expectedQuote{
 		},
 	},
 	{
-		File:         "example_out/Amazon LCY2 Tilbury 11569_NL1.pdf",
+		File:         "../../example_out/Amazon LCY2 Tilbury 11569_NL1.pdf",
 		Company:      "MPE Engineering",
 		QuoteName:    "Amazon LCY2 Tilbury 11569/NL1",
 		QuotationRef: "DK73996",
@@ -112,7 +112,7 @@ var testCases = []expectedQuote{
 		},
 	},
 	{
-		File:         "example_out/Joseph Wright Shower Block Cathedral Road Derby DE1 3PA.pdf",
+		File:         "../../example_out/Joseph Wright Shower Block Cathedral Road Derby DE1 3PA.pdf",
 		Company:      "Adkin Mechanical Services Limited",
 		QuoteName:    "Joseph Wright Shower Block, Cathedral Road, Derby, DE1 3PA",
 		QuotationRef: "RG73850/2",

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"gopdf/pdf"
+	"github.com/razvandimescu/gopdf/pdf"
 )
 
 type expectedQuote struct {

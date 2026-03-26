@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"gopdf/pdf"
+	"github.com/razvandimescu/gopdf/pdf"
 )
 
 func main() {

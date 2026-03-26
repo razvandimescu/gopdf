@@ -1,4 +1,4 @@
-module gopdf
+module github.com/razvandimescu/gopdf
 
 go 1.26.1
 

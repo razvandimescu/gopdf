@@ -7,7 +7,7 @@ Built from scratch as an alternative to [MuPDF](https://mupdf.com/) bindings and
 ## Install
 
 ```bash
-go get github.com/anthropics/gopdf/pdf
+go get github.com/razvandimescu/gopdf/pdf
 ```
 
 ## Quick Start
@@ -19,7 +19,7 @@ import (
     "fmt"
     "log"
 
-    "github.com/anthropics/gopdf/pdf"
+    "github.com/razvandimescu/gopdf/pdf"
 )
 
 func main() {

@@ -26,6 +26,20 @@ func stdFontWidths(baseName string) map[int]float64 {
 	}
 }
 
+// HelveticaTextWidth returns the width of a string rendered in Helvetica
+// at the given font size (in PDF points).
+func HelveticaTextWidth(text string, fontSize float64) float64 {
+	var total float64
+	for _, r := range text {
+		w, ok := helveticaWidths[int(r)]
+		if !ok {
+			w = 556 // average width fallback
+		}
+		total += w
+	}
+	return total / 1000.0 * fontSize
+}
+
 func courierWidths() map[int]float64 {
 	m := make(map[int]float64, 256)
 	for i := 0; i < 256; i++ {

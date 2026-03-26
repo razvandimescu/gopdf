@@ -40,12 +40,13 @@ type LineItem struct {
 	Category     string // WC, BASIN, SINK, etc.
 }
 
-// ExtractQuote extracts structured quotation data from page spans.
-func ExtractQuote(allPageSpans [][]pdf.TextSpan) QuoteData {
+// ExtractQuote extracts structured quotation data from a PDF document.
+func ExtractQuote(doc *pdf.Document) QuoteData {
 	var q QuoteData
 
-	for _, spans := range allPageSpans {
-		lines := pdf.BuildLines(spans)
+	// Extract text from all pages.
+	for i := 0; i < doc.NumPages(); i++ {
+		lines, _ := doc.Page(i).TextLines()
 		extractHeaderFields(lines, &q)
 	}
 
@@ -53,7 +54,8 @@ func ExtractQuote(allPageSpans [][]pdf.TextSpan) QuoteData {
 	// Tables can span multiple pages — detect columns on each page that has a header row.
 	// Continuation pages may repeat the header or just continue with data rows.
 	var cols *tableColumns
-	for _, spans := range allPageSpans {
+	for i := 0; i < doc.NumPages(); i++ {
+		spans, _ := doc.Page(i).TextSpans()
 		pageCols := findTableColumns(spans)
 		if pageCols != nil {
 			cols = pageCols

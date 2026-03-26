@@ -2,7 +2,9 @@ package pdf
 
 import (
 	"bytes"
+	"compress/lzw"
 	"compress/zlib"
+	"encoding/ascii85"
 	"fmt"
 	"io"
 	"strconv"
@@ -329,24 +331,92 @@ func (r *Reader) readStreamData(lex *Lexer, d Dict) ([]byte, error) {
 
 	raw := r.data[dataStart : dataStart+length]
 
-	// Decompress if needed.
-	filter, _ := d.Name("Filter")
-	if filter == "" {
-		if fa, ok := d.Array("Filter"); ok && len(fa) > 0 {
-			filter, _ = fa[0].(Name)
+	// Build filter chain.
+	var filters []Name
+	if f, ok := d.Name("Filter"); ok {
+		filters = []Name{f}
+	} else if fa, ok := d.Array("Filter"); ok {
+		for _, item := range fa {
+			if n, ok := item.(Name); ok {
+				filters = append(filters, n)
+			}
 		}
 	}
 
-	if filter == "FlateDecode" {
-		decoded, err := decompress(raw)
+	// Build matching DecodeParms chain.
+	var parmsList []Dict
+	if dp, ok := d.Dict("DecodeParms"); ok {
+		parmsList = []Dict{dp}
+	} else if dpa, ok := d.Array("DecodeParms"); ok {
+		for _, item := range dpa {
+			if dd, ok := item.(Dict); ok {
+				parmsList = append(parmsList, dd)
+			} else {
+				parmsList = append(parmsList, nil)
+			}
+		}
+	}
+
+	// Apply filters in order.
+	data := raw
+	for i, f := range filters {
+		var parms Dict
+		if i < len(parmsList) {
+			parms = parmsList[i]
+		}
+		var err error
+		data, err = applyFilter(data, f, parms)
+		if err != nil {
+			return nil, fmt.Errorf("filter %s: %w", f, err)
+		}
+	}
+	return data, nil
+}
+
+func applyFilter(data []byte, filter Name, parms Dict) ([]byte, error) {
+	switch filter {
+	case "FlateDecode":
+		decoded, err := decompress(data)
 		if err != nil {
 			return nil, err
 		}
-		// Apply predictor if specified.
-		return applyPredictor(decoded, d)
-	}
+		if parms != nil {
+			return applyPredictorWithParms(decoded, parms)
+		}
+		return decoded, nil
 
-	return raw, nil
+	case "LZWDecode":
+		r := lzw.NewReader(bytes.NewReader(data), lzw.MSB, 8)
+		decoded, err := io.ReadAll(r)
+		r.Close()
+		if err != nil {
+			return nil, fmt.Errorf("lzw: %w", err)
+		}
+		if parms != nil {
+			return applyPredictorWithParms(decoded, parms)
+		}
+		return decoded, nil
+
+	case "ASCII85Decode":
+		// Strip ~> end marker if present.
+		s := data
+		if idx := bytes.Index(s, []byte("~>")); idx >= 0 {
+			s = s[:idx]
+		}
+		dst := make([]byte, 4*len(s))
+		n, _, err := ascii85.Decode(dst, s, true)
+		if err != nil {
+			return nil, fmt.Errorf("ascii85: %w", err)
+		}
+		return dst[:n], nil
+
+	case "ASCIIHexDecode":
+		return decodeASCIIHex(data)
+
+	default:
+		// Unknown filter — return as-is (e.g. DCTDecode for images).
+		return data, nil
+	}
 }
 
 func decompress(data []byte) ([]byte, error) {
@@ -358,20 +428,7 @@ func decompress(data []byte) ([]byte, error) {
 	return io.ReadAll(zr)
 }
 
-func applyPredictor(data []byte, d Dict) ([]byte, error) {
-	dp, ok := d.Dict("DecodeParms")
-	if !ok {
-		// Try array of DecodeParms.
-		if dpa, ok := d.Array("DecodeParms"); ok && len(dpa) > 0 {
-			if dd, ok := dpa[0].(Dict); ok {
-				dp = dd
-			}
-		}
-		if dp == nil {
-			return data, nil
-		}
-	}
-
+func applyPredictorWithParms(data []byte, dp Dict) ([]byte, error) {
 	predictor, _ := dp.Int("Predictor")
 	if predictor <= 1 {
 		return data, nil
@@ -386,8 +443,44 @@ func applyPredictor(data []byte, d Dict) ([]byte, error) {
 		return pngUnpredict(data, columns)
 	}
 
-	// TIFF predictor 2.
+	// TIFF predictor 2 — not yet implemented.
 	return data, nil
+}
+
+func decodeASCIIHex(data []byte) ([]byte, error) {
+	var buf []byte
+	var hi byte
+	haveHi := false
+	for _, b := range data {
+		if b == '>' {
+			break
+		}
+		if isWhitespace(b) {
+			continue
+		}
+		var nib byte
+		switch {
+		case b >= '0' && b <= '9':
+			nib = b - '0'
+		case b >= 'a' && b <= 'f':
+			nib = b - 'a' + 10
+		case b >= 'A' && b <= 'F':
+			nib = b - 'A' + 10
+		default:
+			continue
+		}
+		if !haveHi {
+			hi = nib
+			haveHi = true
+		} else {
+			buf = append(buf, hi<<4|nib)
+			haveHi = false
+		}
+	}
+	if haveHi {
+		buf = append(buf, hi<<4)
+	}
+	return buf, nil
 }
 
 // pngUnpredict reverses PNG row filters.
@@ -651,15 +744,30 @@ func (r *Reader) Pages() ([]Dict, error) {
 		return nil, fmt.Errorf("no Pages in catalog")
 	}
 	var pages []Dict
-	r.collectPages(pagesRef, &pages)
+	r.collectPages(pagesRef, &pages, make(Dict))
 	return pages, nil
 }
 
-func (r *Reader) collectPages(obj any, pages *[]Dict) {
+// inheritableKeys are page attributes inherited from ancestor Pages nodes (PDF spec 7.7.3.4).
+var inheritableKeys = []Name{"Resources", "MediaBox", "CropBox", "Rotate"}
+
+func (r *Reader) collectPages(obj any, pages *[]Dict, inherited Dict) {
 	d, ok := r.ResolveDict(obj)
 	if !ok {
 		return
 	}
+
+	// Build merged inheritable attributes: child overrides parent.
+	merged := make(Dict)
+	for k, v := range inherited {
+		merged[k] = v
+	}
+	for _, key := range inheritableKeys {
+		if v, ok := d[key]; ok {
+			merged[key] = v
+		}
+	}
+
 	typ, _ := d.Name("Type")
 	switch typ {
 	case "Pages":
@@ -672,9 +780,17 @@ func (r *Reader) collectPages(obj any, pages *[]Dict) {
 			return
 		}
 		for _, kid := range arr {
-			r.collectPages(kid, pages)
+			r.collectPages(kid, pages, merged)
 		}
 	case "Page":
+		// Apply inherited attributes the page doesn't define itself.
+		for _, key := range inheritableKeys {
+			if _, ok := d[key]; !ok {
+				if v, ok := merged[key]; ok {
+					d[key] = v
+				}
+			}
+		}
 		*pages = append(*pages, d)
 	}
 }
@@ -801,16 +917,67 @@ func parseBfEntries(section string, m map[uint16]string) {
 }
 
 func parseBfRange(section string, m map[uint16]string) {
-	tokens := extractHexTokens(section)
-	for i := 0; i+2 < len(tokens); i += 3 {
-		srcLo := hexToUint16(tokens[i])
-		srcHi := hexToUint16(tokens[i+1])
-		dstStart := hexToUint16(tokens[i+2])
-		for code := srcLo; code <= srcHi; code++ {
-			uni := dstStart + (code - srcLo)
-			m[code] = string(rune(uni))
+	// Handles two forms:
+	//   <srcLo> <srcHi> <dstStart>          — contiguous range
+	//   <srcLo> <srcHi> [<d1> <d2> ...]     — array of individual mappings
+	s := strings.TrimSpace(section)
+	for len(s) > 0 {
+		// Read srcLo.
+		srcLoHex, rest := nextHexToken(s)
+		if srcLoHex == "" {
+			break
+		}
+		s = rest
+		// Read srcHi.
+		srcHiHex, rest := nextHexToken(s)
+		if srcHiHex == "" {
+			break
+		}
+		s = rest
+		srcLo := hexToUint16(srcLoHex)
+		srcHi := hexToUint16(srcHiHex)
+
+		s = strings.TrimSpace(s)
+		if len(s) > 0 && s[0] == '[' {
+			// Array form: [<d1> <d2> ...]
+			endBracket := strings.IndexByte(s, ']')
+			if endBracket < 0 {
+				break
+			}
+			arrContent := s[1:endBracket]
+			s = strings.TrimSpace(s[endBracket+1:])
+			dstTokens := extractHexTokens(arrContent)
+			for i, code := 0, srcLo; code <= srcHi && i < len(dstTokens); i, code = i+1, code+1 {
+				m[code] = hexToUnicode(dstTokens[i])
+			}
+		} else {
+			// Contiguous form: <dstStart>
+			dstHex, rest := nextHexToken(s)
+			if dstHex == "" {
+				break
+			}
+			s = rest
+			dstStart := hexToUint16(dstHex)
+			for code := srcLo; code <= srcHi; code++ {
+				uni := dstStart + (code - srcLo)
+				m[code] = string(rune(uni))
+			}
 		}
 	}
+}
+
+// nextHexToken extracts the next <hex> token from s, returning (hex content, rest of string).
+func nextHexToken(s string) (string, string) {
+	s = strings.TrimSpace(s)
+	start := strings.IndexByte(s, '<')
+	if start < 0 {
+		return "", ""
+	}
+	end := strings.IndexByte(s[start+1:], '>')
+	if end < 0 {
+		return "", ""
+	}
+	return s[start+1 : start+1+end], s[start+1+end+1:]
 }
 
 func extractHexTokens(s string) []string {
@@ -839,30 +1006,57 @@ func hexToUnicode(hex string) string {
 	if len(hex) <= 4 {
 		return string(rune(hexToUint16(hex)))
 	}
-	// Multi-byte: pairs of uint16 (UTF-16).
+	// Multi-byte: pairs of uint16 as UTF-16 (may contain surrogate pairs).
 	var runes []rune
 	for i := 0; i+3 < len(hex); i += 4 {
-		runes = append(runes, rune(hexToUint16(hex[i:i+4])))
+		u := rune(hexToUint16(hex[i : i+4]))
+		// Check for UTF-16 surrogate pair.
+		if u >= 0xD800 && u <= 0xDBFF && i+7 < len(hex) {
+			lo := rune(hexToUint16(hex[i+4 : i+8]))
+			if lo >= 0xDC00 && lo <= 0xDFFF {
+				u = 0x10000 + (u-0xD800)*0x400 + (lo - 0xDC00)
+				i += 4 // skip the low surrogate
+			}
+		}
+		runes = append(runes, u)
 	}
 	return string(runes)
 }
 
-// FontEncoding returns the encoding differences array for a font.
+// FontEncoding returns the byte→glyph-name mapping for a font.
+// Handles /Encoding as a Name or as a Dict with /BaseEncoding + /Differences.
 func (r *Reader) FontEncoding(font Dict) map[byte]string {
 	encObj, ok := font["Encoding"]
 	if !ok {
 		return nil
 	}
-	encDict, ok := r.ResolveDict(encObj)
-	if !ok {
-		return nil
+
+	// Case 1: /Encoding is a Name (e.g. /WinAnsiEncoding).
+	resolved := r.Resolve(encObj)
+	if encName, ok := resolved.(Name); ok {
+		return predefinedEncoding(string(encName))
 	}
-	diffArr, ok := encDict.Array("Differences")
+
+	// Case 2: /Encoding is a Dict with optional /BaseEncoding and /Differences.
+	encDict, ok := resolved.(Dict)
 	if !ok {
 		return nil
 	}
 
-	diffs := make(map[byte]string)
+	// Start from base encoding if specified.
+	var diffs map[byte]string
+	if baseName, ok := encDict.Name("BaseEncoding"); ok {
+		diffs = predefinedEncoding(string(baseName))
+	}
+	if diffs == nil {
+		diffs = make(map[byte]string)
+	}
+
+	// Apply /Differences overlay.
+	diffArr, ok := encDict.Array("Differences")
+	if !ok {
+		return diffs
+	}
 	var code byte
 	for _, item := range diffArr {
 		switch v := item.(type) {
@@ -876,4 +1070,72 @@ func (r *Reader) FontEncoding(font Dict) map[byte]string {
 		}
 	}
 	return diffs
+}
+
+// predefinedEncoding returns the byte→glyph-name map for a named encoding.
+func predefinedEncoding(name string) map[byte]string {
+	switch name {
+	case "WinAnsiEncoding":
+		return copyMap(winansiGlyphNames)
+	case "MacRomanEncoding":
+		return copyMap(macRomanGlyphNames)
+	default:
+		return nil
+	}
+}
+
+func copyMap(m map[byte]string) map[byte]string {
+	c := make(map[byte]string, len(m))
+	for k, v := range m {
+		c[k] = v
+	}
+	return c
+}
+
+// winansiGlyphNames maps WinAnsiEncoding byte values (0x80-0x9F) to glyph names.
+var winansiGlyphNames = map[byte]string{
+	0x80: "Euro", 0x82: "quotesinglbase", 0x83: "florin", 0x84: "quotedblbase",
+	0x85: "ellipsis", 0x86: "dagger", 0x87: "daggerdbl", 0x88: "circumflex",
+	0x89: "perthousand", 0x8A: "Scaron", 0x8B: "guilsinglleft", 0x8C: "OE",
+	0x8E: "Zcaron", 0x91: "quoteleft", 0x92: "quoteright", 0x93: "quotedblleft",
+	0x94: "quotedblright", 0x95: "bullet", 0x96: "endash", 0x97: "emdash",
+	0x98: "tilde", 0x99: "trademark", 0x9A: "scaron", 0x9B: "guilsinglright",
+	0x9C: "oe", 0x9E: "zcaron", 0x9F: "Ydieresis",
+}
+
+// macRomanGlyphNames maps MacRomanEncoding byte values (0x80-0xFF) to glyph names.
+var macRomanGlyphNames = map[byte]string{
+	0x80: "Adieresis", 0x81: "Aring", 0x82: "Ccedilla", 0x83: "Eacute",
+	0x84: "Ntilde", 0x85: "Odieresis", 0x86: "Udieresis", 0x87: "aacute",
+	0x88: "agrave", 0x89: "acircumflex", 0x8A: "adieresis", 0x8B: "atilde",
+	0x8C: "aring", 0x8D: "ccedilla", 0x8E: "eacute", 0x8F: "egrave",
+	0x90: "ecircumflex", 0x91: "edieresis", 0x92: "iacute", 0x93: "igrave",
+	0x94: "icircumflex", 0x95: "idieresis", 0x96: "ntilde", 0x97: "oacute",
+	0x98: "ograve", 0x99: "ocircumflex", 0x9A: "odieresis", 0x9B: "otilde",
+	0x9C: "uacute", 0x9D: "ugrave", 0x9E: "ucircumflex", 0x9F: "udieresis",
+	0xA0: "dagger", 0xA1: "degree", 0xA2: "cent", 0xA3: "sterling",
+	0xA4: "section", 0xA5: "bullet", 0xA6: "paragraph", 0xA7: "germandbls",
+	0xA8: "registered", 0xA9: "copyright", 0xAA: "trademark", 0xAB: "acute",
+	0xAC: "dieresis", 0xAE: "AE", 0xAF: "Oslash",
+	0xB1: "plusminus", 0xB5: "mu", 0xB6: "partialdiff",
+	0xB7: "summation", 0xB8: "product", 0xB9: "pi", 0xBA: "integral",
+	0xBB: "ordfeminine", 0xBC: "ordmasculine", 0xBE: "ae", 0xBF: "oslash",
+	0xC0: "questiondown", 0xC1: "exclamdown", 0xC2: "logicalnot",
+	0xC3: "radical", 0xC4: "florin", 0xC5: "approxequal", 0xC6: "Delta",
+	0xC7: "guillemotleft", 0xC8: "guillemotright", 0xC9: "ellipsis",
+	0xCA: "space", 0xCB: "Agrave", 0xCC: "Atilde", 0xCD: "Otilde",
+	0xCE: "OE", 0xCF: "oe", 0xD0: "endash", 0xD1: "emdash",
+	0xD2: "quotedblleft", 0xD3: "quotedblright", 0xD4: "quoteleft",
+	0xD5: "quoteright", 0xD6: "divide", 0xD8: "ydieresis",
+	0xD9: "Ydieresis", 0xDA: "fraction", 0xDB: "Euro",
+	0xDC: "guilsinglleft", 0xDD: "guilsinglright", 0xDE: "fi", 0xDF: "fl",
+	0xE0: "daggerdbl", 0xE1: "periodcentered", 0xE2: "quotesinglbase",
+	0xE3: "quotedblbase", 0xE4: "perthousand", 0xE5: "Acircumflex",
+	0xE6: "Ecircumflex", 0xE7: "Aacute", 0xE8: "Edieresis", 0xE9: "Egrave",
+	0xEA: "Iacute", 0xEB: "Icircumflex", 0xEC: "Idieresis", 0xED: "Igrave",
+	0xEE: "Oacute", 0xEF: "Ocircumflex", 0xF1: "Ograve",
+	0xF2: "Uacute", 0xF3: "Ucircumflex", 0xF4: "Ugrave",
+	0xF5: "dotlessi", 0xF6: "circumflex", 0xF7: "tilde",
+	0xF8: "macron", 0xF9: "breve", 0xFA: "dotaccent", 0xFB: "ring",
+	0xFC: "cedilla", 0xFD: "hungarumlaut", 0xFE: "ogonek", 0xFF: "caron",
 }

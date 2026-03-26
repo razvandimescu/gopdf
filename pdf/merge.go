@@ -197,11 +197,20 @@ func (ctx *copyContext) copyObject(obj any) any {
 		// Handle streams specially.
 		if stream, ok := resolved.(*Stream); ok {
 			copiedDict := ctx.copyDict(stream.Dict)
-			// Remove old filter/length — WriteStream will set new ones.
-			delete(copiedDict, "Filter")
-			delete(copiedDict, "Length")
-			delete(copiedDict, "DecodeParms")
-			ctx.writer.WriteStream(newRef, copiedDict, stream.Data)
+
+			if isPassthroughFilter(stream.Dict) {
+				// Image/binary streams (DCTDecode, JPXDecode, etc.): the reader
+				// passed through the raw data without decoding. Write it back
+				// with the original filter intact (already in copiedDict).
+				copiedDict["Length"] = len(stream.Data)
+				ctx.writer.WriteObject(newRef, &Stream{Dict: copiedDict, Data: stream.Data})
+			} else {
+				// Text/data streams: Data is decompressed. Recompress with FlateDecode.
+				delete(copiedDict, "Filter")
+				delete(copiedDict, "Length")
+				delete(copiedDict, "DecodeParms")
+				ctx.writer.WriteStream(newRef, copiedDict, stream.Data)
+			}
 			return newRef
 		}
 
@@ -226,6 +235,29 @@ func (ctx *copyContext) copyObject(obj any) any {
 	default:
 		return v
 	}
+}
+
+// isPassthroughFilter returns true if the stream uses a filter that our reader
+// doesn't decode (images, etc.), meaning Data contains the raw encoded bytes
+// and the original Filter must be preserved.
+func isPassthroughFilter(d Dict) bool {
+	var filters []Name
+	if f, ok := d.Name("Filter"); ok {
+		filters = []Name{f}
+	} else if fa, ok := d.Array("Filter"); ok {
+		for _, item := range fa {
+			if n, ok := item.(Name); ok {
+				filters = append(filters, n)
+			}
+		}
+	}
+	for _, f := range filters {
+		switch f {
+		case "DCTDecode", "JPXDecode", "CCITTFaxDecode", "JBIG2Decode":
+			return true
+		}
+	}
+	return false
 }
 
 func (ctx *copyContext) copyDict(d Dict) Dict {

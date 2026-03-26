@@ -152,9 +152,9 @@ func createSampleInvoice() ([]byte, error) {
 	// Separator before total.
 	p.FillRect(totalsX, totalsY-50, totalsW, 1, medText[0], medText[1], medText[2])
 
-	// Total highlight bar.
+	// Total highlight bar — extra 15pt right padding so amount doesn't clip.
 	totalBarY := totalsY - 80
-	p.FillRect(totalsX, totalBarY, totalsW, 32, accent[0], accent[1], accent[2])
+	p.FillRect(totalsX, totalBarY, totalsW+15, 32, accent[0], accent[1], accent[2])
 	p.SetColor(1, 1, 1)
 	p.SetFont("Helvetica-Bold", 12)
 	p.DrawText(totalsX+10, totalBarY+11, "TOTAL DUE")
@@ -192,9 +192,6 @@ func createSampleInvoice() ([]byte, error) {
 	p.SetColor(medText[0], medText[1], medText[2])
 	p.SetFont("Helvetica", 8)
 	p.DrawText(marginL, footerY, "Thank you for your business. This invoice was generated with gopdf — github.com/razvandimescu/gopdf")
-
-	// Accent dot.
-	p.FillRect(pageW-marginR-8, footerY-2, 8, 8, accent[0], accent[1], accent[2])
 
 	return c.Build()
 }

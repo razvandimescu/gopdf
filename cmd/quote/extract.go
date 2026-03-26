@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"gopdf/pdf"
+	"github.com/razvandimescu/gopdf/pdf"
 )
 
 // QuoteData holds structured data extracted from a Neville Lumb quotation PDF.

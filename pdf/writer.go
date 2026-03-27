@@ -86,24 +86,23 @@ func (w *Writer) WriteStream(ref Ref, dict Dict, data []byte) error {
 
 // Finish appends the xref table, trailer, and %%EOF. Returns the complete PDF.
 func (w *Writer) Finish(rootRef Ref) ([]byte, error) {
-	// Write Info dictionary before the xref table.
 	infoRef := w.AllocRef()
 	now := time.Now().UTC()
 	pdfDate := fmt.Sprintf("D:%s", now.Format("20060102150405Z"))
-	w.WriteObject(infoRef, Dict{
+	if err := w.WriteObject(infoRef, Dict{
 		"Producer":     "gopdf",
 		"CreationDate": pdfDate,
 		"ModDate":      pdfDate,
-	})
+	}); err != nil {
+		return nil, fmt.Errorf("writing info dict: %w", err)
+	}
 
 	xrefOffset := w.buf.Len()
 	size := w.nextObj
 
 	// Write xref table.
 	fmt.Fprintf(&w.buf, "xref\n0 %d\n", size)
-	// Entry 0: free head.
 	w.buf.WriteString("0000000000 65535 f \r\n")
-	// Entries 1..size-1.
 	for i := 1; i < size; i++ {
 		offset, ok := w.offsets[i]
 		if ok {
@@ -113,12 +112,11 @@ func (w *Writer) Finish(rootRef Ref) ([]byte, error) {
 		}
 	}
 
-	// Generate document ID (prevents Adobe's "save changes?" prompt on close).
+	// Generate content-derived document ID (prevents Adobe's "save changes?" prompt).
 	h := md5.New()
-	fmt.Fprintf(h, "%d-%d", now.UnixNano(), w.buf.Len())
+	h.Write(w.buf.Bytes())
 	id := string(h.Sum(nil))
 
-	// Write trailer.
 	trailer := Dict{
 		"Size": size,
 		"Root": rootRef,
@@ -126,7 +124,9 @@ func (w *Writer) Finish(rootRef Ref) ([]byte, error) {
 		"ID":   Array{id, id},
 	}
 	w.buf.WriteString("trailer\n")
-	writeValue(&w.buf, trailer)
+	if err := writeValue(&w.buf, trailer); err != nil {
+		return nil, fmt.Errorf("writing trailer: %w", err)
+	}
 	fmt.Fprintf(&w.buf, "\nstartxref\n%d\n%%%%EOF\n", xrefOffset)
 
 	return w.buf.Bytes(), nil

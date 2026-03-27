@@ -64,7 +64,7 @@ func ExtractQuote(doc *pdf.Document) QuoteData {
 			}
 		}
 		if cols != nil {
-			extractTablePage(spans, cols, &q)
+			extractTablePage(spans, cols, pageCols, &q)
 		}
 	}
 
@@ -185,13 +185,14 @@ type tableColumns struct {
 	headers                   TableHeader
 }
 
+const yTol = 2.0
+
 type spanRow struct {
 	y     float64
 	spans []pdf.TextSpan
 }
 
 func groupSpansByRow(spans []pdf.TextSpan, headerY float64) []spanRow {
-	const yTol = 2.0
 	var rows []spanRow
 	for _, sp := range spans {
 		if headerY > -math.MaxFloat64 && sp.Y >= headerY-yTol {
@@ -234,8 +235,7 @@ func mergeContinuation(prev *LineItem, prod, supp, desc string) {
 	}
 }
 
-func extractTablePage(spans []pdf.TextSpan, cols *tableColumns, q *QuoteData) {
-	pageCols := findTableColumns(spans)
+func extractTablePage(spans []pdf.TextSpan, cols *tableColumns, pageCols *tableColumns, q *QuoteData) {
 	if q.tableComplete && pageCols == nil {
 		return
 	}
@@ -352,7 +352,6 @@ type hdrSpan struct {
 // findAnchorRow locates the header row by finding "Suppliers Code" or "Suppliers"
 // on the same line as "Quantity".
 func findAnchorRow(spans []pdf.TextSpan) (float64, bool) {
-	const yTol = 2.0
 	for _, sp := range spans {
 		text := strings.TrimSpace(sp.Text)
 		if text == "Suppliers Code" || text == "Suppliers" {
@@ -370,7 +369,6 @@ func findAnchorRow(spans []pdf.TextSpan) (float64, bool) {
 // into incomplete header spans. Returns the lowest Y of the continuation row
 // for adjusting headerY.
 func mergeWrappedHeaders(spans []pdf.TextSpan, headerSpans []hdrSpan, anchorY float64) float64 {
-	const yTol = 2.0
 	var secondRow []hdrSpan
 	lowestY := anchorY
 	for _, s := range spans {
@@ -410,8 +408,6 @@ func mergeWrappedHeaders(spans []pdf.TextSpan, headerSpans []hdrSpan, anchorY fl
 }
 
 func findTableColumns(spans []pdf.TextSpan) *tableColumns {
-	const yTol = 2.0
-
 	anchorY, ok := findAnchorRow(spans)
 	if !ok {
 		return nil

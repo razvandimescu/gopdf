@@ -401,4 +401,3 @@ func escapeStringPDF(s string) string {
 	}
 	return b.String()
 }
-

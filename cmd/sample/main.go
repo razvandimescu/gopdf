@@ -36,12 +36,12 @@ func createSampleInvoice() ([]byte, error) {
 	p := c.NewPage(595, 842) // A4
 
 	// Color palette — deep teal + gold accent.
-	teal := [3]float64{0.067, 0.180, 0.224}        // #112E39
-	gold := [3]float64{0.878, 0.702, 0.353}         // #E0B35A
+	teal := [3]float64{0.067, 0.180, 0.224} // #112E39
+	gold := [3]float64{0.878, 0.702, 0.353} // #E0B35A
 	darkText := [3]float64{0.133, 0.133, 0.133}
 	medText := [3]float64{0.467, 0.467, 0.467}
-	lightBg := [3]float64{0.969, 0.973, 0.976}      // #F7F8F9
-	tableBorder := [3]float64{0.878, 0.886, 0.898}  // #E0E2E5
+	lightBg := [3]float64{0.969, 0.973, 0.976}     // #F7F8F9
+	tableBorder := [3]float64{0.878, 0.886, 0.898} // #E0E2E5
 
 	pageW := 595.0
 	pageH := 842.0

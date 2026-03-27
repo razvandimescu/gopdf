@@ -26,11 +26,11 @@ const (
 
 // Token is a single lexical unit from a PDF byte stream.
 type Token struct {
-	Type TokenType
-	Str  string  // raw string value
-	Num  float64 // numeric value (for TNumber)
-	Int  int     // integer value (for TNumber when integral)
-	IsInt bool   // whether this number is integral
+	Type  TokenType
+	Str   string  // raw string value
+	Num   float64 // numeric value (for TNumber)
+	Int   int     // integer value (for TNumber when integral)
+	IsInt bool    // whether this number is integral
 }
 
 // Lexer tokenizes a PDF byte stream.

@@ -1,9 +1,5 @@
 package pdf
 
-import (
-	"fmt"
-)
-
 // Name is a PDF name object (e.g., /Type).
 type Name string
 
@@ -124,16 +120,6 @@ func asInt(v any) int {
 		return int(n)
 	}
 	return 0
-}
-
-func asString(v any) string {
-	switch s := v.(type) {
-	case string:
-		return s
-	case Name:
-		return string(s)
-	}
-	return fmt.Sprintf("%v", v)
 }
 
 // matMul6 multiplies two 6-element affine matrices [a b c d e f].

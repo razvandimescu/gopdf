@@ -18,11 +18,11 @@ type QuoteData struct {
 	QuoteExpiry   string
 	Estimator     string
 	ContactName   string
-	TableHeaders    TableHeader
-	LineItems       []LineItem
-	SupplierCodes   []string // unique, in document order
-	lastCategory    string   // carries across pages
-	tableComplete   bool     // set when footer detected
+	TableHeaders  TableHeader
+	LineItems     []LineItem
+	SupplierCodes []string // unique, in document order
+	lastCategory  string   // carries across pages
+	tableComplete bool     // set when footer detected
 }
 
 // TableHeader holds the detected column names in document order.
@@ -37,7 +37,7 @@ type LineItem struct {
 	SupplierCode string
 	Description  string
 	Prices       map[string]string // price column name → value
-	Category     string // WC, BASIN, SINK, etc.
+	Category     string            // WC, BASIN, SINK, etc.
 }
 
 // ExtractQuote extracts structured quotation data from a PDF document.

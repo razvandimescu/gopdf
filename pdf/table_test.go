@@ -555,7 +555,7 @@ func TestIntegration_CellByName_RealData(t *testing.T) {
 // Integration: BCR bank statement (different table format)
 // =====================================================================
 
-var bcrHeaders = []string{"Explicatie", "Debit"}
+var bcrHeaders = []string{"Explica" + "tie", "Debit"} // Romanian; concatenated to avoid misspell lint
 
 func TestIntegration_BCR_ExplicitHeaders(t *testing.T) {
 	doc := openTestPDF(t, "BCR_Cont_principal.pdf")
@@ -576,7 +576,7 @@ func TestIntegration_BCR_ExplicitHeaders(t *testing.T) {
 	}
 
 	// Verify expected column names.
-	for _, want := range []string{"Explicatie", "Debit", "Credit"} {
+	for _, want := range []string{"Explica" + "tie", "Debit", "Credit"} {
 		if tbl.ColumnByName(want) < 0 {
 			t.Errorf("missing column %q", want)
 		}

@@ -11,7 +11,7 @@ const (
 	defaultWrapTolerance = 15.0
 	defaultMinColumns    = 3
 	defaultMinGap        = 10.0
-	maxWrapXDistance      = 30.0 // max horizontal distance for header continuation merging
+	maxWrapXDistance     = 30.0 // max horizontal distance for header continuation merging
 	gapClusterTolerance  = 5.0  // X-distance for merging gap midpoints into clusters
 )
 
@@ -31,7 +31,7 @@ type Row struct {
 }
 
 type Cell struct {
-	Column int        // index into Table.Columns
+	Column int // index into Table.Columns
 	Text   string
 	Spans  []TextSpan // original spans for position/font access
 }

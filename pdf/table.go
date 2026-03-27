@@ -15,21 +15,25 @@ const (
 	gapClusterTolerance  = 5.0  // X-distance for merging gap midpoints into clusters
 )
 
+// Table is a detected table with named columns and data rows.
 type Table struct {
 	Columns []Column
 	Rows    []Row
 }
 
+// Column is a named table column with its detected X position on the page.
 type Column struct {
 	Name string
 	X    float64
 }
 
+// Row is a single data row within a detected table.
 type Row struct {
 	Y     float64
 	Cells []Cell
 }
 
+// Cell holds the text content assigned to one column in one row.
 type Cell struct {
 	Column int // index into Table.Columns
 	Text   string

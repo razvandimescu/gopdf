@@ -3,6 +3,7 @@
 [![CI](https://github.com/razvandimescu/gopdf/actions/workflows/ci.yml/badge.svg)](https://github.com/razvandimescu/gopdf/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/razvandimescu/gopdf/pdf.svg)](https://pkg.go.dev/github.com/razvandimescu/gopdf/pdf)
 [![Go Report Card](https://goreportcard.com/badge/github.com/razvandimescu/gopdf)](https://goreportcard.com/report/github.com/razvandimescu/gopdf)
+[![codecov](https://codecov.io/gh/razvandimescu/gopdf/branch/main/graph/badge.svg)](https://codecov.io/gh/razvandimescu/gopdf)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Pure Go library for PDF text extraction, table detection, creation, merging, search, and editing — no CGo, no external dependencies.

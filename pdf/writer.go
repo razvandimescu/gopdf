@@ -3,11 +3,13 @@ package pdf
 import (
 	"bytes"
 	"compress/zlib"
+	"crypto/md5"
 	"fmt"
 	"io"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Writer produces a PDF file by accumulating objects.
@@ -84,15 +86,17 @@ func (w *Writer) WriteStream(ref Ref, dict Dict, data []byte) error {
 
 // Finish appends the xref table, trailer, and %%EOF. Returns the complete PDF.
 func (w *Writer) Finish(rootRef Ref) ([]byte, error) {
+	// Write Info dictionary before the xref table.
+	infoRef := w.AllocRef()
+	now := time.Now().UTC()
+	pdfDate := fmt.Sprintf("D:%s", now.Format("20060102150405Z"))
+	w.WriteObject(infoRef, Dict{
+		"Producer":     "gopdf",
+		"CreationDate": pdfDate,
+		"ModDate":      pdfDate,
+	})
+
 	xrefOffset := w.buf.Len()
-
-	// Collect and sort object numbers.
-	var nums []int
-	for n := range w.offsets {
-		nums = append(nums, n)
-	}
-	sort.Ints(nums)
-
 	size := w.nextObj
 
 	// Write xref table.
@@ -109,10 +113,17 @@ func (w *Writer) Finish(rootRef Ref) ([]byte, error) {
 		}
 	}
 
+	// Generate document ID (prevents Adobe's "save changes?" prompt on close).
+	h := md5.New()
+	fmt.Fprintf(h, "%d-%d", now.UnixNano(), w.buf.Len())
+	id := string(h.Sum(nil))
+
 	// Write trailer.
 	trailer := Dict{
 		"Size": size,
 		"Root": rootRef,
+		"Info": infoRef,
+		"ID":   Array{id, id},
 	}
 	w.buf.WriteString("trailer\n")
 	writeValue(&w.buf, trailer)

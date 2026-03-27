@@ -5,7 +5,7 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/razvandimescu/gopdf)](https://goreportcard.com/report/github.com/razvandimescu/gopdf)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Pure Go library for PDF text extraction, creation, merging, search, and editing — no CGo, no external dependencies.
+Pure Go library for PDF text extraction, table detection, creation, merging, search, and editing — no CGo, no external dependencies.
 
 <p align="center">
   <img src="assets/sample-invoice.png" width="380" alt="Sample Invoice" />
@@ -13,17 +13,18 @@ Pure Go library for PDF text extraction, creation, merging, search, and editing 
 </p>
 <p align="center"><em>Generated entirely from Go code — <code>go run ./cmd/sample/</code></em></p>
 
-Extract text with accurate spatial positioning and font metadata. Create PDFs with text, shapes, and multiple fonts. Search with bounding rectangles. Merge files with page selection. Overlay text and redact regions. All from a single, MIT-licensed package with zero dependencies outside the Go standard library.
+Extract text with accurate spatial positioning and font metadata. Detect and extract tables with column/row structure. Create PDFs with text, shapes, and multiple fonts. Search with bounding rectangles. Merge files with page selection. Overlay text and redact regions. All from a single, MIT-licensed package with zero dependencies outside the Go standard library.
 
 ## Why gopdf?
 
-If you need to create, read, search, or edit PDFs in Go without CGo or AGPL licensing constraints, gopdf is the only option that combines PDF creation, positioned text extraction, search with bounding rectangles, merge, overlay, and redaction in a single zero-dependency MIT-licensed package.
+If you need to create, read, search, or edit PDFs in Go without CGo or AGPL licensing constraints, gopdf is the only option that combines PDF creation, positioned text extraction, table detection, search with bounding rectangles, merge, overlay, and redaction in a single zero-dependency MIT-licensed package.
 
 | | gopdf | unipdf | pdfcpu | ledongthuc/pdf | MuPDF bindings |
 |---|---|---|---|---|---|
 | **License** | MIT | AGPL / Commercial | Apache-2.0 | BSD-3 | AGPL |
 | **CGo required** | No | No | No | No | Yes |
 | **Text extraction** | Positioned (X/Y) | Positioned | Raw streams | Basic | Positioned |
+| **Table detection** | Yes | No | No | No | No |
 | **Text search** | With rects | Yes | No | No | Yes |
 | **PDF merge** | Yes | Yes | Yes | No | No |
 | **Text overlay** | Yes | Yes | Watermark | No | No |
@@ -36,6 +37,8 @@ If you need to create, read, search, or edit PDFs in Go without CGo or AGPL lice
 
 - Text extraction with X/Y coordinates, font name, and font size
 - Line reconstruction with intelligent spacing
+- Table detection with column/row extraction (explicit headers or auto-detection)
+- Multi-page table support with automatic header re-detection
 - Text search returning bounding rectangles
 - PDF merge with page selection
 - Text overlay (Helvetica, configurable size and color)
@@ -94,6 +97,51 @@ for i := 0; i < doc.NumPages(); i++ {
 // Y=732: Quote Name: Northgate Academy
 // Y=710: Company: Nova Facilities
 // ...
+```
+
+### Table extraction
+
+```go
+// Auto-detect tables (no header hints needed)
+tables, _ := doc.Page(0).Tables()
+for _, tbl := range tables {
+    for _, col := range tbl.Columns {
+        fmt.Printf("%-20s", col.Name)
+    }
+    fmt.Println()
+    for _, row := range tbl.Rows {
+        for _, cell := range row.Cells {
+            fmt.Printf("%-20s", cell.Text)
+        }
+        fmt.Println()
+    }
+}
+```
+
+With explicit header anchors (more precise):
+
+```go
+spans, _ := doc.Page(0).TextSpans()
+tbl := pdf.FindTable(spans, &pdf.TableOpts{
+    Headers: []string{"Quantity", "Description"},
+})
+fmt.Println(tbl.CellByName(0, "Quantity"))    // "3"
+fmt.Println(tbl.CellByName(0, "Description")) // "Widget Assembly"
+```
+
+Multi-page tables:
+
+```go
+var pages [][]pdf.TextSpan
+for i := 0; i < doc.NumPages(); i++ {
+    spans, _ := doc.Page(i).TextSpans()
+    pages = append(pages, spans)
+}
+tbl := pdf.FindTableAcrossPages(pages, &pdf.TableOpts{
+    Headers: []string{"Date", "Amount"},
+})
+// All rows across all pages in a single table
+fmt.Printf("%d rows\n", len(tbl.Rows))
 ```
 
 ### Search for text
@@ -198,6 +246,8 @@ result, err := ed.Apply()
 | `page.Text()` | `string, error` | Full page text |
 | `page.TextLines()` | `[]TextLine, error` | Lines grouped by Y, sorted top-to-bottom |
 | `page.TextSpans()` | `[]TextSpan, error` | Raw positioned spans |
+| `page.Tables()` | `[]Table, error` | Auto-detect all tables |
+| `page.FindTable(opts)` | `*Table, error` | Detect table with options |
 | `page.Search(query)` | `[]SearchResult` | Find text on this page |
 | `page.Rotation()` | `int` | Rotation in degrees (0/90/180/270) |
 | `page.MediaBox()` | `[4]float64` | Page bounds [llx, lly, urx, ury] |
@@ -228,6 +278,19 @@ result, err := ed.Apply()
 | `m.Add(data, pages...)` | `error` | Add bytes (0-indexed pages; empty = all) |
 | `m.Merge()` | `[]byte, error` | Produce combined PDF |
 
+### Table Detection
+
+| Method | Returns | Description |
+|---|---|---|
+| `pdf.FindTable(spans, opts)` | `*Table` | Detect single table from spans |
+| `pdf.FindTables(spans, opts)` | `[]Table` | Detect all tables (auto-detect) |
+| `pdf.FindTableAcrossPages(pages, opts)` | `*Table` | Detect table spanning multiple pages |
+| `tbl.CellText(row, col)` | `string` | Cell text by row/col index |
+| `tbl.ColumnByName(name)` | `int` | Column index by name (case-insensitive) |
+| `tbl.CellByName(row, name)` | `string` | Cell text by row index and column name |
+
+`TableOpts` fields: `Headers` (anchor strings), `YTolerance`, `MinColumns`, `RowFilter`, `WrapTolerance`, `MinGap`.
+
 ### Editor
 
 | Method | Returns | Description |
@@ -254,6 +317,27 @@ type TextLine struct {
     Y     float64
     Spans []TextSpan
     Text  string // reconstructed line text with spacing
+}
+
+type Table struct {
+    Columns []Column
+    Rows    []Row
+}
+
+type Column struct {
+    Name string
+    X    float64
+}
+
+type Row struct {
+    Y     float64
+    Cells []Cell
+}
+
+type Cell struct {
+    Column int        // index into Table.Columns
+    Text   string
+    Spans  []TextSpan // original spans
 }
 
 type SearchResult struct {
@@ -298,6 +382,7 @@ pdf/
   document.go   Public API (Document, Page)
   reader.go     PDF structure: xref, streams, object resolution, fonts, CMap
   text.go       Content stream -> positioned text spans -> line reconstruction
+  table.go      Table detection: header anchors, gap-based auto-detect, multi-page
   writer.go     PDF object serializer, xref generation, FlateDecode compression
   merge.go      PDF merge: deep object copy with ref remapping, page tree construction
   edit.go       Text search, text overlay, visual redaction

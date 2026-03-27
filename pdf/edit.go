@@ -295,6 +295,11 @@ func (e *Editor) Apply() ([]byte, error) {
 		delete(copiedPage, "Parent")
 		copiedPage["Parent"] = pagesRef
 
+		// ensureOverlayFont needs inline Dicts it can modify, not Refs.
+		if len(overlays) > 0 {
+			inlineResourceDicts(ctx, copiedPage, pageDict)
+		}
+
 		// Get the existing content stream data.
 		existingContent, _ := reader.PageContent(pageDict)
 
@@ -357,6 +362,32 @@ func (e *Editor) Apply() ([]byte, error) {
 	})
 
 	return w.Finish(catalogRef)
+}
+
+// inlineResourceDicts ensures Resources and its Font sub-dict are inline Dicts
+// in copiedPage (not Refs to already-written objects), so ensureOverlayFont can
+// modify them. Sub-refs within these dicts (individual fonts, XObjects) stay as
+// Refs and are reused from the copyContext cache.
+func inlineResourceDicts(ctx *copyContext, copiedPage Dict, srcPage Dict) {
+	srcRes, _ := ctx.reader.ResolveDict(srcPage["Resources"])
+
+	res, ok := copiedPage["Resources"].(Dict)
+	if !ok {
+		if srcRes != nil {
+			res = ctx.copyDict(srcRes)
+		} else {
+			res = make(Dict)
+		}
+		copiedPage["Resources"] = res
+	}
+
+	if _, ok := res["Font"].(Dict); !ok {
+		if srcRes != nil {
+			if srcFont, ok := ctx.reader.ResolveDict(srcRes["Font"]); ok {
+				res["Font"] = ctx.copyDict(srcFont)
+			}
+		}
+	}
 }
 
 // ensureOverlayFont adds a Helvetica font to the page's Resources if needed.

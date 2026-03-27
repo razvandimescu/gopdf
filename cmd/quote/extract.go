@@ -344,39 +344,79 @@ func isContinuationWord(text string) bool {
 	return words[strings.ToLower(text)]
 }
 
-func findTableColumns(spans []pdf.TextSpan) *tableColumns {
+type hdrSpan struct {
+	text string
+	x    float64
+}
+
+// findAnchorRow locates the header row by finding "Suppliers Code" or "Suppliers"
+// on the same line as "Quantity".
+func findAnchorRow(spans []pdf.TextSpan) (float64, bool) {
 	const yTol = 2.0
-
-	// Strategy 1: look for "Suppliers Code" as a single span.
-	// Strategy 2: look for "Suppliers" span on a line with "Quantity" (multi-line header).
-	var anchorY float64
-	var anchorFound bool
-
 	for _, sp := range spans {
 		text := strings.TrimSpace(sp.Text)
 		if text == "Suppliers Code" || text == "Suppliers" {
-			// Verify this line also has "Quantity".
 			for _, s := range spans {
 				if math.Abs(s.Y-sp.Y) <= yTol && strings.TrimSpace(s.Text) == "Quantity" {
-					anchorY = sp.Y
-					anchorFound = true
-					break
+					return sp.Y, true
 				}
-			}
-			if anchorFound {
-				break
 			}
 		}
 	}
-	if !anchorFound {
+	return 0, false
+}
+
+// mergeWrappedHeaders merges continuation words (e.g., "Code" below "Product")
+// into incomplete header spans. Returns the lowest Y of the continuation row
+// for adjusting headerY.
+func mergeWrappedHeaders(spans []pdf.TextSpan, headerSpans []hdrSpan, anchorY float64) float64 {
+	const yTol = 2.0
+	var secondRow []hdrSpan
+	lowestY := anchorY
+	for _, s := range spans {
+		dy := anchorY - s.Y
+		if dy > yTol && dy < 15 {
+			if s.Y < lowestY {
+				lowestY = s.Y
+			}
+			text := strings.TrimSpace(s.Text)
+			if text != "" && isContinuationWord(text) {
+				secondRow = append(secondRow, hdrSpan{text, s.X})
+			}
+		}
+	}
+	sort.Slice(secondRow, func(i, j int) bool { return secondRow[i].x < secondRow[j].x })
+
+	for _, sr := range secondRow {
+		bestIdx := -1
+		bestDist := math.MaxFloat64
+		for i, h := range headerSpans {
+			if !isIncompleteHeader(h.text) {
+				continue
+			}
+			if h.x <= sr.x+20 {
+				dist := sr.x - h.x
+				if dist >= 0 && dist < bestDist {
+					bestDist = dist
+					bestIdx = i
+				}
+			}
+		}
+		if bestIdx >= 0 {
+			headerSpans[bestIdx].text += " " + sr.text
+		}
+	}
+	return lowestY
+}
+
+func findTableColumns(spans []pdf.TextSpan) *tableColumns {
+	const yTol = 2.0
+
+	anchorY, ok := findAnchorRow(spans)
+	if !ok {
 		return nil
 	}
 
-	// Collect all header spans on this row.
-	type hdrSpan struct {
-		text string
-		x    float64
-	}
 	var headerSpans []hdrSpan
 	for _, s := range spans {
 		if math.Abs(s.Y-anchorY) > yTol {
@@ -389,7 +429,9 @@ func findTableColumns(spans []pdf.TextSpan) *tableColumns {
 	}
 	sort.Slice(headerSpans, func(i, j int) bool { return headerSpans[i].x < headerSpans[j].x })
 
-	// Check if any first-row headers are incomplete (e.g., "Product" without "Code").
+	cols := &tableColumns{headerY: anchorY}
+
+	// Merge wrapped headers if any are incomplete.
 	hasIncomplete := false
 	for _, h := range headerSpans {
 		if isIncompleteHeader(h.text) {
@@ -397,45 +439,9 @@ func findTableColumns(spans []pdf.TextSpan) *tableColumns {
 			break
 		}
 	}
-
-	// Only look for a second header row if we detected incomplete headers.
 	if hasIncomplete {
-		var secondRow []hdrSpan
-		for _, s := range spans {
-			dy := anchorY - s.Y
-			if dy > yTol && dy < 15 {
-				text := strings.TrimSpace(s.Text)
-				if text != "" && isContinuationWord(text) {
-					secondRow = append(secondRow, hdrSpan{text, s.X})
-				}
-			}
-		}
-		sort.Slice(secondRow, func(i, j int) bool { return secondRow[i].x < secondRow[j].x })
-
-		// Match each continuation word to the nearest incomplete header to its left.
-		for _, sr := range secondRow {
-			bestIdx := -1
-			bestDist := math.MaxFloat64
-			for i, h := range headerSpans {
-				if !isIncompleteHeader(h.text) {
-					continue
-				}
-				// Header must be to the left of (or near) the continuation.
-				if h.x <= sr.x+20 {
-					dist := sr.x - h.x
-					if dist >= 0 && dist < bestDist {
-						bestDist = dist
-						bestIdx = i
-					}
-				}
-			}
-			if bestIdx >= 0 {
-				headerSpans[bestIdx].text += " " + sr.text
-			}
-		}
+		cols.headerY = mergeWrappedHeaders(spans, headerSpans, anchorY)
 	}
-
-	cols := &tableColumns{headerY: anchorY}
 
 	// Classify known columns and collect price columns.
 	var headerNames []string
@@ -454,7 +460,6 @@ func findTableColumns(spans []pdf.TextSpan) *tableColumns {
 		case strings.HasPrefix(nameLower, "product d") || nameLower == "product description":
 			cols.descX = h.x
 		default:
-			// Anything right of description that contains "price" or is a remaining column.
 			if strings.Contains(nameLower, "price") || strings.Contains(nameLower, "cost") {
 				cols.priceCols = append(cols.priceCols, colDef{name: name, x: h.x})
 			}
@@ -462,20 +467,6 @@ func findTableColumns(spans []pdf.TextSpan) *tableColumns {
 	}
 
 	cols.headers = TableHeader{Columns: headerNames}
-
-	// If we have incomplete headers, shift headerY down to below the continuation row
-	// so data rows are correctly identified.
-	if hasIncomplete {
-		for _, s := range spans {
-			dy := anchorY - s.Y
-			if dy > yTol && dy < 15 {
-				if s.Y < cols.headerY {
-					cols.headerY = s.Y
-				}
-			}
-		}
-	}
-
 	return cols
 }
 

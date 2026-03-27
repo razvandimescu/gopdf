@@ -98,6 +98,24 @@ func (p *Page) Text() (string, error) {
 	return result, nil
 }
 
+// Tables auto-detects all tables on this page.
+func (p *Page) Tables() ([]Table, error) {
+	spans, err := p.TextSpans()
+	if err != nil {
+		return nil, err
+	}
+	return FindTables(spans, nil), nil
+}
+
+// FindTable detects a table on this page using the given options.
+func (p *Page) FindTable(opts *TableOpts) (*Table, error) {
+	spans, err := p.TextSpans()
+	if err != nil {
+		return nil, err
+	}
+	return FindTable(spans, opts), nil
+}
+
 // Rotation returns the page rotation in degrees (0, 90, 180, 270).
 func (p *Page) Rotation() int {
 	r, _ := p.dict.Int("Rotate")

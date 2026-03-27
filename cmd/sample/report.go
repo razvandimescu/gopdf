@@ -9,10 +9,10 @@ func createSampleReport() ([]byte, error) {
 	p := c.NewPage(595, 842) // A4
 
 	// Warm palette — contrast with the cool navy invoice.
-	charcoal := [3]float64{0.149, 0.149, 0.165}  // #262629
-	coral := [3]float64{0.918, 0.333, 0.259}      // #EA5542
-	sand := [3]float64{0.957, 0.933, 0.898}        // #F4EEE5
-	warmGray := [3]float64{0.600, 0.573, 0.545}    // #99928B
+	charcoal := [3]float64{0.149, 0.149, 0.165} // #262629
+	coral := [3]float64{0.918, 0.333, 0.259}    // #EA5542
+	sand := [3]float64{0.957, 0.933, 0.898}     // #F4EEE5
+	warmGray := [3]float64{0.600, 0.573, 0.545} // #99928B
 	darkText := [3]float64{0.133, 0.133, 0.133}
 
 	pageW := 595.0

@@ -20,8 +20,8 @@ type compressedRef struct {
 // Reader reads and resolves objects from a PDF file.
 type Reader struct {
 	data       []byte
-	xref       map[int]int64          // object number → byte offset (type 1)
-	compressed map[int]compressedRef  // object number → ObjStm ref (type 2)
+	xref       map[int]int64         // object number → byte offset (type 1)
+	compressed map[int]compressedRef // object number → ObjStm ref (type 2)
 	trailer    Dict
 	cache      map[int]any
 }
@@ -737,7 +737,7 @@ func (r *Reader) Pages() ([]Dict, error) {
 	}
 	catalog, ok := r.ResolveDict(root)
 	if !ok {
-		return nil, fmt.Errorf("Root is not a dict")
+		return nil, fmt.Errorf("root is not a dict")
 	}
 	pagesRef, ok := catalog["Pages"]
 	if !ok {

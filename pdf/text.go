@@ -103,13 +103,13 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 
 	var (
 		ctm      = [6]float64{1, 0, 0, 1, 0, 0} // current transformation matrix
-		tm       [6]float64                       // text matrix
-		lm       [6]float64                       // line matrix
+		tm       [6]float64                     // text matrix
+		lm       [6]float64                     // line matrix
 		fontSize float64
 		fontName string
-		tl       float64     // leading
-		tc       float64     // character spacing
-		tw       float64     // word spacing
+		tl       float64       // leading
+		tc       float64       // character spacing
+		tw       float64       // word spacing
 		th       float64 = 100 // horizontal scaling (percentage)
 		gsStack  []graphicsState
 	)
@@ -776,8 +776,6 @@ func BuildLines(spans []TextSpan) []TextLine {
 
 	return lines
 }
-
-
 
 // glyphToString converts a PostScript glyph name to its Unicode string.
 func glyphToString(name string) string {

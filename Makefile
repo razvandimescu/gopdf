@@ -16,7 +16,7 @@ vet:
 	go vet ./...
 
 cyclo:
-	@output=$$(gocyclo -over 45 . | grep -v 'text.go:'); \
+	@output=$$(gocyclo -over 41 . | grep -v 'text.go:'); \
 	if [ -n "$$output" ]; then echo "$$output"; exit 1; fi
 
 ineffassign:

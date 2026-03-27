@@ -185,37 +185,18 @@ type tableColumns struct {
 	headers                   TableHeader
 }
 
-func extractTablePage(spans []pdf.TextSpan, cols *tableColumns, q *QuoteData) {
-	// If table was already completed (footer found), only continue if this page has its own header.
-	pageCols := findTableColumns(spans)
-	if q.tableComplete && pageCols == nil {
-		return // no new table on this page
-	}
-	if pageCols != nil {
-		q.tableComplete = false // new table section
-	}
+type spanRow struct {
+	y     float64
+	spans []pdf.TextSpan
+}
 
-	// Determine header Y for this page.
-	headerY := -math.MaxFloat64 // include all spans by default
-	if pageCols != nil {
-		headerY = pageCols.headerY
-		// Use this page's column positions (may differ slightly).
-		cols = pageCols
-	}
-
-	type row struct {
-		y     float64
-		spans []pdf.TextSpan
-	}
-
+func groupSpansByRow(spans []pdf.TextSpan, headerY float64) []spanRow {
 	const yTol = 2.0
-	var rows []row
-
+	var rows []spanRow
 	for _, sp := range spans {
 		if headerY > -math.MaxFloat64 && sp.Y >= headerY-yTol {
-			continue // at or above header
+			continue
 		}
-
 		found := false
 		for i := range rows {
 			if math.Abs(sp.Y-rows[i].y) < yTol {
@@ -225,13 +206,50 @@ func extractTablePage(spans []pdf.TextSpan, cols *tableColumns, q *QuoteData) {
 			}
 		}
 		if !found {
-			rows = append(rows, row{y: sp.Y, spans: []pdf.TextSpan{sp}})
+			rows = append(rows, spanRow{y: sp.Y, spans: []pdf.TextSpan{sp}})
 		}
 	}
-
-	// Sort rows top-to-bottom.
 	sort.Slice(rows, func(i, j int) bool { return rows[i].y > rows[j].y })
+	return rows
+}
 
+func isFooterMarker(text string, x, qtyX float64) bool {
+	return strings.HasPrefix(text, "Quote Expiry") ||
+		strings.HasPrefix(text, "Pricing:") ||
+		strings.HasPrefix(text, "Total:") ||
+		strings.HasPrefix(text, "Quote Total:") ||
+		(strings.HasPrefix(text, "Logistics Charge:") && x < qtyX+10) ||
+		(strings.HasPrefix(text, "Delivery Charge:") && x < qtyX+10)
+}
+
+func mergeContinuation(prev *LineItem, prod, supp, desc string) {
+	if prod != "" {
+		prev.ProductCode = smartAppend(prev.ProductCode, prod)
+	}
+	if supp != "" {
+		prev.SupplierCode = smartAppend(prev.SupplierCode, supp)
+	}
+	if desc != "" {
+		prev.Description = appendText(prev.Description, desc)
+	}
+}
+
+func extractTablePage(spans []pdf.TextSpan, cols *tableColumns, q *QuoteData) {
+	pageCols := findTableColumns(spans)
+	if q.tableComplete && pageCols == nil {
+		return
+	}
+	if pageCols != nil {
+		q.tableComplete = false
+	}
+
+	headerY := -math.MaxFloat64
+	if pageCols != nil {
+		headerY = pageCols.headerY
+		cols = pageCols
+	}
+
+	rows := groupSpansByRow(spans, headerY)
 	seenFooter := false
 
 	for _, r := range rows {
@@ -241,7 +259,6 @@ func extractTablePage(spans []pdf.TextSpan, cols *tableColumns, q *QuoteData) {
 
 		sort.Slice(r.spans, func(i, j int) bool { return r.spans[i].X < r.spans[j].X })
 
-		// Classify each span into a column.
 		var qty, prod, supp, desc string
 		prices := make(map[string]string)
 		for _, sp := range r.spans {
@@ -249,19 +266,11 @@ func extractTablePage(spans []pdf.TextSpan, cols *tableColumns, q *QuoteData) {
 			if text == "" {
 				continue
 			}
-
-			// Check for footer markers.
-			if strings.HasPrefix(text, "Quote Expiry") ||
-				strings.HasPrefix(text, "Pricing:") ||
-				strings.HasPrefix(text, "Total:") ||
-				strings.HasPrefix(text, "Quote Total:") ||
-				(strings.HasPrefix(text, "Logistics Charge:") && sp.X < cols.qtyX+10) ||
-				(strings.HasPrefix(text, "Delivery Charge:") && sp.X < cols.qtyX+10) {
+			if isFooterMarker(text, sp.X, cols.qtyX) {
 				seenFooter = true
 				q.tableComplete = true
 				break
 			}
-
 			col := classifyColumn(sp.X, cols)
 			switch col {
 			case "qty":
@@ -273,7 +282,6 @@ func extractTablePage(spans []pdf.TextSpan, cols *tableColumns, q *QuoteData) {
 			case "desc":
 				desc = appendText(desc, text)
 			default:
-				// Price column.
 				prices[col] = appendText(prices[col], text)
 			}
 		}
@@ -281,33 +289,18 @@ func extractTablePage(spans []pdf.TextSpan, cols *tableColumns, q *QuoteData) {
 		if seenFooter {
 			break
 		}
-
-		// Skip empty rows.
 		if supp == "" && qty == "" && prod == "" && desc == "" {
 			continue
 		}
 
-		// A data row has a numeric quantity (e.g., "2.00", "1.00").
 		isDataRow := isNumeric(qty) && (supp != "" || prod != "")
 
 		if !isDataRow {
-			// Check if this is a continuation of the previous data row
-			// (text in prod/supp/desc columns but no quantity).
 			isContinuation := qty == "" && (prod != "" || supp != "") && len(q.LineItems) > 0
 			if isContinuation {
-				prev := &q.LineItems[len(q.LineItems)-1]
-				if prod != "" {
-					prev.ProductCode = smartAppend(prev.ProductCode, prod)
-				}
-				if supp != "" {
-					prev.SupplierCode = smartAppend(prev.SupplierCode, supp)
-				}
-				if desc != "" {
-					prev.Description = appendText(prev.Description, desc)
-				}
+				mergeContinuation(&q.LineItems[len(q.LineItems)-1], prod, supp, desc)
 				continue
 			}
-
 			// Category header or note line.
 			var parts []string
 			for _, sp := range r.spans {
@@ -316,8 +309,7 @@ func extractTablePage(spans []pdf.TextSpan, cols *tableColumns, q *QuoteData) {
 					parts = append(parts, t)
 				}
 			}
-			label := strings.Join(parts, " ")
-			if label != "" {
+			if label := strings.Join(parts, " "); label != "" {
 				q.lastCategory = label
 			}
 			continue

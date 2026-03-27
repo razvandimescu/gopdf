@@ -335,9 +335,9 @@ type Row struct {
 }
 
 type Cell struct {
-    Column int        // index into Table.Columns
+    Column int // index into Table.Columns
     Text   string
-    Spans  []TextSpan // original spans
+    Spans  []TextSpan
 }
 
 type SearchResult struct {

@@ -129,6 +129,7 @@ func TestCreatorDrawShapes(t *testing.T) {
 	c := NewCreator()
 	page := c.NewPage(612, 792)
 	page.SetColor(0, 0, 0)
+	page.SetStrokeColor(0.5, 0.5, 0.5)
 	page.DrawRect(50, 700, 200, 50)
 	page.FillRect(50, 600, 200, 50, 0.9, 0.9, 0.9)
 	page.DrawLine(50, 550, 250, 550, 1)

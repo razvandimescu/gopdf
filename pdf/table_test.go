@@ -253,6 +253,158 @@ func TestFindTables_TwoColumnNotEnough(t *testing.T) {
 }
 
 // =====================================================================
+// Approach 3: Anchor-based auto-detection
+// =====================================================================
+
+func TestFindTables_AnchorDetect(t *testing.T) {
+	// Simulate a bank-statement-like layout with multi-line descriptions.
+	// Gap-based detection should fail (most rows have 1 column), but
+	// anchor-based should find the table via recurring X positions.
+	//
+	//   Y=700: Date     Desc         Debit    Credit  (header)
+	//   Y=680: Jan 05   Payment to            100.00  (txn 1, line 1)
+	//   Y=668:          ACME Corp                     (txn 1, line 2)
+	//   Y=656:          Ref 12345                     (txn 1, line 3)
+	//   Y=636: Jan 06   Transfer              200.00  (txn 2, line 1)
+	//   Y=624:          from Bob                      (txn 2, line 2)
+	//   Y=604: Jan 07   Withdrawal   50.00            (txn 3, line 1)
+	//   Y=592:          Cash ATM                      (txn 3, line 2)
+	//   Y=572: Jan 08   Deposit               300.00  (txn 4, line 1)
+	//   Y=560:          Wire in                       (txn 4, line 2)
+	//   Y=540: Jan 09   Fee          5.00             (txn 5, line 1)
+	//   Y=528:          Monthly                       (txn 5, line 2)
+	spans := []TextSpan{
+		// Header
+		makeSpan(50, 700, "Date"),
+		makeSpan(150, 700, "Desc"),
+		makeSpan(350, 700, "Debit"),
+		makeSpan(450, 700, "Credit"),
+		// Txn 1
+		makeSpan(50, 680, "Jan 05"),
+		makeSpan(150, 680, "Payment to"),
+		makeSpan(450, 680, "100.00"),
+		makeSpan(150, 668, "ACME Corp"),
+		makeSpan(150, 656, "Ref 12345"),
+		// Txn 2
+		makeSpan(50, 636, "Jan 06"),
+		makeSpan(150, 636, "Transfer"),
+		makeSpan(450, 636, "200.00"),
+		makeSpan(150, 624, "from Bob"),
+		// Txn 3
+		makeSpan(50, 604, "Jan 07"),
+		makeSpan(150, 604, "Withdrawal"),
+		makeSpan(350, 604, "50.00"),
+		makeSpan(150, 592, "Cash ATM"),
+		// Txn 4
+		makeSpan(50, 572, "Jan 08"),
+		makeSpan(150, 572, "Deposit"),
+		makeSpan(450, 572, "300.00"),
+		makeSpan(150, 560, "Wire in"),
+		// Txn 5
+		makeSpan(50, 540, "Jan 09"),
+		makeSpan(150, 540, "Fee"),
+		makeSpan(350, 540, "5.00"),
+		makeSpan(150, 528, "Monthly"),
+	}
+
+	// Gap-based should fail (most rows have 1-2 spans, not enough gap consistency).
+	gapTables := findTablesByGaps(spans, nil)
+	if len(gapTables) > 0 {
+		t.Log("gap-based unexpectedly found a table; anchor test still valid")
+	}
+
+	// Anchor-based should find the table.
+	tbl := findTableByAnchors(spans, nil)
+	if tbl == nil {
+		t.Fatal("anchor-based detection returned nil")
+	}
+	if len(tbl.Columns) < 3 {
+		t.Fatalf("expected >= 3 columns, got %d", len(tbl.Columns))
+	}
+	if tbl.ColumnByName("Date") < 0 {
+		t.Error("missing column 'Date'")
+	}
+	if tbl.ColumnByName("Desc") < 0 {
+		t.Error("missing column 'Desc'")
+	}
+	// Should have data rows.
+	if len(tbl.Rows) < 5 {
+		t.Errorf("expected >= 5 data rows, got %d", len(tbl.Rows))
+	}
+}
+
+func TestFindTables_AnchorFallback(t *testing.T) {
+	// FindTables with no opts should use anchor-based as fallback.
+	// Use a multi-line layout that gap-based can't handle (same as AnchorDetect).
+	spans := []TextSpan{
+		makeSpan(50, 700, "Date"),
+		makeSpan(150, 700, "Desc"),
+		makeSpan(350, 700, "Debit"),
+		makeSpan(450, 700, "Credit"),
+		makeSpan(50, 680, "Jan 05"), makeSpan(150, 680, "Payment to"), makeSpan(450, 680, "100.00"),
+		makeSpan(150, 668, "ACME Corp"),
+		makeSpan(50, 648, "Jan 06"), makeSpan(150, 648, "Transfer"), makeSpan(450, 648, "200.00"),
+		makeSpan(150, 636, "from Bob"),
+		makeSpan(50, 616, "Jan 07"), makeSpan(150, 616, "Withdrawal"), makeSpan(350, 616, "50.00"),
+		makeSpan(150, 604, "Cash ATM"),
+		makeSpan(50, 584, "Jan 08"), makeSpan(150, 584, "Deposit"), makeSpan(450, 584, "300.00"),
+		makeSpan(150, 572, "Wire in"),
+		makeSpan(50, 552, "Jan 09"), makeSpan(150, 552, "Fee"), makeSpan(350, 552, "5.00"),
+		makeSpan(150, 540, "Monthly"),
+	}
+
+	tables := FindTables(spans, nil)
+	if len(tables) == 0 {
+		t.Fatal("expected FindTables to find a table via anchor fallback")
+	}
+	tbl := &tables[0]
+	if tbl.ColumnByName("Date") < 0 {
+		t.Error("missing column 'Date'")
+	}
+	if len(tbl.Rows) < 5 {
+		t.Errorf("expected >= 5 rows, got %d", len(tbl.Rows))
+	}
+}
+
+func TestIsHeaderText(t *testing.T) {
+	cases := []struct {
+		s    string
+		want bool
+	}{
+		{"Date", true},
+		{"Descriere", true},
+		{"Product Code", true},
+		{"100.00", false},
+		{"1,234.56", false},
+		{"-500", false},
+		{"", false},
+		{"Jan 05", true},   // has letters
+		{"3.928 03", false}, // all digits/dots/spaces
+		{strings.Repeat("x", 31), false}, // too long
+	}
+	for _, tc := range cases {
+		if got := isHeaderText(tc.s); got != tc.want {
+			t.Errorf("isHeaderText(%q) = %v, want %v", tc.s, got, tc.want)
+		}
+	}
+}
+
+func TestFindTables_AnchorNoFalsePositive(t *testing.T) {
+	// Paragraph text should not produce anchor-detected tables.
+	spans := []TextSpan{
+		makeSpan(50, 700, "This is a paragraph of text that spans the full width."),
+		makeSpan(50, 680, "It continues on the next line with more prose."),
+		makeSpan(50, 660, "And keeps going."),
+		makeSpan(50, 640, "Nothing tabular here at all."),
+	}
+	tbl := findTableByAnchors(spans, nil)
+	if tbl != nil {
+		t.Errorf("expected nil for paragraph text, got table with %d cols, %d rows",
+			len(tbl.Columns), len(tbl.Rows))
+	}
+}
+
+// =====================================================================
 // MaxRowGap
 // =====================================================================
 

@@ -11,8 +11,12 @@ const (
 	defaultWrapTolerance = 15.0
 	defaultMinColumns    = 3
 	defaultMinGap        = 10.0
-	maxWrapXDistance     = 30.0 // max horizontal distance for header continuation merging
+	maxWrapXDistance      = 30.0 // max horizontal distance for header continuation merging
 	gapClusterTolerance  = 5.0  // X-distance for merging gap midpoints into clusters
+	anchorClusterTol     = 5.0  // X-distance for clustering span start positions
+	anchorMinRowFrac     = 0.15 // fraction of rows an anchor must appear in
+	anchorMaxHeaderLen   = 30   // max text length for header-like spans
+	anchorMinColSpacing  = 20.0 // min X-distance between anchor columns (filters char-level spans)
 )
 
 // Table is a detected table with named columns and data rows.
@@ -81,6 +85,23 @@ type TableOpts struct {
 	// (e.g., bank statements). Applied before MaxRowGap.
 	// Default: 0 (no merging).
 	MergeGap float64
+
+	// AutoTune tries multiple MergeGap/MaxRowGap combinations and
+	// picks the one producing the best table (most rows, best fill
+	// rate). Only used by FindTableAcrossPages when MergeGap and
+	// MaxRowGap are both zero. Default: false.
+	AutoTune bool
+
+	// AnchorColumn names a column that signals the start of a new
+	// logical row. Consecutive rows where this column is empty are
+	// merged into the previous row that had a non-empty anchor.
+	// Applied after MergeGap. Case-insensitive.
+	AnchorColumn string
+
+	// columnOverrides, when set, provides column X positions for data
+	// classification instead of deriving them from header span positions.
+	// Headers are still used to locate the header row. Internal only.
+	columnOverrides []Column
 }
 
 func (o *TableOpts) yTol() float64 {
@@ -169,7 +190,7 @@ func FindTable(spans []TextSpan, opts *TableOpts) *Table {
 	if len(tables) > 0 {
 		return &tables[0]
 	}
-	return nil
+	return findTableByAnchors(spans, opts)
 }
 
 // FindTables detects all tables in spans via gap-based auto-detection.
@@ -182,26 +203,254 @@ func FindTables(spans []TextSpan, opts *TableOpts) []Table {
 		}
 		return nil
 	}
-	return findTablesByGaps(spans, opts)
+	tables := findTablesByGaps(spans, opts)
+	if len(tables) > 0 {
+		return tables
+	}
+	t := findTableByAnchors(spans, opts)
+	if t != nil {
+		return []Table{*t}
+	}
+	return nil
 }
 
 // FindTableAcrossPages detects a table spanning multiple pages.
 // Each page's spans are searched for a header; data rows accumulate
-// into a single table.
+// into a single table. When auto-detecting (no headers), anchor-based
+// detection pools spans across all pages for robust column discovery.
 func FindTableAcrossPages(pages [][]TextSpan, opts *TableOpts) *Table {
-	var result *Table
-	for _, spans := range pages {
-		t := FindTable(spans, opts)
-		if t == nil {
-			continue
+	// With explicit headers, do per-page detection and merge.
+	if opts != nil && len(opts.Headers) > 0 {
+		var result *Table
+		for _, spans := range pages {
+			t := FindTable(spans, opts)
+			if t == nil {
+				continue
+			}
+			if result == nil {
+				result = t
+			} else {
+				result.Rows = append(result.Rows, t.Rows...)
+			}
 		}
-		if result == nil {
-			result = t
-		} else {
-			result.Rows = append(result.Rows, t.Rows...)
+		return result
+	}
+
+	// Auto-detect: discover columns via anchor analysis, then extract.
+	cols := discoverAnchorsAcrossPages(pages, opts)
+	if cols == nil {
+		return nil
+	}
+	hdrNames := make([]string, len(cols))
+	for i, c := range cols {
+		hdrNames[i] = c.Name
+	}
+
+	// When AutoTune is set and no MergeGap/MaxRowGap provided, try
+	// multiple combinations and pick the best result.
+	if opts != nil && opts.AutoTune && opts.MergeGap == 0 && opts.MaxRowGap == 0 {
+		return autoTuneExtract(pages, hdrNames, cols, opts)
+	}
+
+	withHeaders := copyOpts(opts)
+	withHeaders.Headers = hdrNames
+	withHeaders.columnOverrides = cols
+	return FindTableAcrossPages(pages, withHeaders)
+}
+
+func copyOpts(opts *TableOpts) *TableOpts {
+	out := &TableOpts{}
+	if opts != nil {
+		*out = *opts
+	}
+	out.Headers = nil
+	out.AutoTune = false
+	return out
+}
+
+var (
+	tuneMergeGaps  = []float64{0, 12, 16, 20}
+	tuneMaxRowGaps = []float64{0, 25, 35, 50}
+)
+
+func autoTuneExtract(pages [][]TextSpan, headers []string, colOverrides []Column, opts *TableOpts) *Table {
+	var best *Table
+	bestScore := -1.0
+
+	for _, mg := range tuneMergeGaps {
+		for _, mrg := range tuneMaxRowGaps {
+			candidate := copyOpts(opts)
+			candidate.Headers = headers
+			candidate.columnOverrides = colOverrides
+			candidate.MergeGap = mg
+			candidate.MaxRowGap = mrg
+			t := FindTableAcrossPages(pages, candidate)
+			if t == nil {
+				continue
+			}
+			s := scoreTable(t)
+			if s > bestScore {
+				bestScore = s
+				best = t
+			}
+		}
+	}
+	return best
+}
+
+// scoreTable ranks a table extraction result. Higher = better.
+// Rewards: row count, column fill rate, numeric column consistency.
+func scoreTable(t *Table) float64 {
+	if len(t.Rows) == 0 || len(t.Columns) == 0 {
+		return 0
+	}
+	ncols := len(t.Columns)
+	nrows := len(t.Rows)
+
+	// Fill rate: fraction of cells that are non-empty.
+	filled := 0
+	for _, row := range t.Rows {
+		for _, cell := range row.Cells {
+			if cell.Text != "" {
+				filled++
+			}
+		}
+	}
+	fillRate := float64(filled) / float64(nrows*ncols)
+
+	// Row count (log-scaled so 200 rows isn't 200x better than 1).
+	rowScore := math.Log1p(float64(nrows))
+
+	// fillRate^2 penalizes noisy extractions heavily.
+	return rowScore * fillRate * fillRate
+}
+
+// discoverAnchorsAcrossPages scans pages for the most header-like row,
+// then computes data X clusters across all pages and maps header names
+// onto data clusters by positional zone. This handles PDFs where header
+// X positions don't align with data X positions (e.g. BCR statements).
+func discoverAnchorsAcrossPages(pages [][]TextSpan, opts *TableOpts) []Column {
+	yTol := opts.yTol()
+	minCols := opts.minCols()
+
+	// Step 1: find the best header row (by text characteristics).
+	var bestHeaderCols []Column
+	bestScore := 0
+	bestLen := math.MaxInt
+
+	var allRows []tableRow
+	for _, spans := range pages {
+		rows := groupRows(spans, yTol)
+		allRows = append(allRows, rows...)
+		for _, row := range rows {
+			cols := scoreHeaderRow(row, anchorMinColSpacing)
+			if len(cols) < minCols {
+				continue
+			}
+			totalLen := 0
+			for _, c := range cols {
+				totalLen += len(c.Name)
+			}
+			if len(cols) > bestScore || (len(cols) == bestScore && totalLen < bestLen) {
+				bestScore = len(cols)
+				bestLen = totalLen
+				bestHeaderCols = cols
+			}
+		}
+	}
+	if bestHeaderCols == nil {
+		return nil
+	}
+
+	// Step 2: compute data X clusters across all pages.
+	anchors := clusterXPositions(allRows, anchorClusterTol)
+	threshold := max(3, min(20, int(float64(len(allRows))*anchorMinRowFrac)))
+
+	var dataAnchors []xCluster
+	for _, a := range anchors {
+		if len(a.rows) >= threshold {
+			if len(dataAnchors) > 0 && a.x-dataAnchors[len(dataAnchors)-1].x < anchorMinColSpacing {
+				continue
+			}
+			dataAnchors = append(dataAnchors, a)
+		}
+	}
+
+	// Keep only the top N data anchors by row count (N = header count).
+	// This filters out sub-header noise that creates false anchors.
+	if len(dataAnchors) > len(bestHeaderCols) {
+		sort.Slice(dataAnchors, func(i, j int) bool {
+			return len(dataAnchors[i].rows) > len(dataAnchors[j].rows)
+		})
+		dataAnchors = dataAnchors[:len(bestHeaderCols)]
+		sort.Slice(dataAnchors, func(i, j int) bool {
+			return dataAnchors[i].x < dataAnchors[j].x
+		})
+	}
+
+	// Step 3: map header names to data anchors by positional zone.
+	if len(dataAnchors) >= minCols {
+		return mapHeadersToAnchors(bestHeaderCols, dataAnchors)
+	}
+
+	// Fallback: use header X positions directly.
+	return bestHeaderCols
+}
+
+// mapHeadersToAnchors assigns header names to data X clusters using
+// zone-based mapping: each header falls into the zone of the nearest
+// data anchor, where zones are defined by midpoints between anchors.
+func mapHeadersToAnchors(headers []Column, anchors []xCluster) []Column {
+	// Build zone boundaries (midpoints between adjacent anchors).
+	n := len(anchors)
+	boundaries := make([]float64, n+1)
+	boundaries[0] = -math.MaxFloat64
+	boundaries[n] = math.MaxFloat64
+	for i := 1; i < n; i++ {
+		boundaries[i] = (anchors[i-1].x + anchors[i].x) / 2
+	}
+
+	// Assign each header to the zone it falls in.
+	cols := make([]Column, n)
+	for i := range cols {
+		cols[i] = Column{X: anchors[i].x}
+	}
+	for _, h := range headers {
+		for i := 0; i < n; i++ {
+			if h.X >= boundaries[i] && h.X < boundaries[i+1] {
+				if cols[i].Name == "" {
+					cols[i].Name = h.Name
+				}
+				break
+			}
+		}
+	}
+
+	// Drop unnamed columns (data clusters with no matching header).
+	var result []Column
+	for _, c := range cols {
+		if c.Name != "" {
+			result = append(result, c)
 		}
 	}
 	return result
+}
+
+// scoreHeaderRow returns columns if the row looks like a table header:
+// multiple short non-numeric spans spaced at least minSpacing apart.
+func scoreHeaderRow(row tableRow, minSpacing float64) []Column {
+	var cols []Column
+	for _, sp := range row.spans {
+		text := strings.TrimSpace(sp.Text)
+		if !isHeaderText(text) {
+			continue
+		}
+		if len(cols) > 0 && sp.X-cols[len(cols)-1].X < minSpacing {
+			continue
+		}
+		cols = append(cols, Column{Name: text, X: sp.X})
+	}
+	return cols
 }
 
 // =====================================================================
@@ -228,9 +477,15 @@ func findTableByHeaders(spans []TextSpan, opts *TableOpts) *Table {
 		lowestY = mergeWrapped(rows, hi, hSpans, yTol, wt)
 	}
 
-	columns := make([]Column, len(hSpans))
-	for i, h := range hSpans {
-		columns[i] = Column{Name: h.text, X: h.x}
+	// Use column overrides (data cluster X positions) when available.
+	var columns []Column
+	if opts != nil && len(opts.columnOverrides) > 0 {
+		columns = opts.columnOverrides
+	} else {
+		columns = make([]Column, len(hSpans))
+		for i, h := range hSpans {
+			columns[i] = Column{Name: h.text, X: h.x}
+		}
 	}
 
 	// Data rows start after header + any continuation rows.
@@ -489,6 +744,165 @@ func buildTableFromRegion(rows []tableRow, gaps []float64, opts *TableOpts) *Tab
 }
 
 // =====================================================================
+// Approach 3: Auto-detection via anchor X positions
+// =====================================================================
+
+func findTableByAnchors(spans []TextSpan, opts *TableOpts) *Table {
+	yTol := opts.yTol()
+	minCols := opts.minCols()
+	rows := groupRows(spans, yTol)
+	if len(rows) < 2 {
+		return nil
+	}
+
+	anchors := clusterXPositions(rows, anchorClusterTol)
+	threshold := max(3, int(float64(len(rows))*anchorMinRowFrac))
+
+	var sigAnchors []xCluster
+	for _, a := range anchors {
+		if len(a.rows) >= threshold {
+			// Skip anchors too close to the previous (character-level spans).
+			if len(sigAnchors) > 0 && a.x-sigAnchors[len(sigAnchors)-1].x < anchorMinColSpacing {
+				continue
+			}
+			sigAnchors = append(sigAnchors, a)
+		}
+	}
+	if len(sigAnchors) > 10 || len(sigAnchors) < minCols {
+		return nil
+	}
+
+	hi, ok := findAnchorHeaderRow(rows, sigAnchors, minCols)
+	if !ok {
+		return nil
+	}
+
+	// Build columns from the header row's spans aligned to anchors.
+	columns := buildAnchorColumns(rows[hi], sigAnchors)
+	if len(columns) < minCols {
+		return nil
+	}
+
+	// Handle wrapped headers.
+	hSpans := make([]colHeader, len(columns))
+	for i, c := range columns {
+		hSpans[i] = colHeader{text: c.Name, x: c.X}
+	}
+	lowestY := rows[hi].y
+	wt := opts.wrapTol()
+	if wt > 0 {
+		lowestY = mergeWrapped(rows, hi, hSpans, yTol, wt)
+		for i := range columns {
+			columns[i].Name = hSpans[i].text
+		}
+	}
+
+	dataStart := hi + 1
+	for dataStart < len(rows) && rows[dataStart].y >= lowestY-yTol {
+		dataStart++
+	}
+
+	dataRows := collectDataRows(rows[dataStart:], columns, opts)
+	if len(dataRows) == 0 {
+		return nil
+	}
+	return &Table{Columns: columns, Rows: dataRows}
+}
+
+type xCluster struct {
+	x    float64
+	rows map[int]bool
+}
+
+func clusterXPositions(rows []tableRow, tolerance float64) []xCluster {
+	var clusters []xCluster
+	for ri, row := range rows {
+		for _, sp := range row.spans {
+			if strings.TrimSpace(sp.Text) == "" {
+				continue
+			}
+			found := false
+			for ci := range clusters {
+				if math.Abs(sp.X-clusters[ci].x) < tolerance {
+					clusters[ci].rows[ri] = true
+					found = true
+					break
+				}
+			}
+			if !found {
+				clusters = append(clusters, xCluster{x: sp.X, rows: map[int]bool{ri: true}})
+			}
+		}
+	}
+	sort.Slice(clusters, func(i, j int) bool { return clusters[i].x < clusters[j].x })
+	return clusters
+}
+
+func findAnchorHeaderRow(rows []tableRow, anchors []xCluster, minCols int) (int, bool) {
+	nAnchors := len(anchors)
+	// Require the header to match most anchor positions.
+	minScore := max(minCols, nAnchors*2/3)
+
+	bestIdx, bestScore := -1, 0
+	for ri, row := range rows {
+		score := 0
+		for _, a := range anchors {
+			for _, sp := range row.spans {
+				text := strings.TrimSpace(sp.Text)
+				if math.Abs(sp.X-a.x) < anchorClusterTol && isHeaderText(text) {
+					score++
+					break
+				}
+			}
+		}
+		if score > bestScore && score >= minScore {
+			bestScore = score
+			bestIdx = ri
+		}
+	}
+	if bestIdx < 0 {
+		return 0, false
+	}
+	return bestIdx, true
+}
+
+func buildAnchorColumns(row tableRow, anchors []xCluster) []Column {
+	var cols []Column
+	for _, a := range anchors {
+		var best *TextSpan
+		bestDist := math.MaxFloat64
+		for i := range row.spans {
+			d := math.Abs(row.spans[i].X - a.x)
+			if d < anchorClusterTol && d < bestDist {
+				bestDist = d
+				best = &row.spans[i]
+			}
+		}
+		if best != nil {
+			text := strings.TrimSpace(best.Text)
+			if text != "" {
+				cols = append(cols, Column{Name: text, X: a.x})
+			}
+		}
+	}
+	return cols
+}
+
+func isHeaderText(s string) bool {
+	if len(s) == 0 || len(s) > anchorMaxHeaderLen {
+		return false
+	}
+	// Strip common numeric characters; if nothing remains, it's a number.
+	stripped := strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' || r == '.' || r == ',' || r == '-' || r == ' ' {
+			return -1
+		}
+		return r
+	}, s)
+	return len(stripped) > 0
+}
+
+// =====================================================================
 // Shared internals
 // =====================================================================
 
@@ -585,7 +999,74 @@ func collectDataRows(rows []tableRow, columns []Column, opts *TableOpts) []Row {
 		}
 		result = append(result, Row{Y: row.y, Cells: cells})
 	}
+
+	// Anchor-column merge: collapse rows where the anchor column is
+	// empty into the previous row that had a non-empty anchor.
+	if opts != nil && opts.AnchorColumn != "" {
+		result = mergeByAnchorColumn(result, columns, opts.AnchorColumn)
+	}
 	return result
+}
+
+func mergeByAnchorColumn(rows []Row, columns []Column, anchor string) []Row {
+	ai := -1
+	lower := strings.ToLower(anchor)
+	for i, c := range columns {
+		if strings.ToLower(c.Name) == lower {
+			ai = i
+			break
+		}
+	}
+	if ai < 0 {
+		return rows
+	}
+
+	var merged []Row
+	for _, row := range rows {
+		anchorText := ""
+		if ai < len(row.Cells) {
+			anchorText = row.Cells[ai].Text
+		}
+		if anchorText != "" || len(merged) == 0 {
+			merged = append(merged, row)
+		} else if isContinuationRow(row, ai) {
+			// Append continuation text into the previous row.
+			prev := &merged[len(merged)-1]
+			for ci := range prev.Cells {
+				if ci < len(row.Cells) && row.Cells[ci].Text != "" {
+					if prev.Cells[ci].Text != "" {
+						prev.Cells[ci].Text += " " + row.Cells[ci].Text
+					} else {
+						prev.Cells[ci].Text = row.Cells[ci].Text
+					}
+					prev.Cells[ci].Spans = append(prev.Cells[ci].Spans, row.Cells[ci].Spans...)
+				}
+			}
+		}
+	}
+	return merged
+}
+
+// isContinuationRow returns true if the row looks like a description
+// continuation: it must have non-numeric text in the column immediately
+// after the anchor (the "description" column). Rows with content only
+// in distant columns (summaries, totals) are not continuations.
+func isContinuationRow(row Row, anchorIdx int) bool {
+	descIdx := anchorIdx + 1
+	if descIdx >= len(row.Cells) {
+		return false
+	}
+	return row.Cells[descIdx].Text != "" && !isAllNumeric(row.Cells[descIdx].Text)
+}
+
+func isAllNumeric(s string) bool {
+	for _, r := range s {
+		if r >= '0' && r <= '9' || r == '.' || r == ',' || r == '-' || r == ' ' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func mergeCloseRows(rows []tableRow, mergeGap float64) []tableRow {

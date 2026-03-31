@@ -361,7 +361,14 @@ func (e *Editor) Apply() ([]byte, error) {
 		"Pages": pagesRef,
 	})
 
-	return w.Finish(catalogRef)
+	// Preserve original document ID to prevent "save changes?" in Adobe.
+	var origID Array
+	if trailer := reader.Trailer(); trailer != nil {
+		if id, ok := trailer.Array("ID"); ok {
+			origID = id
+		}
+	}
+	return w.FinishWithID(catalogRef, origID)
 }
 
 // inlineResourceDicts ensures Resources and its Font sub-dict are inline Dicts

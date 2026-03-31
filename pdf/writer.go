@@ -86,6 +86,13 @@ func (w *Writer) WriteStream(ref Ref, dict Dict, data []byte) error {
 
 // Finish appends the xref table, trailer, and %%EOF. Returns the complete PDF.
 func (w *Writer) Finish(rootRef Ref) ([]byte, error) {
+	return w.FinishWithID(rootRef, nil)
+}
+
+// FinishWithID is like Finish but preserves the original document's
+// creation ID (first element of the /ID array). This prevents Adobe
+// Acrobat from showing a "save changes?" prompt on open.
+func (w *Writer) FinishWithID(rootRef Ref, originalID Array) ([]byte, error) {
 	infoRef := w.AllocRef()
 	now := time.Now().UTC()
 	pdfDate := fmt.Sprintf("D:%s", now.Format("20060102150405Z"))
@@ -112,16 +119,22 @@ func (w *Writer) Finish(rootRef Ref) ([]byte, error) {
 		}
 	}
 
-	// Generate content-derived document ID (prevents Adobe's "save changes?" prompt).
+	// Document ID: preserve original creation ID, generate new modification ID.
 	h := md5.New()
 	h.Write(w.buf.Bytes())
-	id := string(h.Sum(nil))
+	modID := string(h.Sum(nil))
+	creationID := modID
+	if len(originalID) >= 1 {
+		if s, ok := originalID[0].(string); ok && len(s) > 0 {
+			creationID = s
+		}
+	}
 
 	trailer := Dict{
 		"Size": size,
 		"Root": rootRef,
 		"Info": infoRef,
-		"ID":   Array{id, id},
+		"ID":   Array{creationID, modID},
 	}
 	w.buf.WriteString("trailer\n")
 	if err := writeValue(&w.buf, trailer); err != nil {

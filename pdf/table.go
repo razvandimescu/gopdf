@@ -68,6 +68,19 @@ type TableOpts struct {
 	// MinGap is the minimum horizontal gap (pt) between spans for
 	// auto-detection to treat as a column separator. Default: 10.
 	MinGap float64
+
+	// MaxRowGap is the maximum Y-distance (pt) between consecutive
+	// data rows. Rows beyond this gap are excluded; the table is
+	// considered to have ended. Applied after MergeGap.
+	// Default: 0 (no limit).
+	MaxRowGap float64
+
+	// MergeGap is the maximum Y-distance (pt) between consecutive
+	// rows to merge them into a single logical row. Text in the same
+	// column is concatenated. Useful for tables with multi-line cells
+	// (e.g., bank statements). Applied before MaxRowGap.
+	// Default: 0 (no merging).
+	MergeGap float64
 }
 
 func (o *TableOpts) yTol() float64 {
@@ -99,6 +112,20 @@ func (o *TableOpts) minGap() float64 {
 		return o.MinGap
 	}
 	return defaultMinGap
+}
+
+func (o *TableOpts) maxRowGap() float64 {
+	if o != nil {
+		return o.MaxRowGap
+	}
+	return 0
+}
+
+func (o *TableOpts) mergeGap() float64 {
+	if o != nil {
+		return o.MergeGap
+	}
+	return 0
 }
 
 // CellText returns the text at (row, col). Empty string if out of bounds.
@@ -456,8 +483,13 @@ func buildTableFromRegion(rows []tableRow, gaps []float64, opts *TableOpts) *Tab
 // =====================================================================
 
 type tableRow struct {
-	y     float64
-	spans []TextSpan
+	y       float64
+	yBottom float64
+	spans   []TextSpan
+}
+
+func sortSpansByX(spans []TextSpan) {
+	sort.Slice(spans, func(a, b int) bool { return spans[a].X < spans[b].X })
 }
 
 // groupRows groups spans by Y coordinate into rows sorted top-to-bottom,
@@ -477,14 +509,12 @@ func groupRows(spans []TextSpan, yTol float64) []tableRow {
 			}
 		}
 		if !found {
-			rows = append(rows, tableRow{y: sp.Y, spans: []TextSpan{sp}})
+			rows = append(rows, tableRow{y: sp.Y, yBottom: sp.Y, spans: []TextSpan{sp}})
 		}
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].y > rows[j].y })
 	for i := range rows {
-		sort.Slice(rows[i].spans, func(a, b int) bool {
-			return rows[i].spans[a].X < rows[i].spans[b].X
-		})
+		sortSpansByX(rows[i].spans)
 	}
 	return rows
 }
@@ -523,11 +553,19 @@ func buildCells(spans []TextSpan, columns []Column) []Cell {
 	return cells
 }
 
-// collectDataRows builds Row values from tableRows, applying RowFilter
-// and skipping empty rows. Shared by both detection approaches.
+// collectDataRows builds Row values from tableRows, applying MergeGap,
+// MaxRowGap, RowFilter, and skipping empty rows. Shared by both approaches.
 func collectDataRows(rows []tableRow, columns []Column, opts *TableOpts) []Row {
+	if mg := opts.mergeGap(); mg > 0 {
+		rows = mergeCloseRows(rows, mg)
+	}
+
+	maxGap := opts.maxRowGap()
 	var result []Row
-	for _, row := range rows {
+	for i, row := range rows {
+		if maxGap > 0 && i > 0 && rows[i-1].yBottom-row.y > maxGap {
+			break
+		}
 		cells := buildCells(row.spans, columns)
 		if opts != nil && opts.RowFilter != nil && !opts.RowFilter(cellTexts(cells)) {
 			continue
@@ -538,6 +576,32 @@ func collectDataRows(rows []tableRow, columns []Column, opts *TableOpts) []Row {
 		result = append(result, Row{Y: row.y, Cells: cells})
 	}
 	return result
+}
+
+func mergeCloseRows(rows []tableRow, mergeGap float64) []tableRow {
+	if len(rows) == 0 {
+		return rows
+	}
+	merged := make([]tableRow, 0, len(rows))
+	merged = append(merged, rows[0])
+	for i := 1; i < len(rows); i++ {
+		prev := &merged[len(merged)-1]
+		if prev.yBottom-rows[i].y < mergeGap {
+			prev.spans = append(prev.spans, rows[i].spans...)
+			if rows[i].yBottom < prev.yBottom {
+				prev.yBottom = rows[i].yBottom
+			}
+		} else {
+			merged = append(merged, rows[i])
+		}
+	}
+	// Re-sort spans only for rows that absorbed additional spans.
+	for i := range merged {
+		if len(merged[i].spans) > 1 {
+			sortSpansByX(merged[i].spans)
+		}
+	}
+	return merged
 }
 
 func spanEndX(sp TextSpan) float64 {

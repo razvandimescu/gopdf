@@ -253,6 +253,162 @@ func TestFindTables_TwoColumnNotEnough(t *testing.T) {
 }
 
 // =====================================================================
+// MaxRowGap
+// =====================================================================
+
+func TestFindTable_MaxRowGap(t *testing.T) {
+	// Table data followed by footer text far below.
+	//   Y=700: Name     Age    City       (header)
+	//   Y=680: Alice    30     New York   (data, gap=20)
+	//   Y=660: Bob      25     London     (data, gap=20)
+	//   Y=500: Footer   Info   Here       (footer, gap=160)
+	spans := []TextSpan{
+		makeSpan(50, 700, "Name"),
+		makeSpan(150, 700, "Age"),
+		makeSpan(250, 700, "City"),
+		makeSpan(50, 680, "Alice"),
+		makeSpan(150, 680, "30"),
+		makeSpan(250, 680, "New York"),
+		makeSpan(50, 660, "Bob"),
+		makeSpan(150, 660, "25"),
+		makeSpan(250, 660, "London"),
+		makeSpan(50, 500, "Footer"),
+		makeSpan(150, 500, "Info"),
+		makeSpan(250, 500, "Here"),
+	}
+
+	// Without MaxRowGap: all 3 data rows.
+	tbl := FindTable(spans, &TableOpts{Headers: []string{"Name", "Age"}})
+	if tbl == nil {
+		t.Fatal("expected table")
+	}
+	if len(tbl.Rows) != 3 {
+		t.Errorf("without MaxRowGap: got %d rows, want 3", len(tbl.Rows))
+	}
+
+	// With MaxRowGap=50: footer row excluded.
+	tbl = FindTable(spans, &TableOpts{
+		Headers:   []string{"Name", "Age"},
+		MaxRowGap: 50,
+	})
+	if tbl == nil {
+		t.Fatal("expected table")
+	}
+	if len(tbl.Rows) != 2 {
+		t.Fatalf("with MaxRowGap=50: got %d rows, want 2", len(tbl.Rows))
+	}
+	if tbl.CellText(1, 0) != "Bob" {
+		t.Errorf("last row = %q, want Bob", tbl.CellText(1, 0))
+	}
+}
+
+// =====================================================================
+// MergeGap
+// =====================================================================
+
+func TestFindTable_MergeGap(t *testing.T) {
+	// Table with multi-line cells (description wraps).
+	//   Y=700: Date     Desc         Amount   (header)
+	//   Y=680: Jan 05   Payment to   100.00   (row 1 line 1, gap=20)
+	//   Y=668:          ACME Corp             (row 1 line 2, gap=12)
+	//   Y=656:          Ref ABC123            (row 1 line 3, gap=12)
+	//   Y=636: Jan 06   Transfer     200.00   (row 2 line 1, gap=20)
+	//   Y=624:          from Bob              (row 2 line 2, gap=12)
+	spans := []TextSpan{
+		makeSpan(50, 700, "Date"),
+		makeSpan(150, 700, "Desc"),
+		makeSpan(350, 700, "Amount"),
+		makeSpan(50, 680, "Jan 05"),
+		makeSpan(150, 680, "Payment to"),
+		makeSpan(350, 680, "100.00"),
+		makeSpan(150, 668, "ACME Corp"),
+		makeSpan(150, 656, "Ref ABC123"),
+		makeSpan(50, 636, "Jan 06"),
+		makeSpan(150, 636, "Transfer"),
+		makeSpan(350, 636, "200.00"),
+		makeSpan(150, 624, "from Bob"),
+	}
+
+	// Without MergeGap: 5 data rows (each Y-line is a row).
+	tbl := FindTable(spans, &TableOpts{Headers: []string{"Date", "Desc"}})
+	if tbl == nil {
+		t.Fatal("expected table")
+	}
+	if len(tbl.Rows) != 5 {
+		t.Errorf("without MergeGap: got %d rows, want 5", len(tbl.Rows))
+	}
+
+	// With MergeGap=16: merges into 2 logical rows.
+	tbl = FindTable(spans, &TableOpts{
+		Headers:  []string{"Date", "Desc"},
+		MergeGap: 16,
+	})
+	if tbl == nil {
+		t.Fatal("expected table")
+	}
+	if len(tbl.Rows) != 2 {
+		t.Fatalf("with MergeGap=16: got %d rows, want 2", len(tbl.Rows))
+	}
+	// First merged row should have concatenated description.
+	desc := tbl.CellByName(0, "Desc")
+	if desc != "Payment to ACME Corp Ref ABC123" {
+		t.Errorf("merged desc = %q, want 'Payment to ACME Corp Ref ABC123'", desc)
+	}
+	if tbl.CellByName(0, "Date") != "Jan 05" {
+		t.Errorf("date = %q, want 'Jan 05'", tbl.CellByName(0, "Date"))
+	}
+	if tbl.CellByName(0, "Amount") != "100.00" {
+		t.Errorf("amount = %q, want '100.00'", tbl.CellByName(0, "Amount"))
+	}
+	// Second merged row.
+	desc2 := tbl.CellByName(1, "Desc")
+	if desc2 != "Transfer from Bob" {
+		t.Errorf("merged desc row 2 = %q, want 'Transfer from Bob'", desc2)
+	}
+}
+
+func TestFindTable_MergeGap_WithMaxRowGap(t *testing.T) {
+	// Combine MergeGap and MaxRowGap: merge multi-line rows, stop at footer.
+	spans := []TextSpan{
+		makeSpan(50, 700, "A"),
+		makeSpan(150, 700, "B"),
+		makeSpan(250, 700, "C"),
+		// Row 1: two lines
+		makeSpan(50, 680, "a1"),
+		makeSpan(150, 680, "b1"),
+		makeSpan(250, 680, "c1"),
+		makeSpan(150, 668, "b1-cont"),
+		// Row 2: two lines
+		makeSpan(50, 648, "a2"),
+		makeSpan(150, 648, "b2"),
+		makeSpan(250, 648, "c2"),
+		makeSpan(150, 636, "b2-cont"),
+		// Footer: far below
+		makeSpan(50, 500, "footer1"),
+		makeSpan(150, 500, "footer2"),
+		makeSpan(250, 500, "footer3"),
+	}
+
+	tbl := FindTable(spans, &TableOpts{
+		Headers:   []string{"A", "B"},
+		MergeGap:  16,
+		MaxRowGap: 50,
+	})
+	if tbl == nil {
+		t.Fatal("expected table")
+	}
+	if len(tbl.Rows) != 2 {
+		t.Fatalf("got %d rows, want 2 (merged, footer excluded)", len(tbl.Rows))
+	}
+	if tbl.CellByName(0, "B") != "b1 b1-cont" {
+		t.Errorf("row 0 B = %q, want 'b1 b1-cont'", tbl.CellByName(0, "B"))
+	}
+	if tbl.CellByName(1, "B") != "b2 b2-cont" {
+		t.Errorf("row 1 B = %q, want 'b2 b2-cont'", tbl.CellByName(1, "B"))
+	}
+}
+
+// =====================================================================
 // Convenience methods
 // =====================================================================
 

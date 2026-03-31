@@ -39,6 +39,7 @@ If you need to create, read, search, or edit PDFs in Go without CGo or AGPL lice
 - Text extraction with X/Y coordinates, font name, and font size
 - Line reconstruction with intelligent spacing
 - Table detection with column/row extraction (explicit headers or auto-detection)
+- Multi-line cell merging for tables with wrapped content (bank statements, invoices)
 - Multi-page table support with automatic header re-detection
 - Text search returning bounding rectangles
 - PDF merge with page selection
@@ -128,6 +129,16 @@ tbl := pdf.FindTable(spans, &pdf.TableOpts{
 })
 fmt.Println(tbl.CellByName(0, "Quantity"))    // "3"
 fmt.Println(tbl.CellByName(0, "Description")) // "Widget Assembly"
+```
+
+Tables with multi-line cells (e.g., bank statements):
+
+```go
+tbl := pdf.FindTable(spans, &pdf.TableOpts{
+    Headers:   []string{"Date", "Description", "Debit", "Credit"},
+    MergeGap:  16,  // merge rows within 16pt into one logical row
+    MaxRowGap: 30,  // stop table when gap exceeds 30pt (footer boundary)
+})
 ```
 
 Multi-page tables:
@@ -290,7 +301,7 @@ result, err := ed.Apply()
 | `tbl.ColumnByName(name)` | `int` | Column index by name (case-insensitive) |
 | `tbl.CellByName(row, name)` | `string` | Cell text by row index and column name |
 
-`TableOpts` fields: `Headers` (anchor strings), `YTolerance`, `MinColumns`, `RowFilter`, `WrapTolerance`, `MinGap`.
+`TableOpts` fields: `Headers` (anchor strings), `YTolerance`, `MinColumns`, `RowFilter`, `WrapTolerance`, `MinGap`, `MergeGap` (multi-line cell merging), `MaxRowGap` (table boundary detection).
 
 ### Editor
 

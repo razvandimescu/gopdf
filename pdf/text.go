@@ -736,9 +736,7 @@ func BuildLines(spans []TextSpan) []TextLine {
 
 	// Sort spans within each line by X and build text.
 	for i := range lines {
-		sort.Slice(lines[i].Spans, func(a, b int) bool {
-			return lines[i].Spans[a].X < lines[i].Spans[b].X
-		})
+		sortSpansByX(lines[i].Spans)
 
 		var buf strings.Builder
 		prevEnd := -1.0

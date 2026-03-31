@@ -47,17 +47,24 @@ func main() {
 		return
 	}
 
-	fmt.Printf("%-4s | %-18s | %s | %10s | %10s\n", "#", "Data", "Descriere", "Debit", "Credit")
-	fmt.Println(strings.Repeat("-", 120))
+	fmt.Printf("%-4s | %-18s | %-30s | %10s | %10s\n", "#", "Data", "Descriere", "Debit", "Credit")
+	fmt.Println(strings.Repeat("-", 90))
 
 	for i := range table.Rows {
 		data := table.CellByName(i, "Data")
-		desc := table.CellByName(i, "Descriere")
+		desc := truncate(table.CellByName(i, "Descriere"), 30)
 		debit := table.CellByName(i, "Debit")
 		credit := table.CellByName(i, "Credit")
-		fmt.Printf("%-4d | %-18s | %s | %10s | %10s\n", i+1, data, desc, debit, credit)
+		fmt.Printf("%-4d | %-18s | %-30s | %10s | %10s\n", i+1, data, desc, debit, credit)
 	}
 	fmt.Printf("\nTotal: %d rows across %d pages\n", len(table.Rows), doc.NumPages())
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n-3] + "..."
 }
 
 func isDisclaimer(text string) bool {
@@ -66,5 +73,8 @@ func isDisclaimer(text string) bool {
 		strings.Contains(lower, "garantare a depozitelor") ||
 		strings.Contains(lower, "depozitele garantate") ||
 		strings.Contains(lower, "comisioanele aplicate") ||
-		text == "www.unicredit.ro"
+		strings.Contains(lower, "unicredit bank") ||
+		strings.Contains(lower, "unicredit.ro") ||
+		strings.Contains(lower, "registrul bancar") ||
+		strings.Contains(lower, "capital social")
 }

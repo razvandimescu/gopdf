@@ -277,11 +277,21 @@ func collectHeaders(row tableRow) []colHeader {
 	var hs []colHeader
 	for _, sp := range row.spans {
 		text := strings.TrimSpace(sp.Text)
-		if text != "" {
+		if text == "" {
+			continue
+		}
+		// Deduplicate spans at the same X (some PDFs render headers twice).
+		dup := false
+		for _, h := range hs {
+			if math.Abs(sp.X-h.x) < 1.0 && h.text == text {
+				dup = true
+				break
+			}
+		}
+		if !dup {
 			hs = append(hs, colHeader{text, sp.X})
 		}
 	}
-	// Spans pre-sorted by X in groupRows.
 	return hs
 }
 

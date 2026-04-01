@@ -18,6 +18,7 @@ const (
 	anchorMaxHeaderLen   = 30   // max text length for header-like spans
 	anchorMinColSpacing  = 20.0 // min X-distance between anchor columns (filters char-level spans)
 	anchorMaxColumns     = 10   // reject anchor detection with more columns than this
+	headerDedupXTol      = 1.0  // X-distance for deduplicating header spans
 )
 
 // Table is a detected table with named columns and data rows.
@@ -98,6 +99,11 @@ type TableOpts struct {
 	// merged into the previous row that had a non-empty anchor.
 	// Applied after MergeGap. Case-insensitive.
 	AnchorColumn string
+
+	// RequireAnyColumn lists column names where at least one must be
+	// non-empty for a data row to be included. Rows where all listed
+	// columns are empty are dropped. Case-insensitive.
+	RequireAnyColumn []string
 
 	// columnOverrides, when set, provides column X positions for data
 	// classification instead of deriving them from header span positions.
@@ -220,13 +226,27 @@ func FindTables(spans []TextSpan, opts *TableOpts) []Table {
 // into a single table. When auto-detecting (no headers), anchor-based
 // detection pools spans across all pages for robust column discovery.
 func FindTableAcrossPages(pages [][]TextSpan, opts *TableOpts) *Table {
-	// With explicit headers, do per-page detection and merge.
+	// With explicit headers, pre-compute column X positions from
+	// cross-page data clustering, then do per-page detection and merge.
 	if opts != nil && len(opts.Headers) > 0 {
+		if opts.columnOverrides == nil {
+			if overrides := discoverColumnsForHeaders(pages, opts); len(overrides) >= len(opts.Headers) {
+				enhanced := *opts
+				enhanced.columnOverrides = overrides
+				opts = &enhanced
+			}
+		}
 		var result *Table
-		for _, spans := range pages {
+		for i, spans := range pages {
 			t := FindTable(spans, opts)
 			if t == nil {
 				continue
+			}
+			// On pages after the first, collect continuation rows above the
+			// header (data that spills over from the previous page's section).
+			if i > 0 && result != nil {
+				preRows := collectPreHeaderData(spans, t.Columns, opts)
+				result.Rows = append(result.Rows, preRows...)
 			}
 			if result == nil {
 				result = t
@@ -459,27 +479,55 @@ func scoreHeaderRow(row tableRow, minSpacing float64) []Column {
 // Approach 1: Explicit header anchors
 // =====================================================================
 
-func findTableByHeaders(spans []TextSpan, opts *TableOpts) *Table {
+// pageHeaders holds the result of locating headers on a single page.
+type pageHeaders struct {
+	rows   []tableRow
+	hi     int // first header row index
+	hEnd   int // last header row index (== hi for single-line)
+	hSpans []colHeader
+}
+
+// findPageHeaders groups spans into rows and locates the header.
+// For multi-line headers, only spans matching opts.Headers are collected.
+func findPageHeaders(spans []TextSpan, opts *TableOpts) (*pageHeaders, bool) {
 	yTol := opts.yTol()
 	rows := groupRows(spans, yTol)
 
-	hi, ok := findHeaderRow(rows, opts.Headers)
+	hi, hEnd, ok := findHeaderRows(rows, opts.Headers)
+	if !ok {
+		return nil, false
+	}
+
+	var hSpans []colHeader
+	if hEnd > hi {
+		hSpans = collectMatchingHeaders(rows, hi, hEnd, opts.Headers)
+	} else {
+		hSpans = collectHeaders(rows[hi])
+	}
+	if len(hSpans) == 0 {
+		return nil, false
+	}
+	return &pageHeaders{rows: rows, hi: hi, hEnd: hEnd, hSpans: hSpans}, true
+}
+
+func findTableByHeaders(spans []TextSpan, opts *TableOpts) *Table {
+	ph, ok := findPageHeaders(spans, opts)
 	if !ok {
 		return nil
 	}
 
-	hSpans := collectHeaders(rows[hi])
-	if len(hSpans) == 0 {
-		return nil
-	}
-
-	lowestY := rows[hi].y
+	hSpans := ph.hSpans
+	lowestY := ph.rows[ph.hEnd].y
 	wt := opts.wrapTol()
 	if wt > 0 {
-		lowestY = mergeWrapped(rows, hi, hSpans, yTol, wt)
+		lowestY = mergeWrapped(ph.rows, ph.hEnd, hSpans, opts.yTol(), wt)
 	}
 
-	// Use column overrides (data cluster X positions) when available.
+	dataStart := ph.hEnd + 1
+	for dataStart < len(ph.rows) && ph.rows[dataStart].y >= lowestY-opts.yTol() {
+		dataStart++
+	}
+
 	var columns []Column
 	if opts != nil && len(opts.columnOverrides) > 0 {
 		columns = opts.columnOverrides
@@ -488,24 +536,136 @@ func findTableByHeaders(spans []TextSpan, opts *TableOpts) *Table {
 		for i, h := range hSpans {
 			columns[i] = Column{Name: h.text, X: h.x}
 		}
-	}
-
-	// Data rows start after header + any continuation rows.
-	dataStart := hi + 1
-	for dataStart < len(rows) && rows[dataStart].y >= lowestY-yTol {
-		dataStart++
-	}
-
-	return &Table{Columns: columns, Rows: collectDataRows(rows[dataStart:], columns, opts)}
-}
-
-func findHeaderRow(rows []tableRow, anchors []string) (int, bool) {
-	for i, row := range rows {
-		if matchAnchors(row.spans, anchors) {
-			return i, true
+		if dataStart < len(ph.rows) {
+			columns = remapColumnsToData(columns, ph.rows[dataStart:])
 		}
 	}
-	return 0, false
+
+	return &Table{Columns: columns, Rows: collectDataRows(ph.rows[dataStart:], columns, opts)}
+}
+
+// findHeaderRows finds the first row (or pair of consecutive rows) that
+// contains all anchor strings. Returns (firstRow, lastRow, found).
+func findHeaderRows(rows []tableRow, anchors []string) (int, int, bool) {
+	for i, row := range rows {
+		if matchAnchors(row.spans, anchors) {
+			return i, i, true
+		}
+	}
+	// Multi-line: try pairs of consecutive rows.
+	for i := 0; i < len(rows)-1; i++ {
+		combined := make([]TextSpan, 0, len(rows[i].spans)+len(rows[i+1].spans))
+		combined = append(combined, rows[i].spans...)
+		combined = append(combined, rows[i+1].spans...)
+		if matchAnchors(combined, anchors) {
+			return i, i + 1, true
+		}
+	}
+	return 0, 0, false
+}
+
+// collectMatchingHeaders collects header spans from rows[hi..hEnd] that
+// match one of the requested header names (case-insensitive substring).
+func collectMatchingHeaders(rows []tableRow, hi, hEnd int, names []string) []colHeader {
+	lowerNames := make([]string, len(names))
+	for i, n := range names {
+		lowerNames[i] = strings.ToLower(strings.TrimSpace(n))
+	}
+
+	var result []colHeader
+	for ri := hi; ri <= hEnd; ri++ {
+		for _, sp := range rows[ri].spans {
+			text := strings.TrimSpace(sp.Text)
+			if text == "" {
+				continue
+			}
+			tl := strings.ToLower(text)
+			matched := false
+			for _, ln := range lowerNames {
+				if strings.Contains(tl, ln) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+			result = appendColHeader(result, text, sp.X)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].x < result[j].x })
+	return result
+}
+
+// remapColumnsToData computes data X clusters and maps header columns
+// to the nearest cluster. Falls back to original positions if clustering
+// doesn't produce enough columns.
+func remapColumnsToData(columns []Column, dataRows []tableRow) []Column {
+	if len(dataRows) < 3 {
+		return columns
+	}
+	clusters := clusterXPositions(dataRows, anchorClusterTol)
+	threshold := max(3, len(dataRows)/10)
+
+	var sig []xCluster
+	for _, c := range clusters {
+		if len(c.rows) >= threshold {
+			if len(sig) > 0 && c.x-sig[len(sig)-1].x < anchorMinColSpacing {
+				continue
+			}
+			sig = append(sig, c)
+		}
+	}
+	if len(sig) < len(columns) {
+		return columns
+	}
+
+	result := mapHeadersToAnchors(columns, sig)
+	if len(result) < len(columns) {
+		return columns // mapping lost columns; keep originals
+	}
+	return result
+}
+
+// discoverColumnsForHeaders finds header spans on the first matching page,
+// then clusters data X positions across all pages to compute column positions
+// that reflect where data actually sits (handles header/data X misalignment).
+func discoverColumnsForHeaders(pages [][]TextSpan, opts *TableOpts) []Column {
+	var columns []Column
+	var allDataRows []tableRow
+
+	for _, spans := range pages {
+		ph, ok := findPageHeaders(spans, opts)
+		if !ok {
+			continue
+		}
+		if columns == nil {
+			columns = make([]Column, len(ph.hSpans))
+			for i, h := range ph.hSpans {
+				columns[i] = Column{Name: h.text, X: h.x}
+			}
+		}
+		dataStart := ph.hEnd + 1
+		if dataStart < len(ph.rows) {
+			allDataRows = append(allDataRows, ph.rows[dataStart:]...)
+		}
+	}
+	if columns == nil {
+		return nil
+	}
+
+	return remapColumnsToData(columns, allDataRows)
+}
+
+// collectPreHeaderData collects data rows above the first header on a page.
+// These are continuations from the previous page's last section that spill
+// over a page break.
+func collectPreHeaderData(spans []TextSpan, columns []Column, opts *TableOpts) []Row {
+	ph, ok := findPageHeaders(spans, opts)
+	if !ok || ph.hi == 0 {
+		return nil
+	}
+	return collectDataRows(ph.rows[:ph.hi], columns, opts)
 }
 
 func matchAnchors(spans []TextSpan, anchors []string) bool {
@@ -534,22 +694,22 @@ func collectHeaders(row tableRow) []colHeader {
 	var hs []colHeader
 	for _, sp := range row.spans {
 		text := strings.TrimSpace(sp.Text)
-		if text == "" {
-			continue
-		}
-		// Deduplicate spans at the same X (some PDFs render headers twice).
-		dup := false
-		for _, h := range hs {
-			if math.Abs(sp.X-h.x) < 1.0 && h.text == text {
-				dup = true
-				break
-			}
-		}
-		if !dup {
-			hs = append(hs, colHeader{text, sp.X})
+		if text != "" {
+			hs = appendColHeader(hs, text, sp.X)
 		}
 	}
 	return hs
+}
+
+// appendColHeader appends a colHeader, deduplicating spans at the same X with
+// the same text (some PDFs render headers twice).
+func appendColHeader(hs []colHeader, text string, x float64) []colHeader {
+	for _, h := range hs {
+		if math.Abs(x-h.x) < headerDedupXTol && h.text == text {
+			return hs
+		}
+	}
+	return append(hs, colHeader{text, x})
 }
 
 // mergeWrapped merges single-word continuation spans from row(s)
@@ -980,6 +1140,7 @@ func collectDataRows(rows []tableRow, columns []Column, opts *TableOpts) []Row {
 	}
 
 	maxGap := opts.maxRowGap()
+	reqIndices := resolveRequiredColumns(columns, opts)
 	var result []Row
 	for i, row := range rows {
 		if maxGap > 0 && i > 0 && rows[i-1].yBottom-row.y > maxGap {
@@ -990,6 +1151,9 @@ func collectDataRows(rows []tableRow, columns []Column, opts *TableOpts) []Row {
 			continue
 		}
 		if allEmpty(cells) {
+			continue
+		}
+		if !hasRequiredColumns(cells, reqIndices) {
 			continue
 		}
 		result = append(result, Row{Y: row.y, Cells: cells})
@@ -1112,4 +1276,35 @@ func allEmpty(cells []Cell) bool {
 		}
 	}
 	return true
+}
+
+// resolveRequiredColumns returns column indices that must have at least one
+// non-empty cell, or nil if no requirement is set.
+func resolveRequiredColumns(columns []Column, opts *TableOpts) []int {
+	if opts == nil || len(opts.RequireAnyColumn) == 0 {
+		return nil
+	}
+	var indices []int
+	for _, req := range opts.RequireAnyColumn {
+		rl := strings.ToLower(req)
+		for ci, col := range columns {
+			if strings.ToLower(col.Name) == rl {
+				indices = append(indices, ci)
+				break
+			}
+		}
+	}
+	return indices
+}
+
+func hasRequiredColumns(cells []Cell, reqIndices []int) bool {
+	if len(reqIndices) == 0 {
+		return true
+	}
+	for _, ci := range reqIndices {
+		if ci < len(cells) && cells[ci].Text != "" {
+			return true
+		}
+	}
+	return false
 }

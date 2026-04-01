@@ -16,6 +16,7 @@ func main() {
 	maxRowGap := flag.Float64("max-row-gap", 0, "stop table when row gap exceeds this")
 	anchorCol := flag.String("anchor", "", "column name that signals a new row (merge rows where this is empty)")
 	filterOut := flag.String("filter", "", "comma-separated substrings — rows containing any of these are excluded")
+	require := flag.String("require", "", "comma-separated column names — at least one must be non-empty to keep the row")
 	colWidth := flag.Int("col-width", 30, "max column width for display")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: extract_tables [flags] <file.pdf>\n\nFlags:\n")
@@ -67,6 +68,14 @@ func main() {
 				}
 			}
 			return true
+		}
+	}
+	if *require != "" {
+		for _, r := range strings.Split(*require, ",") {
+			r = strings.TrimSpace(r)
+			if r != "" {
+				opts.RequireAnyColumn = append(opts.RequireAnyColumn, r)
+			}
 		}
 	}
 	if *headers != "" {

@@ -17,6 +17,7 @@ const (
 	anchorMinRowFrac     = 0.15 // fraction of rows an anchor must appear in
 	anchorMaxHeaderLen   = 30   // max text length for header-like spans
 	anchorMinColSpacing  = 20.0 // min X-distance between anchor columns (filters char-level spans)
+	anchorMaxColumns     = 10   // reject anchor detection with more columns than this
 )
 
 // Table is a detected table with named columns and data rows.
@@ -265,6 +266,7 @@ func copyOpts(opts *TableOpts) *TableOpts {
 	}
 	out.Headers = nil
 	out.AutoTune = false
+	out.columnOverrides = nil
 	return out
 }
 
@@ -768,7 +770,7 @@ func findTableByAnchors(spans []TextSpan, opts *TableOpts) *Table {
 			sigAnchors = append(sigAnchors, a)
 		}
 	}
-	if len(sigAnchors) > 10 || len(sigAnchors) < minCols {
+	if len(sigAnchors) > anchorMaxColumns || len(sigAnchors) < minCols {
 		return nil
 	}
 
@@ -892,14 +894,7 @@ func isHeaderText(s string) bool {
 	if len(s) == 0 || len(s) > anchorMaxHeaderLen {
 		return false
 	}
-	// Strip common numeric characters; if nothing remains, it's a number.
-	stripped := strings.Map(func(r rune) rune {
-		if r >= '0' && r <= '9' || r == '.' || r == ',' || r == '-' || r == ' ' {
-			return -1
-		}
-		return r
-	}, s)
-	return len(stripped) > 0
+	return !isAllNumeric(s)
 }
 
 // =====================================================================

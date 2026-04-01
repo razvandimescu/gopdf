@@ -718,7 +718,8 @@ func BuildLines(spans []TextSpan) []TextLine {
 	}
 
 	// Group spans by Y coordinate (with tolerance).
-	const yTolerance = 2.0
+	// Keep tight to avoid merging overlapping text layers at similar Y positions.
+	const yTolerance = 1.0
 	sort.Slice(spans, func(i, j int) bool {
 		return spans[i].Y > spans[j].Y // top to bottom
 	})

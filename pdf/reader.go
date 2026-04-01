@@ -439,8 +439,21 @@ func applyPredictorWithParms(data []byte, dp Dict) ([]byte, error) {
 		columns = 1
 	}
 
+	colors, _ := dp.Int("Colors")
+	if colors == 0 {
+		colors = 1
+	}
+
+	bpc, _ := dp.Int("BitsPerComponent")
+	if bpc == 0 {
+		bpc = 8
+	}
+
+	// Row width in bytes: Columns * Colors * (BitsPerComponent / 8).
+	bytesPerRow := columns * colors * bpc / 8
+
 	if predictor >= 10 {
-		return pngUnpredict(data, columns)
+		return pngUnpredict(data, bytesPerRow)
 	}
 
 	// TIFF predictor 2 — not yet implemented.

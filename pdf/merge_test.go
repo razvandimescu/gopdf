@@ -495,9 +495,13 @@ func testJPEGPDF(t *testing.T, width, height int) []byte {
 	pagesRef := w.AllocRef()
 	catalogRef := w.AllocRef()
 
-	// Write the JPEG as an XObject image stream.
 	imgRef := w.AllocRef()
-	w.WriteObject(imgRef, &Stream{
+	mustWrite := func(ref Ref, obj any) {
+		if err := w.WriteObject(ref, obj); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWrite(imgRef, &Stream{
 		Dict: Dict{
 			"Type":             Name("XObject"),
 			"Subtype":          Name("Image"),
@@ -511,27 +515,26 @@ func testJPEGPDF(t *testing.T, width, height int) []byte {
 		Data: jpegData,
 	})
 
-	// Content stream that draws the image.
 	contentRef := w.AllocRef()
 	content := fmt.Sprintf("q %d 0 0 %d 0 0 cm /Img1 Do Q", width, height)
-	w.WriteStream(contentRef, Dict{}, []byte(content))
+	if err := w.WriteStream(contentRef, Dict{}, []byte(content)); err != nil {
+		t.Fatal(err)
+	}
 
-	// Page dict.
 	pageRef := w.AllocRef()
-	w.WriteObject(pageRef, Dict{
+	mustWrite(pageRef, Dict{
 		"Type":      Name("Page"),
 		"Parent":    pagesRef,
 		"MediaBox":  Array{0, 0, float64(width), float64(height)},
 		"Contents":  contentRef,
 		"Resources": Dict{"XObject": Dict{"Img1": imgRef}},
 	})
-
-	w.WriteObject(pagesRef, Dict{
+	mustWrite(pagesRef, Dict{
 		"Type":  Name("Pages"),
 		"Kids":  Array{pageRef},
 		"Count": 1,
 	})
-	w.WriteObject(catalogRef, Dict{
+	mustWrite(catalogRef, Dict{
 		"Type":  Name("Catalog"),
 		"Pages": pagesRef,
 	})

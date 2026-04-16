@@ -53,6 +53,19 @@ func (w *Writer) restore(cp writerCheckpoint) {
 	w.nextObj = cp.nextObj
 }
 
+// estimateFinishedSize returns the estimated total PDF size after Finish(),
+// given the number of page refs that will appear in the Kids array.
+func (w *Writer) estimateFinishedSize(numPageRefs int) int64 {
+	body := int64(w.Len())
+	// Unwritten objects: Pages dict, Catalog dict, Info dict.
+	body += int64(80+numPageRefs*15) + 60 + 120
+	// xref: header + 20 bytes per entry (+2 for Info + free entry 0).
+	body += 15 + int64(w.nextObj+2)*20
+	// trailer + startxref + %%EOF.
+	body += 200
+	return body
+}
+
 // AllocRef reserves an object number and returns a Ref.
 // The object must later be written with WriteObject or WriteStream.
 func (w *Writer) AllocRef() Ref {

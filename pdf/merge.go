@@ -202,7 +202,7 @@ func buildMergedPDF(prepared []preparedSource, cfg mergeConfig) ([]byte, int, er
 			}
 
 			if cfg.maxSize > 0 {
-				est := estimateMergeSize(w, len(pageRefs)+1)
+				est := w.estimateFinishedSize(len(pageRefs) + 1)
 				if est > cfg.maxSize {
 					w.restore(cp)
 					budgetExceeded = true
@@ -327,15 +327,21 @@ func (m *Merger) MergeWithOptions(opts MergeOptions) (*MergeResult, error) {
 	return nil, fmt.Errorf("unknown oversize behavior: %d", opts.OversizeBehavior)
 }
 
-// estimateMergeSize returns the estimated final PDF size given the current
-// writer state and the number of page refs for the Kids array.
-// Used during truncation to decide when to stop adding pages.
-func estimateMergeSize(w *Writer, numPageRefs int) int64 {
-	body := int64(w.buf.Len())
-	body += int64(80+numPageRefs*15) + 60 + 120
-	body += 15 + int64(w.nextObj+2)*20
-	body += 200
-	return body
+// filterNames extracts the filter name(s) from a stream dict's /Filter entry.
+func filterNames(d Dict) []Name {
+	if f, ok := d.Name("Filter"); ok {
+		return []Name{f}
+	}
+	if fa, ok := d.Array("Filter"); ok {
+		var names []Name
+		for _, item := range fa {
+			if n, ok := item.(Name); ok {
+				names = append(names, n)
+			}
+		}
+		return names
+	}
+	return nil
 }
 
 // copyContext tracks object remapping for a single source document.
@@ -439,8 +445,12 @@ func (ctx *copyContext) copyStream(ref Ref, stream *Stream) {
 }
 
 // recompressJPEG decodes and re-encodes JPEG data at the given quality.
-// Returns nil if recompression fails or produces a larger result.
+// Returns nil if recompression fails, produces a larger result, or the
+// input is too small to benefit (<4KB).
 func recompressJPEG(data []byte, quality int) []byte {
+	if len(data) < 4096 {
+		return nil
+	}
 	img, err := jpeg.Decode(bytes.NewReader(data))
 	if err != nil {
 		return nil
@@ -455,34 +465,16 @@ func recompressJPEG(data []byte, quality int) []byte {
 	return buf.Bytes()
 }
 
-// isDCTDecode returns true if the stream's primary filter is DCTDecode (JPEG).
 func isDCTDecode(d Dict) bool {
-	if f, ok := d.Name("Filter"); ok {
-		return f == "DCTDecode"
-	}
-	if fa, ok := d.Array("Filter"); ok && len(fa) > 0 {
-		if n, ok := fa[0].(Name); ok {
-			return n == "DCTDecode"
-		}
-	}
-	return false
+	filters := filterNames(d)
+	return len(filters) > 0 && filters[0] == "DCTDecode"
 }
 
 // isPassthroughFilter returns true if the stream uses a filter that our reader
 // doesn't decode (images, etc.), meaning Data contains the raw encoded bytes
 // and the original Filter must be preserved.
 func isPassthroughFilter(d Dict) bool {
-	var filters []Name
-	if f, ok := d.Name("Filter"); ok {
-		filters = []Name{f}
-	} else if fa, ok := d.Array("Filter"); ok {
-		for _, item := range fa {
-			if n, ok := item.(Name); ok {
-				filters = append(filters, n)
-			}
-		}
-	}
-	for _, f := range filters {
+	for _, f := range filterNames(d) {
 		switch f {
 		case "DCTDecode", "JPXDecode", "CCITTFaxDecode", "JBIG2Decode":
 			return true

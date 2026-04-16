@@ -1,7 +1,12 @@
 package pdf
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
+	"image"
+	"image/color"
+	"image/jpeg"
 	"strings"
 	"testing"
 )
@@ -231,8 +236,8 @@ func TestMergeWithOptions_FailOverLimit(t *testing.T) {
 	if ose.MaxSize != 1 {
 		t.Errorf("MaxSize: %d, want 1", ose.MaxSize)
 	}
-	if ose.EstimatedSize <= 1 {
-		t.Errorf("EstimatedSize should be > 1, got %d", ose.EstimatedSize)
+	if ose.Size <= 1 {
+		t.Errorf("EstimatedSize should be > 1, got %d", ose.Size)
 	}
 	if res == nil || res.TotalPages != 5 {
 		t.Errorf("result should report TotalPages=5, got %v", res)
@@ -383,6 +388,61 @@ func TestMergeWithOptions_ShrinkOverLimit(t *testing.T) {
 	}
 }
 
+func TestMergeWithOptions_TruncateWithDedup(t *testing.T) {
+	// Merge 10 copies of the same PDF. Truncate now applies dedup + strip,
+	// so identical streams are shared and more pages should fit compared to
+	// the raw (fail-mode) size.
+	data := testPDF(t, "Identical content for dedup")
+
+	// Fail mode: raw estimated size (no optimization).
+	mFail := NewMerger()
+	for i := 0; i < 10; i++ {
+		mFail.Add(data)
+	}
+	_, failErr := mFail.MergeWithOptions(MergeOptions{
+		MaxSize:          1,
+		OversizeBehavior: OversizeFail,
+	})
+	var failOse *OversizeError
+	if !errors.As(failErr, &failOse) {
+		t.Fatalf("expected OversizeError from fail, got %T", failErr)
+	}
+	rawSize := failOse.Size
+
+	// Truncate: set limit to ~50% of raw size. With dedup, more pages fit.
+	limit := rawSize / 2
+	mTrunc := NewMerger()
+	for i := 0; i < 10; i++ {
+		mTrunc.Add(data)
+	}
+	res, err := mTrunc.MergeWithOptions(MergeOptions{
+		MaxSize:          limit,
+		OversizeBehavior: OversizeTruncate,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.TotalPages != 10 {
+		t.Errorf("TotalPages: %d, want 10", res.TotalPages)
+	}
+	// With dedup, identical streams are shared — should fit significantly more
+	// than 5 pages (50% of raw would fit ~5 without optimization).
+	if res.IncludedPages <= 5 {
+		t.Errorf("dedup should allow >5 pages at 50%% raw limit, got %d", res.IncludedPages)
+	}
+	if int64(len(res.Data)) > limit {
+		t.Errorf("output %d bytes exceeds limit %d", len(res.Data), limit)
+	}
+
+	doc, err := OpenBytes(res.Data)
+	if err != nil {
+		t.Fatalf("truncated+dedup PDF invalid: %v", err)
+	}
+	if doc.NumPages() != res.IncludedPages {
+		t.Errorf("doc pages %d != IncludedPages %d", doc.NumPages(), res.IncludedPages)
+	}
+}
+
 func TestMergeWithOptions_BackwardCompat(t *testing.T) {
 	// Merge() should produce identical results to MergeWithOptions with zero opts.
 	data := testMultiPagePDF(t, "X", "Y")
@@ -408,4 +468,123 @@ func TestMergeWithOptions_BackwardCompat(t *testing.T) {
 		t.Errorf("page counts differ: Merge()=%d, MergeWithOptions()=%d",
 			doc1.NumPages(), doc2.NumPages())
 	}
+}
+
+// testJPEGPDF creates a single-page PDF with an embedded JPEG image of the given dimensions.
+func testJPEGPDF(t *testing.T, width, height int) []byte {
+	t.Helper()
+	// Create a colorful image so JPEG compression has something to work with.
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			img.Set(x, y, color.RGBA{
+				R: uint8(x * 255 / width),
+				G: uint8(y * 255 / height),
+				B: uint8((x + y) * 255 / (width + height)),
+				A: 255,
+			})
+		}
+	}
+	var jpegBuf bytes.Buffer
+	if err := jpeg.Encode(&jpegBuf, img, &jpeg.Options{Quality: 95}); err != nil {
+		t.Fatal(err)
+	}
+	jpegData := jpegBuf.Bytes()
+
+	w := NewWriter()
+	pagesRef := w.AllocRef()
+	catalogRef := w.AllocRef()
+
+	// Write the JPEG as an XObject image stream.
+	imgRef := w.AllocRef()
+	w.WriteObject(imgRef, &Stream{
+		Dict: Dict{
+			"Type":             Name("XObject"),
+			"Subtype":          Name("Image"),
+			"Width":            width,
+			"Height":           height,
+			"ColorSpace":       Name("DeviceRGB"),
+			"BitsPerComponent": 8,
+			"Filter":           Name("DCTDecode"),
+			"Length":           len(jpegData),
+		},
+		Data: jpegData,
+	})
+
+	// Content stream that draws the image.
+	contentRef := w.AllocRef()
+	content := fmt.Sprintf("q %d 0 0 %d 0 0 cm /Img1 Do Q", width, height)
+	w.WriteStream(contentRef, Dict{}, []byte(content))
+
+	// Page dict.
+	pageRef := w.AllocRef()
+	w.WriteObject(pageRef, Dict{
+		"Type":      Name("Page"),
+		"Parent":    pagesRef,
+		"MediaBox":  Array{0, 0, float64(width), float64(height)},
+		"Contents":  contentRef,
+		"Resources": Dict{"XObject": Dict{"Img1": imgRef}},
+	})
+
+	w.WriteObject(pagesRef, Dict{
+		"Type":  Name("Pages"),
+		"Kids":  Array{pageRef},
+		"Count": 1,
+	})
+	w.WriteObject(catalogRef, Dict{
+		"Type":  Name("Catalog"),
+		"Pages": pagesRef,
+	})
+
+	data, err := w.Finish(catalogRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func TestMergeWithOptions_ShrinkJPEGRecompression(t *testing.T) {
+	// Create PDFs with large high-quality JPEG images.
+	pdf1 := testJPEGPDF(t, 800, 600)
+	pdf2 := testJPEGPDF(t, 800, 600)
+
+	// Merge without optimization to get the raw size.
+	mRaw := NewMerger()
+	mRaw.Add(pdf1)
+	mRaw.Add(pdf2)
+	rawData, err := mRaw.Merge()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Shrink with a limit that's ~50% of raw — should trigger JPEG recompression.
+	limit := int64(len(rawData)) / 2
+	mShrink := NewMerger()
+	mShrink.Add(pdf1)
+	mShrink.Add(pdf2)
+	res, err := mShrink.MergeWithOptions(MergeOptions{
+		MaxSize:          limit,
+		OversizeBehavior: OversizeShrink,
+	})
+	if err != nil {
+		t.Fatalf("expected shrink to fit via JPEG recompression, got: %v", err)
+	}
+	if res.IncludedPages != 2 {
+		t.Errorf("IncludedPages: %d, want 2", res.IncludedPages)
+	}
+	if int64(len(res.Data)) > limit {
+		t.Errorf("output %d bytes exceeds limit %d", len(res.Data), limit)
+	}
+
+	doc, err := OpenBytes(res.Data)
+	if err != nil {
+		t.Fatalf("shrunk PDF invalid: %v", err)
+	}
+	if doc.NumPages() != 2 {
+		t.Errorf("pages: %d, want 2", doc.NumPages())
+	}
+
+	t.Logf("raw=%d  shrunk=%d  limit=%d  savings=%.0f%%",
+		len(rawData), len(res.Data), limit,
+		100*(1-float64(len(res.Data))/float64(len(rawData))))
 }

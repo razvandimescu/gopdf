@@ -1,8 +1,10 @@
 package pdf
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"fmt"
+	"image/jpeg"
 	"os"
 )
 
@@ -10,9 +12,9 @@ import (
 type OversizeBehavior int
 
 const (
-	OversizeFail     OversizeBehavior = iota // return error with estimated size
-	OversizeTruncate                         // include as many pages as fit
-	OversizeShrink                           // deduplicate streams + strip metadata, error if still over
+	OversizeFail     OversizeBehavior = iota // return error with raw (unoptimized) size
+	OversizeTruncate                         // dedup + strip + JPEG recompress + include as many pages as fit
+	OversizeShrink                           // dedup + strip + JPEG recompress to hit target, error if still over
 )
 
 // MergeOptions configures size-constrained merging.
@@ -30,13 +32,13 @@ type MergeResult struct {
 
 // OversizeError is returned when the merged PDF exceeds MaxSize.
 type OversizeError struct {
-	EstimatedSize int64
-	MaxSize       int64
+	Size    int64 // actual or estimated output size
+	MaxSize int64
 }
 
 func (e *OversizeError) Error() string {
-	return fmt.Sprintf("merged PDF estimated at %d bytes exceeds limit of %d bytes",
-		e.EstimatedSize, e.MaxSize)
+	return fmt.Sprintf("merged PDF size %d bytes exceeds limit of %d bytes",
+		e.Size, e.MaxSize)
 }
 
 // MergeFiles merges PDF files by path, returning the combined PDF bytes.
@@ -143,6 +145,104 @@ func (m *Merger) prepareSources() ([]preparedSource, int, error) {
 	return prepared, totalPages, nil
 }
 
+// mergeConfig controls a single build pass.
+type mergeConfig struct {
+	optimize     bool  // dedup + metadata stripping
+	imageQuality int   // JPEG recompression quality (0 = passthrough, 1-100 = re-encode)
+	maxSize      int64 // truncation limit (0 = no truncation)
+}
+
+// buildMergedPDF runs one merge pass and returns the finished PDF bytes.
+// Returns (nil, 0, nil) when truncation results in zero pages.
+func buildMergedPDF(prepared []preparedSource, cfg mergeConfig) ([]byte, int, error) {
+	w := NewWriter()
+	pagesRef := w.AllocRef()
+	catalogRef := w.AllocRef()
+
+	var pageRefs []Ref
+	var streamHash map[[32]byte]Ref
+	if cfg.optimize {
+		streamHash = make(map[[32]byte]Ref)
+	}
+
+	budgetExceeded := false
+	for _, ps := range prepared {
+		if budgetExceeded {
+			break
+		}
+		ctx := &copyContext{
+			reader:       ps.reader,
+			writer:       w,
+			refCache:     make(map[int]Ref),
+			streamHash:   streamHash,
+			stripMeta:    cfg.optimize,
+			imageQuality: cfg.imageQuality,
+		}
+		for _, pageDict := range ps.pages {
+			var cp writerCheckpoint
+			if cfg.maxSize > 0 {
+				cp = w.checkpoint()
+			}
+
+			copiedObj := ctx.copyObject(pageDict)
+			copiedPage, ok := copiedObj.(Dict)
+			if !ok {
+				return nil, 0, fmt.Errorf("copied page is not a Dict")
+			}
+
+			delete(copiedPage, "Parent")
+			copiedPage["Parent"] = pagesRef
+			if _, ok := copiedPage.Name("Type"); !ok {
+				copiedPage["Type"] = Name("Page")
+			}
+
+			pageRef := w.AllocRef()
+			if err := w.WriteObject(pageRef, copiedPage); err != nil {
+				return nil, 0, fmt.Errorf("writing page: %w", err)
+			}
+
+			if cfg.maxSize > 0 {
+				est := estimateMergeSize(w, len(pageRefs)+1)
+				if est > cfg.maxSize {
+					w.restore(cp)
+					budgetExceeded = true
+					break
+				}
+			}
+
+			pageRefs = append(pageRefs, pageRef)
+		}
+	}
+
+	if len(pageRefs) == 0 {
+		return nil, 0, nil
+	}
+
+	kids := make(Array, len(pageRefs))
+	for i, ref := range pageRefs {
+		kids[i] = ref
+	}
+	if err := w.WriteObject(pagesRef, Dict{
+		"Type":  Name("Pages"),
+		"Kids":  kids,
+		"Count": len(pageRefs),
+	}); err != nil {
+		return nil, 0, fmt.Errorf("writing Pages: %w", err)
+	}
+	if err := w.WriteObject(catalogRef, Dict{
+		"Type":  Name("Catalog"),
+		"Pages": pagesRef,
+	}); err != nil {
+		return nil, 0, fmt.Errorf("writing Catalog: %w", err)
+	}
+
+	data, err := w.Finish(catalogRef)
+	if err != nil {
+		return nil, 0, err
+	}
+	return data, len(pageRefs), nil
+}
+
 // MergeWithOptions produces the combined PDF with size constraints.
 func (m *Merger) MergeWithOptions(opts MergeOptions) (*MergeResult, error) {
 	if len(m.sources) == 0 {
@@ -154,143 +254,98 @@ func (m *Merger) MergeWithOptions(opts MergeOptions) (*MergeResult, error) {
 		return nil, err
 	}
 
-	shrink := opts.MaxSize > 0 && opts.OversizeBehavior == OversizeShrink
-	truncate := opts.MaxSize > 0 && opts.OversizeBehavior == OversizeTruncate
-
-	w := NewWriter()
-	pagesRef := w.AllocRef()
-	catalogRef := w.AllocRef()
-
-	var pageRefs []Ref
-	var streamHash map[[32]byte]Ref
-	if shrink {
-		streamHash = make(map[[32]byte]Ref)
+	result := func(data []byte, n int) (*MergeResult, error) {
+		return &MergeResult{Data: data, TotalPages: totalPages, IncludedPages: n}, nil
+	}
+	oversizeErr := func(size int64, n int) (*MergeResult, error) {
+		return &MergeResult{TotalPages: totalPages, IncludedPages: n},
+			&OversizeError{Size: size, MaxSize: opts.MaxSize}
 	}
 
-	budgetExceeded := false
-	for _, ps := range prepared {
-		if budgetExceeded {
-			break
+	// No size limit: plain merge.
+	if opts.MaxSize <= 0 {
+		data, n, err := buildMergedPDF(prepared, mergeConfig{})
+		if err != nil {
+			return nil, err
+		}
+		return result(data, n)
+	}
+
+	switch opts.OversizeBehavior {
+	case OversizeFail:
+		data, n, err := buildMergedPDF(prepared, mergeConfig{})
+		if err != nil {
+			return nil, err
+		}
+		if int64(len(data)) > opts.MaxSize {
+			return oversizeErr(int64(len(data)), n)
+		}
+		return result(data, n)
+
+	case OversizeTruncate:
+		data, n, err := buildMergedPDF(prepared, mergeConfig{
+			optimize: true,
+			maxSize:  opts.MaxSize,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if n == 0 {
+			return oversizeErr(0, 0)
+		}
+		return result(data, n)
+
+	case OversizeShrink:
+		// Pass 1: lossless (dedup + metadata strip).
+		data, n, err := buildMergedPDF(prepared, mergeConfig{optimize: true})
+		if err != nil {
+			return nil, err
+		}
+		if int64(len(data)) <= opts.MaxSize {
+			return result(data, n)
 		}
 
-		ctx := &copyContext{
-			reader:     ps.reader,
-			writer:     w,
-			refCache:   make(map[int]Ref),
-			streamHash: streamHash,
-			stripMeta:  shrink,
+		// Pass 2: JPEG recompression at ratio-derived quality.
+		ratio := float64(opts.MaxSize) / float64(len(data))
+		quality := int(ratio * 85)
+		if quality < 10 {
+			quality = 10
 		}
-
-		for _, pageDict := range ps.pages {
-			var cp writerCheckpoint
-			if truncate {
-				cp = w.checkpoint()
-			}
-
-			copiedObj := ctx.copyObject(pageDict)
-			copiedPage, ok := copiedObj.(Dict)
-			if !ok {
-				return nil, fmt.Errorf("copied page is not a Dict")
-			}
-
-			delete(copiedPage, "Parent")
-			copiedPage["Parent"] = pagesRef
-			if _, ok := copiedPage.Name("Type"); !ok {
-				copiedPage["Type"] = Name("Page")
-			}
-
-			pageRef := w.AllocRef()
-			if err := w.WriteObject(pageRef, copiedPage); err != nil {
-				return nil, fmt.Errorf("writing page: %w", err)
-			}
-
-			if truncate {
-				est := estimateMergeSize(w, len(pageRefs)+1)
-				if est > opts.MaxSize {
-					w.restore(cp)
-					budgetExceeded = true
-					break
-				}
-			}
-
-			pageRefs = append(pageRefs, pageRef)
+		if quality > 85 {
+			quality = 85
 		}
-	}
-
-	// Truncate: not even one page fits.
-	if budgetExceeded && len(pageRefs) == 0 {
-		est := estimateMergeSize(w, 0)
-		return &MergeResult{
-			TotalPages:    totalPages,
-			IncludedPages: 0,
-		}, &OversizeError{EstimatedSize: est, MaxSize: opts.MaxSize}
-	}
-
-	// Fail / Shrink: full merge done, check size.
-	if opts.MaxSize > 0 && !truncate {
-		est := estimateMergeSize(w, len(pageRefs))
-		if est > opts.MaxSize {
-			return &MergeResult{
-				TotalPages:    totalPages,
-				IncludedPages: len(pageRefs),
-			}, &OversizeError{EstimatedSize: est, MaxSize: opts.MaxSize}
+		data, n, err = buildMergedPDF(prepared, mergeConfig{optimize: true, imageQuality: quality})
+		if err != nil {
+			return nil, err
 		}
+		if int64(len(data)) <= opts.MaxSize {
+			return result(data, n)
+		}
+		return oversizeErr(int64(len(data)), n)
 	}
 
-	// Build the Pages node.
-	kids := make(Array, len(pageRefs))
-	for i, ref := range pageRefs {
-		kids[i] = ref
-	}
-	pagesDict := Dict{
-		"Type":  Name("Pages"),
-		"Kids":  kids,
-		"Count": len(pageRefs),
-	}
-	if err := w.WriteObject(pagesRef, pagesDict); err != nil {
-		return nil, fmt.Errorf("writing Pages: %w", err)
-	}
-
-	catalogDict := Dict{
-		"Type":  Name("Catalog"),
-		"Pages": pagesRef,
-	}
-	if err := w.WriteObject(catalogRef, catalogDict); err != nil {
-		return nil, fmt.Errorf("writing Catalog: %w", err)
-	}
-
-	data, err := w.Finish(catalogRef)
-	if err != nil {
-		return nil, err
-	}
-
-	return &MergeResult{
-		Data:          data,
-		TotalPages:    totalPages,
-		IncludedPages: len(pageRefs),
-	}, nil
+	return nil, fmt.Errorf("unknown oversize behavior: %d", opts.OversizeBehavior)
 }
 
 // estimateMergeSize returns the estimated final PDF size given the current
 // writer state and the number of page refs for the Kids array.
+// Used during truncation to decide when to stop adding pages.
 func estimateMergeSize(w *Writer, numPageRefs int) int64 {
 	body := int64(w.buf.Len())
-	// Unwritten objects: Pages dict, Catalog dict, Info dict.
 	body += int64(80+numPageRefs*15) + 60 + 120
-	// xref: header + 20 bytes per entry (+2 for Info + free entry 0).
 	body += 15 + int64(w.nextObj+2)*20
-	// trailer + startxref + %%EOF.
 	body += 200
 	return body
 }
 
 // copyContext tracks object remapping for a single source document.
 type copyContext struct {
-	reader     *Reader
-	writer     *Writer
-	refCache   map[int]Ref      // source obj num → new ref
-	streamHash map[[32]byte]Ref // content hash → ref; shared across sources; nil = no dedup
-	stripMeta  bool
+	reader       *Reader
+	writer       *Writer
+	refCache     map[int]Ref      // source obj num → new ref
+	streamHash   map[[32]byte]Ref // content hash → ref; shared across sources; nil = no dedup
+	stripMeta    bool
+	imageQuality int // JPEG recompression quality; 0 = passthrough
 }
 
 var metadataKeys = map[Name]bool{
@@ -367,14 +422,50 @@ func (ctx *copyContext) copyObject(obj any) any {
 func (ctx *copyContext) copyStream(ref Ref, stream *Stream) {
 	copiedDict := ctx.copyDict(stream.Dict)
 	if isPassthroughFilter(stream.Dict) {
-		copiedDict["Length"] = len(stream.Data)
-		ctx.writer.WriteObject(ref, &Stream{Dict: copiedDict, Data: stream.Data})
+		data := stream.Data
+		if ctx.imageQuality > 0 && isDCTDecode(stream.Dict) {
+			if recompressed := recompressJPEG(data, ctx.imageQuality); recompressed != nil {
+				data = recompressed
+			}
+		}
+		copiedDict["Length"] = len(data)
+		ctx.writer.WriteObject(ref, &Stream{Dict: copiedDict, Data: data})
 	} else {
 		delete(copiedDict, "Filter")
 		delete(copiedDict, "Length")
 		delete(copiedDict, "DecodeParms")
 		ctx.writer.WriteStream(ref, copiedDict, stream.Data)
 	}
+}
+
+// recompressJPEG decodes and re-encodes JPEG data at the given quality.
+// Returns nil if recompression fails or produces a larger result.
+func recompressJPEG(data []byte, quality int) []byte {
+	img, err := jpeg.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil
+	}
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: quality}); err != nil {
+		return nil
+	}
+	if buf.Len() >= len(data) {
+		return nil // recompression didn't help
+	}
+	return buf.Bytes()
+}
+
+// isDCTDecode returns true if the stream's primary filter is DCTDecode (JPEG).
+func isDCTDecode(d Dict) bool {
+	if f, ok := d.Name("Filter"); ok {
+		return f == "DCTDecode"
+	}
+	if fa, ok := d.Array("Filter"); ok && len(fa) > 0 {
+		if n, ok := fa[0].(Name); ok {
+			return n == "DCTDecode"
+		}
+	}
+	return false
 }
 
 // isPassthroughFilter returns true if the stream uses a filter that our reader

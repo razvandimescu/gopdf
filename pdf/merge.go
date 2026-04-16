@@ -109,26 +109,19 @@ func (m *Merger) Merge() ([]byte, error) {
 	return res.Data, nil
 }
 
-// MergeWithOptions produces the combined PDF with size constraints.
-func (m *Merger) MergeWithOptions(opts MergeOptions) (*MergeResult, error) {
-	if len(m.sources) == 0 {
-		return nil, fmt.Errorf("no PDFs to merge")
-	}
+type preparedSource struct {
+	reader *Reader
+	pages  []Dict
+}
 
-	// Pre-process: open all sources and resolve page selections.
-	type preparedSource struct {
-		reader *Reader
-		pages  []Dict
-	}
+func (m *Merger) prepareSources() ([]preparedSource, int, error) {
 	var prepared []preparedSource
 	totalPages := 0
-
 	for srcIdx, src := range m.sources {
 		allPages, err := src.reader.Pages()
 		if err != nil {
-			return nil, fmt.Errorf("source %d pages: %w", srcIdx, err)
+			return nil, 0, fmt.Errorf("source %d pages: %w", srcIdx, err)
 		}
-
 		var selected []Dict
 		if src.pages == nil {
 			selected = allPages
@@ -139,13 +132,26 @@ func (m *Merger) MergeWithOptions(opts MergeOptions) (*MergeResult, error) {
 					idx = n + idx
 				}
 				if idx < 0 || idx >= n {
-					return nil, fmt.Errorf("source %d: page %d out of range (0-%d)", srcIdx, idx, n-1)
+					return nil, 0, fmt.Errorf("source %d: page %d out of range (0-%d)", srcIdx, idx, n-1)
 				}
 				selected = append(selected, allPages[idx])
 			}
 		}
 		totalPages += len(selected)
 		prepared = append(prepared, preparedSource{reader: src.reader, pages: selected})
+	}
+	return prepared, totalPages, nil
+}
+
+// MergeWithOptions produces the combined PDF with size constraints.
+func (m *Merger) MergeWithOptions(opts MergeOptions) (*MergeResult, error) {
+	if len(m.sources) == 0 {
+		return nil, fmt.Errorf("no PDFs to merge")
+	}
+
+	prepared, totalPages, err := m.prepareSources()
+	if err != nil {
+		return nil, err
 	}
 
 	shrink := opts.MaxSize > 0 && opts.OversizeBehavior == OversizeShrink

@@ -27,7 +27,7 @@ If you need to create, read, search, or edit PDFs in Go without CGo or AGPL lice
 | **Text extraction** | Positioned (X/Y) | Positioned | Raw streams | Basic | Positioned |
 | **Table detection** | Yes | No | No | No | No |
 | **Text search** | With rects | Yes | No | No | Yes |
-| **PDF merge** | Yes | Yes | Yes | No | No |
+| **PDF merge** | Yes (size-constrained) | Yes | Yes | No | No |
 | **Text overlay** | Yes | Yes | Watermark | No | No |
 | **Visual redaction** | Yes | Yes | No | No | No |
 | **PDF creation** | Yes | Yes | Yes | No | Yes |
@@ -42,7 +42,7 @@ If you need to create, read, search, or edit PDFs in Go without CGo or AGPL lice
 - Multi-line cell merging for tables with wrapped content (bank statements, invoices)
 - Multi-page table support with automatic header re-detection
 - Text search returning bounding rectangles
-- PDF merge with page selection
+- PDF merge with page selection and size constraints (fail/truncate/shrink with JPEG recompression)
 - Text overlay (Helvetica, configurable size and color)
 - Visual redaction (filled rectangles with configurable color)
 - PDF creation with text, rectangles, lines, and multiple fonts
@@ -187,6 +187,37 @@ m.Add(otherPDFBytes)           // all pages
 result, err := m.Merge()
 ```
 
+### Size-constrained merge
+
+Control output size with `MergeWithOptions`. Three oversize behaviors are available:
+
+```go
+m := pdf.NewMerger()
+m.AddFile("a.pdf")
+m.AddFile("b.pdf")
+m.AddFile("c.pdf")
+
+res, err := m.MergeWithOptions(pdf.MergeOptions{
+    MaxSize:          20 * 1024 * 1024, // 20 MB
+    OversizeBehavior: pdf.OversizeShrink,
+})
+if err != nil {
+    var ose *pdf.OversizeError
+    if errors.As(err, &ose) {
+        log.Fatalf("can't fit: %d bytes after optimization (limit %d)", ose.Size, ose.MaxSize)
+    }
+    log.Fatal(err)
+}
+os.WriteFile("merged.pdf", res.Data, 0644)
+fmt.Printf("%d/%d pages, %d bytes\n", res.IncludedPages, res.TotalPages, len(res.Data))
+```
+
+| Behavior | What it does |
+|---|---|
+| `OversizeFail` | Merges normally. Returns `*OversizeError` if output exceeds limit. |
+| `OversizeTruncate` | Dedup + metadata strip + JPEG recompress. Includes as many pages as fit. |
+| `OversizeShrink` | Two-pass: lossless optimization first, then JPEG recompression at ratio-derived quality to hit the target. Returns `*OversizeError` if still over. |
+
 ### Create a PDF from scratch
 
 ```go
@@ -289,6 +320,11 @@ result, err := ed.Apply()
 | `m.AddFile(path, pages...)` | `error` | Add file (0-indexed pages; empty = all) |
 | `m.Add(data, pages...)` | `error` | Add bytes (0-indexed pages; empty = all) |
 | `m.Merge()` | `[]byte, error` | Produce combined PDF |
+| `m.MergeWithOptions(opts)` | `*MergeResult, error` | Merge with size constraints |
+
+`MergeOptions` fields: `MaxSize` (bytes, 0 = unlimited), `OversizeBehavior` (`OversizeFail` / `OversizeTruncate` / `OversizeShrink`).
+
+`MergeResult` fields: `Data` (PDF bytes), `TotalPages`, `IncludedPages`.
 
 ### Table Detection
 
@@ -396,7 +432,7 @@ pdf/
   text.go       Content stream -> positioned text spans -> line reconstruction
   table.go      Table detection: header anchors, gap-based auto-detect, multi-page
   writer.go     PDF object serializer, xref generation, FlateDecode compression
-  merge.go      PDF merge: deep object copy with ref remapping, page tree construction
+  merge.go      PDF merge: size constraints (fail/truncate/shrink), stream dedup, JPEG recompression
   edit.go       Text search, text overlay, visual redaction
   creator.go    PDF creation from scratch (text, shapes, fonts)
   lexer.go      PDF byte stream tokenizer

@@ -29,6 +29,43 @@ func NewWriter() *Writer {
 	return w
 }
 
+// Len returns the current size of the output buffer in bytes.
+func (w *Writer) Len() int {
+	return w.buf.Len()
+}
+
+type writerCheckpoint struct {
+	bufLen  int
+	nextObj int
+}
+
+func (w *Writer) checkpoint() writerCheckpoint {
+	return writerCheckpoint{bufLen: w.buf.Len(), nextObj: w.nextObj}
+}
+
+func (w *Writer) restore(cp writerCheckpoint) {
+	w.buf.Truncate(cp.bufLen)
+	for k := range w.offsets {
+		if k >= cp.nextObj {
+			delete(w.offsets, k)
+		}
+	}
+	w.nextObj = cp.nextObj
+}
+
+// estimateFinishedSize returns the estimated total PDF size after Finish(),
+// given the number of page refs that will appear in the Kids array.
+func (w *Writer) estimateFinishedSize(numPageRefs int) int64 {
+	body := int64(w.Len())
+	// Unwritten objects: Pages dict, Catalog dict, Info dict.
+	body += int64(80+numPageRefs*15) + 60 + 120
+	// xref: header + 20 bytes per entry (+2 for Info + free entry 0).
+	body += 15 + int64(w.nextObj+2)*20
+	// trailer + startxref + %%EOF.
+	body += 200
+	return body
+}
+
 // AllocRef reserves an object number and returns a Ref.
 // The object must later be written with WriteObject or WriteStream.
 func (w *Writer) AllocRef() Ref {

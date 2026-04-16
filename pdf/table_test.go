@@ -378,8 +378,8 @@ func TestIsHeaderText(t *testing.T) {
 		{"1,234.56", false},
 		{"-500", false},
 		{"", false},
-		{"Jan 05", true},   // has letters
-		{"3.928 03", false}, // all digits/dots/spaces
+		{"Jan 05", true},                 // has letters
+		{"3.928 03", false},              // all digits/dots/spaces
 		{strings.Repeat("x", 31), false}, // too long
 	}
 	for _, tc := range cases {

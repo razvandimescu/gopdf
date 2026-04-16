@@ -1,9 +1,43 @@
 package pdf
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"os"
 )
+
+// OversizeBehavior controls what happens when a merge exceeds MaxSize.
+type OversizeBehavior int
+
+const (
+	OversizeFail     OversizeBehavior = iota // return error with estimated size
+	OversizeTruncate                         // include as many pages as fit
+	OversizeShrink                           // deduplicate streams + strip metadata, error if still over
+)
+
+// MergeOptions configures size-constrained merging.
+type MergeOptions struct {
+	MaxSize          int64            // maximum output size in bytes; 0 = unlimited
+	OversizeBehavior OversizeBehavior // action when limit is exceeded
+}
+
+// MergeResult holds the output of MergeWithOptions.
+type MergeResult struct {
+	Data          []byte // the merged PDF (nil when OversizeError is returned)
+	TotalPages    int    // total pages across all sources
+	IncludedPages int    // pages actually in the output
+}
+
+// OversizeError is returned when the merged PDF exceeds MaxSize.
+type OversizeError struct {
+	EstimatedSize int64
+	MaxSize       int64
+}
+
+func (e *OversizeError) Error() string {
+	return fmt.Sprintf("merged PDF estimated at %d bytes exceeds limit of %d bytes",
+		e.EstimatedSize, e.MaxSize)
+}
 
 // MergeFiles merges PDF files by path, returning the combined PDF bytes.
 func MergeFiles(paths ...string) ([]byte, error) {
@@ -33,8 +67,8 @@ type Merger struct {
 }
 
 type mergeSource struct {
-	data  []byte
-	pages []int // 0-indexed; nil = all pages
+	reader *Reader
+	pages  []int // 0-indexed; nil = all pages
 }
 
 // NewMerger creates an empty Merger.
@@ -54,8 +88,7 @@ func (m *Merger) AddFile(path string, pages ...int) error {
 
 // Add adds all pages (or specific pages) from PDF bytes.
 func (m *Merger) Add(data []byte, pages ...int) error {
-	// Validate by opening.
-	_, err := Open(data)
+	reader, err := Open(data)
 	if err != nil {
 		return fmt.Errorf("invalid PDF: %w", err)
 	}
@@ -63,39 +96,42 @@ func (m *Merger) Add(data []byte, pages ...int) error {
 	if len(pages) > 0 {
 		pageList = pages
 	}
-	m.sources = append(m.sources, mergeSource{data: data, pages: pageList})
+	m.sources = append(m.sources, mergeSource{reader: reader, pages: pageList})
 	return nil
 }
 
 // Merge produces the combined PDF.
 func (m *Merger) Merge() ([]byte, error) {
+	res, err := m.MergeWithOptions(MergeOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return res.Data, nil
+}
+
+// MergeWithOptions produces the combined PDF with size constraints.
+func (m *Merger) MergeWithOptions(opts MergeOptions) (*MergeResult, error) {
 	if len(m.sources) == 0 {
 		return nil, fmt.Errorf("no PDFs to merge")
 	}
 
-	w := NewWriter()
-
-	// Allocate the Pages and Catalog refs upfront (needed for /Parent).
-	pagesRef := w.AllocRef()
-	catalogRef := w.AllocRef()
-
-	var pageRefs []Ref
+	// Pre-process: open all sources and resolve page selections.
+	type preparedSource struct {
+		reader *Reader
+		pages  []Dict
+	}
+	var prepared []preparedSource
+	totalPages := 0
 
 	for srcIdx, src := range m.sources {
-		reader, err := Open(src.data)
-		if err != nil {
-			return nil, fmt.Errorf("source %d: %w", srcIdx, err)
-		}
-		allPages, err := reader.Pages()
+		allPages, err := src.reader.Pages()
 		if err != nil {
 			return nil, fmt.Errorf("source %d pages: %w", srcIdx, err)
 		}
 
-		// Determine which pages to include.
-		// Negative indices count from the end: -1 = last page, -2 = second-to-last.
-		var selectedPages []Dict
+		var selected []Dict
 		if src.pages == nil {
-			selectedPages = allPages
+			selected = allPages
 		} else {
 			n := len(allPages)
 			for _, idx := range src.pages {
@@ -105,30 +141,54 @@ func (m *Merger) Merge() ([]byte, error) {
 				if idx < 0 || idx >= n {
 					return nil, fmt.Errorf("source %d: page %d out of range (0-%d)", srcIdx, idx, n-1)
 				}
-				selectedPages = append(selectedPages, allPages[idx])
+				selected = append(selected, allPages[idx])
 			}
 		}
+		totalPages += len(selected)
+		prepared = append(prepared, preparedSource{reader: src.reader, pages: selected})
+	}
 
-		// Object copy context for this source.
-		ctx := &copyContext{
-			reader:   reader,
-			writer:   w,
-			refCache: make(map[int]Ref),
+	shrink := opts.MaxSize > 0 && opts.OversizeBehavior == OversizeShrink
+	truncate := opts.MaxSize > 0 && opts.OversizeBehavior == OversizeTruncate
+
+	w := NewWriter()
+	pagesRef := w.AllocRef()
+	catalogRef := w.AllocRef()
+
+	var pageRefs []Ref
+	var streamHash map[[32]byte]Ref
+	if shrink {
+		streamHash = make(map[[32]byte]Ref)
+	}
+
+	budgetExceeded := false
+	for _, ps := range prepared {
+		if budgetExceeded {
+			break
 		}
 
-		for _, pageDict := range selectedPages {
-			// Deep-copy the page and all its dependencies.
+		ctx := &copyContext{
+			reader:     ps.reader,
+			writer:     w,
+			refCache:   make(map[int]Ref),
+			streamHash: streamHash,
+			stripMeta:  shrink,
+		}
+
+		for _, pageDict := range ps.pages {
+			var cp writerCheckpoint
+			if truncate {
+				cp = w.checkpoint()
+			}
+
 			copiedObj := ctx.copyObject(pageDict)
 			copiedPage, ok := copiedObj.(Dict)
 			if !ok {
 				return nil, fmt.Errorf("copied page is not a Dict")
 			}
 
-			// Fix /Parent to point to our new Pages node.
 			delete(copiedPage, "Parent")
 			copiedPage["Parent"] = pagesRef
-
-			// Remove /Type if missing (some PDFs omit it on page dicts).
 			if _, ok := copiedPage.Name("Type"); !ok {
 				copiedPage["Type"] = Name("Page")
 			}
@@ -137,7 +197,37 @@ func (m *Merger) Merge() ([]byte, error) {
 			if err := w.WriteObject(pageRef, copiedPage); err != nil {
 				return nil, fmt.Errorf("writing page: %w", err)
 			}
+
+			if truncate {
+				est := estimateMergeSize(w, len(pageRefs)+1)
+				if est > opts.MaxSize {
+					w.restore(cp)
+					budgetExceeded = true
+					break
+				}
+			}
+
 			pageRefs = append(pageRefs, pageRef)
+		}
+	}
+
+	// Truncate: not even one page fits.
+	if budgetExceeded && len(pageRefs) == 0 {
+		est := estimateMergeSize(w, 0)
+		return &MergeResult{
+			TotalPages:    totalPages,
+			IncludedPages: 0,
+		}, &OversizeError{EstimatedSize: est, MaxSize: opts.MaxSize}
+	}
+
+	// Fail / Shrink: full merge done, check size.
+	if opts.MaxSize > 0 && !truncate {
+		est := estimateMergeSize(w, len(pageRefs))
+		if est > opts.MaxSize {
+			return &MergeResult{
+				TotalPages:    totalPages,
+				IncludedPages: len(pageRefs),
+			}, &OversizeError{EstimatedSize: est, MaxSize: opts.MaxSize}
 		}
 	}
 
@@ -155,7 +245,6 @@ func (m *Merger) Merge() ([]byte, error) {
 		return nil, fmt.Errorf("writing Pages: %w", err)
 	}
 
-	// Build the Catalog.
 	catalogDict := Dict{
 		"Type":  Name("Catalog"),
 		"Pages": pagesRef,
@@ -164,57 +253,88 @@ func (m *Merger) Merge() ([]byte, error) {
 		return nil, fmt.Errorf("writing Catalog: %w", err)
 	}
 
-	return w.Finish(catalogRef)
+	data, err := w.Finish(catalogRef)
+	if err != nil {
+		return nil, err
+	}
+
+	return &MergeResult{
+		Data:          data,
+		TotalPages:    totalPages,
+		IncludedPages: len(pageRefs),
+	}, nil
+}
+
+// estimateMergeSize returns the estimated final PDF size given the current
+// writer state and the number of page refs for the Kids array.
+func estimateMergeSize(w *Writer, numPageRefs int) int64 {
+	body := int64(w.buf.Len())
+	// Unwritten objects: Pages dict, Catalog dict, Info dict.
+	body += int64(80+numPageRefs*15) + 60 + 120
+	// xref: header + 20 bytes per entry (+2 for Info + free entry 0).
+	body += 15 + int64(w.nextObj+2)*20
+	// trailer + startxref + %%EOF.
+	body += 200
+	return body
 }
 
 // copyContext tracks object remapping for a single source document.
 type copyContext struct {
-	reader   *Reader
-	writer   *Writer
-	refCache map[int]Ref // source obj num → new ref
+	reader     *Reader
+	writer     *Writer
+	refCache   map[int]Ref      // source obj num → new ref
+	streamHash map[[32]byte]Ref // content hash → ref; shared across sources; nil = no dedup
+	stripMeta  bool
+}
+
+var metadataKeys = map[Name]bool{
+	"Metadata":       true,
+	"StructTreeRoot": true,
+	"PieceInfo":      true,
+	"Thumb":          true,
+	"MarkInfo":       true,
+	"OutputIntents":  true,
 }
 
 // copyObject deep-copies a PDF object, remapping all Refs to new numbers.
 func (ctx *copyContext) copyObject(obj any) any {
 	switch v := obj.(type) {
 	case Ref:
-		// Check cache first.
 		if newRef, ok := ctx.refCache[v.Num]; ok {
 			return newRef
 		}
-		// Allocate a new ref before resolving (handles circular refs).
-		newRef := ctx.writer.AllocRef()
-		ctx.refCache[v.Num] = newRef
 
-		// Resolve from source and deep-copy.
 		resolved := ctx.reader.Resolve(v)
 		if resolved == nil {
-			// Dead reference — write null.
+			newRef := ctx.writer.AllocRef()
+			ctx.refCache[v.Num] = newRef
 			ctx.writer.WriteObject(newRef, nil)
 			return newRef
 		}
 
-		// Handle streams specially.
-		if stream, ok := resolved.(*Stream); ok {
-			copiedDict := ctx.copyDict(stream.Dict)
-
-			if isPassthroughFilter(stream.Dict) {
-				// Image/binary streams (DCTDecode, JPXDecode, etc.): the reader
-				// passed through the raw data without decoding. Write it back
-				// with the original filter intact (already in copiedDict).
-				copiedDict["Length"] = len(stream.Data)
-				ctx.writer.WriteObject(newRef, &Stream{Dict: copiedDict, Data: stream.Data})
-			} else {
-				// Text/data streams: Data is decompressed. Recompress with FlateDecode.
-				delete(copiedDict, "Filter")
-				delete(copiedDict, "Length")
-				delete(copiedDict, "DecodeParms")
-				ctx.writer.WriteStream(newRef, copiedDict, stream.Data)
+		// Stream dedup: reuse byte-identical streams across sources.
+		if stream, ok := resolved.(*Stream); ok && ctx.streamHash != nil {
+			hash := sha256.Sum256(stream.Data)
+			if existingRef, ok := ctx.streamHash[hash]; ok {
+				ctx.refCache[v.Num] = existingRef
+				return existingRef
 			}
+			newRef := ctx.writer.AllocRef()
+			ctx.refCache[v.Num] = newRef
+			ctx.copyStream(newRef, stream)
+			ctx.streamHash[hash] = newRef
 			return newRef
 		}
 
-		// Non-stream object.
+		// Allocate before recursion to handle circular references.
+		newRef := ctx.writer.AllocRef()
+		ctx.refCache[v.Num] = newRef
+
+		if stream, ok := resolved.(*Stream); ok {
+			ctx.copyStream(newRef, stream)
+			return newRef
+		}
+
 		copied := ctx.copyObject(resolved)
 		ctx.writer.WriteObject(newRef, copied)
 		return newRef
@@ -234,6 +354,20 @@ func (ctx *copyContext) copyObject(obj any) any {
 
 	default:
 		return v
+	}
+}
+
+// copyStream writes a deep-copied stream object to the writer.
+func (ctx *copyContext) copyStream(ref Ref, stream *Stream) {
+	copiedDict := ctx.copyDict(stream.Dict)
+	if isPassthroughFilter(stream.Dict) {
+		copiedDict["Length"] = len(stream.Data)
+		ctx.writer.WriteObject(ref, &Stream{Dict: copiedDict, Data: stream.Data})
+	} else {
+		delete(copiedDict, "Filter")
+		delete(copiedDict, "Length")
+		delete(copiedDict, "DecodeParms")
+		ctx.writer.WriteStream(ref, copiedDict, stream.Data)
 	}
 }
 
@@ -263,8 +397,10 @@ func isPassthroughFilter(d Dict) bool {
 func (ctx *copyContext) copyDict(d Dict) Dict {
 	newDict := make(Dict, len(d))
 	for k, v := range d {
-		// Skip /Parent — we set it ourselves.
 		if k == "Parent" {
+			continue
+		}
+		if ctx.stripMeta && metadataKeys[k] {
 			continue
 		}
 		newDict[k] = ctx.copyObject(v)

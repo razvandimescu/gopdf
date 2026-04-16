@@ -29,6 +29,30 @@ func NewWriter() *Writer {
 	return w
 }
 
+// Len returns the current size of the output buffer in bytes.
+func (w *Writer) Len() int {
+	return w.buf.Len()
+}
+
+type writerCheckpoint struct {
+	bufLen  int
+	nextObj int
+}
+
+func (w *Writer) checkpoint() writerCheckpoint {
+	return writerCheckpoint{bufLen: w.buf.Len(), nextObj: w.nextObj}
+}
+
+func (w *Writer) restore(cp writerCheckpoint) {
+	w.buf.Truncate(cp.bufLen)
+	for k := range w.offsets {
+		if k >= cp.nextObj {
+			delete(w.offsets, k)
+		}
+	}
+	w.nextObj = cp.nextObj
+}
+
 // AllocRef reserves an object number and returns a Ref.
 // The object must later be written with WriteObject or WriteStream.
 func (w *Writer) AllocRef() Ref {

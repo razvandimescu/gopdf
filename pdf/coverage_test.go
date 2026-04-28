@@ -79,17 +79,17 @@ func TestStdFontWidths_Aliases(t *testing.T) {
 		{"UnknownFont", true},
 	}
 	for _, tt := range tests {
-		w := stdFontWidths(tt.name)
+		w := StdFontWidths(tt.name)
 		if tt.wantNil && w != nil {
-			t.Errorf("stdFontWidths(%q) should be nil", tt.name)
+			t.Errorf("StdFontWidths(%q) should be nil", tt.name)
 		}
 		if !tt.wantNil && w == nil {
-			t.Errorf("stdFontWidths(%q) returned nil, want metrics", tt.name)
+			t.Errorf("StdFontWidths(%q) returned nil, want metrics", tt.name)
 		}
 	}
 	// Arial should return identical widths to Helvetica.
-	helv := stdFontWidths("Helvetica")
-	arial := stdFontWidths("ArialMT")
+	helv := StdFontWidths("Helvetica")
+	arial := StdFontWidths("ArialMT")
 	if helv == nil || arial == nil {
 		t.Fatal("nil widths")
 	}

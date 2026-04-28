@@ -2,9 +2,9 @@ package pdf
 
 import "strings"
 
-// stdFontWidths returns character widths (in 1/1000 units) for standard 14 fonts.
+// StdFontWidths returns character widths (in 1/1000 units) for standard 14 fonts.
 // Returns nil if the font is not a standard font.
-func stdFontWidths(baseName string) map[int]float64 {
+func StdFontWidths(baseName string) map[int]float64 {
 	// Strip subset prefix (e.g., "ABCDEF+Helvetica" → "Helvetica").
 	if idx := strings.Index(baseName, "+"); idx >= 0 {
 		baseName = baseName[idx+1:]

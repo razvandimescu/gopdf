@@ -59,6 +59,46 @@ func TestHelveticaTextWidth(t *testing.T) {
 	}
 }
 
+func TestStdFontWidths_Aliases(t *testing.T) {
+	// Common font aliases (ArialMT, TimesNewRomanPSMT, etc.) should resolve to metrics.
+	tests := []struct {
+		name    string
+		wantNil bool
+	}{
+		{"Helvetica", false},
+		{"ArialMT", false},
+		{"Arial-BoldMT", false},
+		{"Arial-ItalicMT", false},
+		{"Helvetica-Bold", false},
+		{"Helvetica-Oblique", false},
+		{"Times-Roman", false},
+		{"TimesNewRomanPSMT", false},
+		{"Courier", false},
+		{"CourierNewPSMT", false},
+		{"ABCDEF+ArialMT", false}, // subset prefix
+		{"UnknownFont", true},
+	}
+	for _, tt := range tests {
+		w := stdFontWidths(tt.name)
+		if tt.wantNil && w != nil {
+			t.Errorf("stdFontWidths(%q) should be nil", tt.name)
+		}
+		if !tt.wantNil && w == nil {
+			t.Errorf("stdFontWidths(%q) returned nil, want metrics", tt.name)
+		}
+	}
+	// Arial should return identical widths to Helvetica.
+	helv := stdFontWidths("Helvetica")
+	arial := stdFontWidths("ArialMT")
+	if helv == nil || arial == nil {
+		t.Fatal("nil widths")
+	}
+	for code, hw := range helv {
+		if arial[code] != hw {
+			t.Errorf("ArialMT width[%d] = %f, want %f", code, arial[code], hw)
+		}
+	}
+}
 
 func TestParseBfRange_NoOverflow(t *testing.T) {
 	// Range ending at 0xFFFF must not cause uint16 wraparound.

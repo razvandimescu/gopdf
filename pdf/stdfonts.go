@@ -11,15 +11,21 @@ func stdFontWidths(baseName string) map[int]float64 {
 	}
 
 	switch baseName {
-	case "Courier", "Courier-Bold", "Courier-Oblique", "Courier-BoldOblique":
+	case "Courier", "Courier-Bold", "Courier-Oblique", "Courier-BoldOblique",
+		"CourierNew", "CourierNewPSMT", "CourierNewPS-BoldMT",
+		"CourierNewPS-ItalicMT", "CourierNewPS-BoldItalicMT":
 		return courierWidths()
-	case "Helvetica":
+	case "Helvetica", "Helvetica-Oblique",
+		"ArialMT", "Arial", "Arial-ItalicMT":
 		return helveticaWidths
-	case "Helvetica-Bold":
+	case "Helvetica-Bold", "Helvetica-BoldOblique",
+		"Arial-BoldMT", "Arial-Bold", "Arial-BoldItalicMT":
 		return helveticaBoldWidths
-	case "Times-Roman":
+	case "Times-Roman", "Times-Italic",
+		"TimesNewRomanPSMT", "TimesNewRoman", "TimesNewRomanPS-ItalicMT":
 		return timesRomanWidths
-	case "Times-Bold":
+	case "Times-Bold", "Times-BoldItalic",
+		"TimesNewRomanPS-BoldMT", "TimesNewRoman-Bold", "TimesNewRomanPS-BoldItalicMT":
 		return timesBoldWidths
 	default:
 		return nil

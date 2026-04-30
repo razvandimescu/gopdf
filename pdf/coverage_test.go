@@ -59,6 +59,80 @@ func TestHelveticaTextWidth(t *testing.T) {
 	}
 }
 
+func TestStdFontWidths_Aliases(t *testing.T) {
+	// Common font aliases (ArialMT, TimesNewRomanPSMT, etc.) should resolve to metrics.
+	tests := []struct {
+		name    string
+		wantNil bool
+	}{
+		{"Helvetica", false},
+		{"ArialMT", false},
+		{"Arial-BoldMT", false},
+		{"Arial-ItalicMT", false},
+		{"Helvetica-Bold", false},
+		{"Helvetica-Oblique", false},
+		{"Times-Roman", false},
+		{"TimesNewRomanPSMT", false},
+		{"Courier", false},
+		{"CourierNewPSMT", false},
+		{"ABCDEF+ArialMT", false}, // subset prefix
+		{"UnknownFont", true},
+	}
+	for _, tt := range tests {
+		w := StdFontWidths(tt.name)
+		if tt.wantNil && w != nil {
+			t.Errorf("StdFontWidths(%q) should be nil", tt.name)
+		}
+		if !tt.wantNil && w == nil {
+			t.Errorf("StdFontWidths(%q) returned nil, want metrics", tt.name)
+		}
+	}
+	// Arial should return identical widths to Helvetica.
+	helv := StdFontWidths("Helvetica")
+	arial := StdFontWidths("ArialMT")
+	if helv == nil || arial == nil {
+		t.Fatal("nil widths")
+	}
+	for code, hw := range helv {
+		if arial[code] != hw {
+			t.Errorf("ArialMT width[%d] = %f, want %f", code, arial[code], hw)
+		}
+	}
+}
+
+func TestParseBfRange_NoOverflow(t *testing.T) {
+	// Range ending at 0xFFFF must not cause uint16 wraparound.
+	m := make(map[uint16]string)
+	parseBfRange("<FFFD> <FFFF> [<0041> <0042> <0043>]", m)
+	if len(m) != 3 {
+		t.Fatalf("expected 3 mappings, got %d", len(m))
+	}
+	if m[0xFFFD] != "A" {
+		t.Errorf("0xFFFD: got %q, want A", m[0xFFFD])
+	}
+	if m[0xFFFE] != "B" {
+		t.Errorf("0xFFFE: got %q, want B", m[0xFFFE])
+	}
+	if m[0xFFFF] != "C" {
+		t.Errorf("0xFFFF: got %q, want C", m[0xFFFF])
+	}
+}
+
+func TestParseBfRange_ContiguousNoOverflow(t *testing.T) {
+	// Contiguous range ending at 0xFFFF.
+	m := make(map[uint16]string)
+	parseBfRange("<FFFE> <FFFF> <0058>", m)
+	if len(m) != 2 {
+		t.Fatalf("expected 2 mappings, got %d", len(m))
+	}
+	if m[0xFFFE] != "X" {
+		t.Errorf("0xFFFE: got %q, want X", m[0xFFFE])
+	}
+	if m[0xFFFF] != "Y" {
+		t.Errorf("0xFFFF: got %q, want Y", m[0xFFFF])
+	}
+}
+
 func TestDict_String(t *testing.T) {
 	d := Dict{"Key": "value"}
 	s, ok := d.String("Key")

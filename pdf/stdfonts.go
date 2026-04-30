@@ -2,24 +2,30 @@ package pdf
 
 import "strings"
 
-// stdFontWidths returns character widths (in 1/1000 units) for standard 14 fonts.
+// StdFontWidths returns character widths (in 1/1000 units) for standard 14 fonts.
 // Returns nil if the font is not a standard font.
-func stdFontWidths(baseName string) map[int]float64 {
+func StdFontWidths(baseName string) map[int]float64 {
 	// Strip subset prefix (e.g., "ABCDEF+Helvetica" → "Helvetica").
 	if idx := strings.Index(baseName, "+"); idx >= 0 {
 		baseName = baseName[idx+1:]
 	}
 
 	switch baseName {
-	case "Courier", "Courier-Bold", "Courier-Oblique", "Courier-BoldOblique":
+	case "Courier", "Courier-Bold", "Courier-Oblique", "Courier-BoldOblique",
+		"CourierNew", "CourierNewPSMT", "CourierNewPS-BoldMT",
+		"CourierNewPS-ItalicMT", "CourierNewPS-BoldItalicMT":
 		return courierWidths()
-	case "Helvetica":
+	case "Helvetica", "Helvetica-Oblique",
+		"ArialMT", "Arial", "Arial-ItalicMT":
 		return helveticaWidths
-	case "Helvetica-Bold":
+	case "Helvetica-Bold", "Helvetica-BoldOblique",
+		"Arial-BoldMT", "Arial-Bold", "Arial-BoldItalicMT":
 		return helveticaBoldWidths
-	case "Times-Roman":
+	case "Times-Roman", "Times-Italic",
+		"TimesNewRomanPSMT", "TimesNewRoman", "TimesNewRomanPS-ItalicMT":
 		return timesRomanWidths
-	case "Times-Bold":
+	case "Times-Bold", "Times-BoldItalic",
+		"TimesNewRomanPS-BoldMT", "TimesNewRoman-Bold", "TimesNewRomanPS-BoldItalicMT":
 		return timesBoldWidths
 	default:
 		return nil

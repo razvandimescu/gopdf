@@ -988,8 +988,9 @@ func parseBfRange(section string, m map[uint16]string) {
 			arrContent := s[1:endBracket]
 			s = strings.TrimSpace(s[endBracket+1:])
 			dstTokens := extractHexTokens(arrContent)
-			for i, code := 0, srcLo; code <= srcHi && i < len(dstTokens); i, code = i+1, code+1 {
-				m[code] = hexToUnicode(dstTokens[i])
+			// int prevents uint16 wraparound when srcHi == 0xFFFF (infinite loop).
+			for i, code := 0, int(srcLo); code <= int(srcHi) && i < len(dstTokens); i, code = i+1, code+1 {
+				m[uint16(code)] = hexToUnicode(dstTokens[i])
 			}
 		} else {
 			// Contiguous form: <dstStart>
@@ -999,9 +1000,10 @@ func parseBfRange(section string, m map[uint16]string) {
 			}
 			s = rest
 			dstStart := hexToUint16(dstHex)
-			for code := srcLo; code <= srcHi; code++ {
-				uni := dstStart + (code - srcLo)
-				m[code] = string(rune(uni))
+			// int prevents uint16 wraparound (same as above).
+			for code := int(srcLo); code <= int(srcHi); code++ {
+				uni := dstStart + uint16(code) - srcLo
+				m[uint16(code)] = string(rune(uni))
 			}
 		}
 	}

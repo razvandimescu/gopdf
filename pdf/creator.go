@@ -158,7 +158,7 @@ func (pb *PageBuilder) FillRect(x, y, w, h, r, g, b float64) {
 
 // TextWidth returns the width of text in the current font and size (in points).
 func (pb *PageBuilder) TextWidth(text string) float64 {
-	widths := stdFontWidths(pb.font)
+	widths := StdFontWidths(pb.font)
 	if widths == nil {
 		return float64(len(text)) * pb.fontSize * 0.5
 	}

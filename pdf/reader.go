@@ -42,17 +42,29 @@ func Open(data []byte) (*Reader, error) {
 
 // parseXRef locates and reads the xref table and trailer.
 func (r *Reader) parseXRef() error {
-	// Find startxref near end of file.
-	tail := r.data
-	if len(tail) > 1024 {
-		tail = tail[len(tail)-1024:]
+	// Find startxref near end of file. Spec says it must be within the last
+	// 1024 bytes, but real-world PDFs sometimes have trailing garbage (zero
+	// padding from buggy uploaders, e.g.), so expand the window if needed.
+	idx := -1
+	tailLen := 0
+	for _, window := range []int{1024, 64 * 1024, len(r.data)} {
+		if window > len(r.data) {
+			window = len(r.data)
+		}
+		tail := r.data[len(r.data)-window:]
+		if i := bytes.LastIndex(tail, []byte("startxref")); i >= 0 {
+			idx = i
+			tailLen = len(tail)
+			break
+		}
+		if window == len(r.data) {
+			break
+		}
 	}
-	idx := bytes.LastIndex(tail, []byte("startxref"))
 	if idx < 0 {
 		return fmt.Errorf("startxref not found")
 	}
-	// The offset might be relative to tail, recalculate.
-	startxrefPos := len(r.data) - len(tail) + idx
+	startxrefPos := len(r.data) - tailLen + idx
 	s := string(r.data[startxrefPos:])
 
 	// Parse "startxref\r?\n<offset>".

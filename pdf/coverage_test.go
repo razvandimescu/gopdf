@@ -132,6 +132,20 @@ func TestReader_Trailer_XRef(t *testing.T) {
 	}
 }
 
+// TestReader_TrailingPadding verifies we tolerate large amounts of trailing
+// garbage after %%EOF (some uploaders zero-pad PDFs to a sector boundary).
+func TestReader_TrailingPadding(t *testing.T) {
+	data := testPDF(t, "Hello")
+	padded := append(append([]byte{}, data...), make([]byte, 60*1024)...)
+	r, err := Open(padded)
+	if err != nil {
+		t.Fatalf("Open with trailing padding: %v", err)
+	}
+	if r.Trailer() == nil {
+		t.Error("Trailer should not be nil after padded read")
+	}
+}
+
 func TestDecodeASCIIHex(t *testing.T) {
 	got, err := decodeASCIIHex([]byte("48656C6C6F>"))
 	if err != nil {

@@ -172,6 +172,25 @@ func TestMergeInvalidPDF(t *testing.T) {
 	}
 }
 
+// Adobe flags PDFs with 21-byte xref entries as damaged and disables Save As.
+// ISO 32000-1 §7.5.4 mandates exactly 20 bytes per entry; the bug pattern is
+// a stray space before CR LF (e.g. "0000000000 65535 f \r\n").
+func TestXrefEntriesAreTwentyBytes(t *testing.T) {
+	merged, err := MergeBytes(testPDF(t, "A"), testMultiPagePDF(t, "B", "C"))
+	if err != nil {
+		t.Fatalf("MergeBytes: %v", err)
+	}
+	xrefStart := bytes.LastIndex(merged, []byte("\nxref\n"))
+	trailerStart := bytes.LastIndex(merged, []byte("\ntrailer\n"))
+	if xrefStart < 0 || trailerStart < 0 || trailerStart < xrefStart {
+		t.Fatal("xref/trailer markers not found")
+	}
+	section := merged[xrefStart:trailerStart]
+	if bytes.Contains(section, []byte(" n \r\n")) || bytes.Contains(section, []byte(" f \r\n")) {
+		t.Error("xref entry has trailing space before CR LF (21 bytes)")
+	}
+}
+
 func TestMergeWithOptions_NoLimit(t *testing.T) {
 	pdf1 := testMultiPagePDF(t, "Page A", "Page B")
 	pdf2 := testPDF(t, "Page C")

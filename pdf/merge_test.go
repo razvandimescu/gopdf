@@ -172,6 +172,43 @@ func TestMergeInvalidPDF(t *testing.T) {
 	}
 }
 
+// Each xref entry must be exactly 20 bytes per ISO 32000-1 §7.5.4. A 21-byte
+// entry causes Adobe Acrobat to flag the file as damaged and disable Save As.
+func TestXrefEntriesAreTwentyBytes(t *testing.T) {
+	merged, err := MergeBytes(testPDF(t, "A"), testMultiPagePDF(t, "B", "C"))
+	if err != nil {
+		t.Fatalf("MergeBytes: %v", err)
+	}
+	xrefMarker := []byte("\nstartxref\n")
+	idx := bytes.LastIndex(merged, xrefMarker)
+	if idx < 0 {
+		t.Fatal("startxref not found")
+	}
+	rest := merged[idx+len(xrefMarker):]
+	nl := bytes.IndexByte(rest, '\n')
+	if nl < 0 {
+		t.Fatal("startxref offset has no newline")
+	}
+	var xrefOffset int
+	if _, err := fmt.Sscanf(string(rest[:nl]), "%d", &xrefOffset); err != nil {
+		t.Fatalf("parsing startxref offset: %v", err)
+	}
+	body := merged[xrefOffset:]
+	trailerIdx := bytes.Index(body, []byte("trailer"))
+	if trailerIdx < 0 {
+		t.Fatal("trailer keyword not found after xref")
+	}
+	// Skip "xref\n0 N\n" header.
+	first := bytes.IndexByte(body, '\n') + 1
+	second := bytes.IndexByte(body[first:], '\n') + first + 1
+	entries := body[second:trailerIdx]
+	if len(entries)%20 != 0 {
+		t.Errorf("xref entries section length %d is not a multiple of 20 bytes "+
+			"(each entry must be exactly 20 bytes per PDF 32000-1 §7.5.4)",
+			len(entries))
+	}
+}
+
 func TestMergeWithOptions_NoLimit(t *testing.T) {
 	pdf1 := testMultiPagePDF(t, "Page A", "Page B")
 	pdf2 := testPDF(t, "Page C")

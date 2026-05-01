@@ -144,8 +144,8 @@ func (w *Writer) FinishWithID(rootRef Ref, originalID Array) ([]byte, error) {
 	xrefOffset := w.buf.Len()
 	size := w.nextObj
 
-	// Write xref table. Each entry must be exactly 20 bytes per PDF 32000-1
-	// §7.5.4: nnnnnnnnnn ggggg X EOL, where EOL is CR LF (no extra trailing space).
+	// Each xref entry must be exactly 20 bytes (ISO 32000-1 §7.5.4); Adobe
+	// flags 21-byte entries as damaged and disables Save As.
 	fmt.Fprintf(&w.buf, "xref\n0 %d\n", size)
 	w.buf.WriteString("0000000000 65535 f\r\n")
 	for i := 1; i < size; i++ {

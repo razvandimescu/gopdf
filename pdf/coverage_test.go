@@ -1,9 +1,9 @@
 package pdf
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 )
@@ -100,25 +100,16 @@ func TestStdFontWidths_Aliases(t *testing.T) {
 		}
 	}
 
-	// Times-Italic and Times-BoldItalic intentionally alias the upright
-	// Times metrics (see stdfonts.go). Pin via pointer identity on the
-	// internal accessor so the approximation isn't "fixed" by accident.
-	pin := func(alias, target string) {
-		t.Helper()
-		ap := reflect.ValueOf(stdFontWidths(alias)).Pointer()
-		tp := reflect.ValueOf(stdFontWidths(target)).Pointer()
-		if ap == 0 || tp == 0 {
-			t.Fatalf("%s or %s resolved to nil", alias, target)
-		}
-		if ap != tp {
-			t.Errorf("%s should alias %s widths (intentional approximation)", alias, target)
-		}
+	// Times-Italic and Times-BoldItalic intentionally reuse the upright
+	// Times metrics (see stdfonts.go) — pin so the approximation isn't
+	// "fixed" by accident. A real italic AFM would have different widths.
+	if !maps.Equal(stdFontWidths("Times-Italic"), stdFontWidths("Times-Roman")) {
+		t.Error("Times-Italic should reuse Times-Roman widths (intentional approximation)")
 	}
-	pin("Times-Italic", "Times-Roman")
-	pin("Times-BoldItalic", "Times-Bold")
+	if !maps.Equal(stdFontWidths("Times-BoldItalic"), stdFontWidths("Times-Bold")) {
+		t.Error("Times-BoldItalic should reuse Times-Bold widths (intentional approximation)")
+	}
 
-	// Public API must return a fresh copy that the caller can mutate
-	// without corrupting subsequent calls.
 	w1 := StdFontWidths("Helvetica")
 	w1[0x41] = 999
 	w2 := StdFontWidths("Helvetica")

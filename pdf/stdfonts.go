@@ -28,7 +28,7 @@ func stdFontWidths(baseName string) map[int]float64 {
 	case "Courier", "Courier-Bold", "Courier-Oblique", "Courier-BoldOblique",
 		"CourierNew", "CourierNewPSMT", "CourierNewPS-BoldMT",
 		"CourierNewPS-ItalicMT", "CourierNewPS-BoldItalicMT":
-		return courierWidths()
+		return courierWidths
 	case "Helvetica", "Helvetica-Oblique",
 		"ArialMT", "Arial", "Arial-ItalicMT":
 		return helveticaWidths
@@ -65,13 +65,13 @@ func HelveticaTextWidth(text string, fontSize float64) float64 {
 	return total / 1000.0 * fontSize
 }
 
-func courierWidths() map[int]float64 {
+var courierWidths = func() map[int]float64 {
 	m := make(map[int]float64, 256)
 	for i := 0; i < 256; i++ {
 		m[i] = 600
 	}
 	return m
-}
+}()
 
 // Helvetica widths for characters 32-255 (from AFM data).
 var helveticaWidths = map[int]float64{

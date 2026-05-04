@@ -1,10 +1,24 @@
 package pdf
 
-import "strings"
+import (
+	"maps"
+	"strings"
+)
 
 // StdFontWidths returns character widths (in 1/1000 units) for standard 14 fonts.
-// Returns nil if the font is not a standard font.
+// Returns nil if the font is not a standard font. The returned map is a copy;
+// callers may mutate it freely.
 func StdFontWidths(baseName string) map[int]float64 {
+	w := stdFontWidths(baseName)
+	if w == nil {
+		return nil
+	}
+	return maps.Clone(w)
+}
+
+// stdFontWidths returns the shared internal width map for standard 14 fonts.
+// The result must be treated as read-only — it is reused across calls.
+func stdFontWidths(baseName string) map[int]float64 {
 	// Strip subset prefix (e.g., "ABCDEF+Helvetica" → "Helvetica").
 	if idx := strings.Index(baseName, "+"); idx >= 0 {
 		baseName = baseName[idx+1:]
@@ -14,13 +28,14 @@ func StdFontWidths(baseName string) map[int]float64 {
 	case "Courier", "Courier-Bold", "Courier-Oblique", "Courier-BoldOblique",
 		"CourierNew", "CourierNewPSMT", "CourierNewPS-BoldMT",
 		"CourierNewPS-ItalicMT", "CourierNewPS-BoldItalicMT":
-		return courierWidths()
+		return courierWidths
 	case "Helvetica", "Helvetica-Oblique",
 		"ArialMT", "Arial", "Arial-ItalicMT":
 		return helveticaWidths
 	case "Helvetica-Bold", "Helvetica-BoldOblique",
 		"Arial-BoldMT", "Arial-Bold", "Arial-BoldItalicMT":
 		return helveticaBoldWidths
+	// Times-Italic / Times-BoldItalic use upright metrics as a deliberate approximation (real italic AFM differs by ~5–20 units; closer than the 0.6 default).
 	case "Times-Roman", "Times-Italic",
 		"TimesNewRomanPSMT", "TimesNewRoman", "TimesNewRomanPS-ItalicMT":
 		return timesRomanWidths
@@ -46,13 +61,13 @@ func HelveticaTextWidth(text string, fontSize float64) float64 {
 	return total / 1000.0 * fontSize
 }
 
-func courierWidths() map[int]float64 {
+var courierWidths = func() map[int]float64 {
 	m := make(map[int]float64, 256)
 	for i := 0; i < 256; i++ {
 		m[i] = 600
 	}
 	return m
-}
+}()
 
 // Helvetica widths for characters 32-255 (from AFM data).
 var helveticaWidths = map[int]float64{

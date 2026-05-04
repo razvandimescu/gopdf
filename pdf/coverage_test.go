@@ -1,6 +1,7 @@
 package pdf
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -97,6 +98,20 @@ func TestStdFontWidths_Aliases(t *testing.T) {
 		if arial[code] != hw {
 			t.Errorf("ArialMT width[%d] = %f, want %f", code, arial[code], hw)
 		}
+	}
+
+	if !maps.Equal(stdFontWidths("Times-Italic"), stdFontWidths("Times-Roman")) {
+		t.Error("Times-Italic should reuse Times-Roman widths (intentional approximation)")
+	}
+	if !maps.Equal(stdFontWidths("Times-BoldItalic"), stdFontWidths("Times-Bold")) {
+		t.Error("Times-BoldItalic should reuse Times-Bold widths (intentional approximation)")
+	}
+
+	w1 := StdFontWidths("Helvetica")
+	w1[0x41] = 999
+	w2 := StdFontWidths("Helvetica")
+	if w2[0x41] == 999 {
+		t.Error("StdFontWidths must return a defensive copy, not the shared map")
 	}
 }
 

@@ -200,7 +200,7 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 		// Standard 14 font fallback.
 		if _, ok := fontWidths[sname]; !ok {
 			if baseName, ok := fd.Name("BaseFont"); ok {
-				if stdW := StdFontWidths(string(baseName)); stdW != nil {
+				if stdW := stdFontWidths(string(baseName)); stdW != nil {
 					fontWidths[sname] = stdW
 				}
 			}

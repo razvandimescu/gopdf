@@ -1,10 +1,24 @@
 package pdf
 
-import "strings"
+import (
+	"maps"
+	"strings"
+)
 
 // StdFontWidths returns character widths (in 1/1000 units) for standard 14 fonts.
-// Returns nil if the font is not a standard font.
+// Returns nil if the font is not a standard font. The returned map is a copy;
+// callers may mutate it freely.
 func StdFontWidths(baseName string) map[int]float64 {
+	w := stdFontWidths(baseName)
+	if w == nil {
+		return nil
+	}
+	return maps.Clone(w)
+}
+
+// stdFontWidths returns the shared internal width map for standard 14 fonts.
+// The result must be treated as read-only — it is reused across calls.
+func stdFontWidths(baseName string) map[int]float64 {
 	// Strip subset prefix (e.g., "ABCDEF+Helvetica" → "Helvetica").
 	if idx := strings.Index(baseName, "+"); idx >= 0 {
 		baseName = baseName[idx+1:]
@@ -21,6 +35,11 @@ func StdFontWidths(baseName string) map[int]float64 {
 	case "Helvetica-Bold", "Helvetica-BoldOblique",
 		"Arial-BoldMT", "Arial-Bold", "Arial-BoldItalicMT":
 		return helveticaBoldWidths
+	// Times-Italic and Times-BoldItalic are mapped to the upright Times
+	// metrics as a deliberate metric-compatible fallback. Italic Times is
+	// a redesigned face with its own AFM (several glyph widths differ from
+	// the upright by ~5–20 units), but reusing the upright metrics is much
+	// closer than the 0.6 default and avoids shipping a fourth width table.
 	case "Times-Roman", "Times-Italic",
 		"TimesNewRomanPSMT", "TimesNewRoman", "TimesNewRomanPS-ItalicMT":
 		return timesRomanWidths

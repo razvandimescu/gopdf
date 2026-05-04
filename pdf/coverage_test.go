@@ -3,6 +3,7 @@ package pdf
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -97,6 +98,32 @@ func TestStdFontWidths_Aliases(t *testing.T) {
 		if arial[code] != hw {
 			t.Errorf("ArialMT width[%d] = %f, want %f", code, arial[code], hw)
 		}
+	}
+
+	// Times-Italic and Times-BoldItalic intentionally alias the upright
+	// Times metrics (see stdfonts.go). Pin via pointer identity on the
+	// internal accessor so the approximation isn't "fixed" by accident.
+	pin := func(alias, target string) {
+		t.Helper()
+		ap := reflect.ValueOf(stdFontWidths(alias)).Pointer()
+		tp := reflect.ValueOf(stdFontWidths(target)).Pointer()
+		if ap == 0 || tp == 0 {
+			t.Fatalf("%s or %s resolved to nil", alias, target)
+		}
+		if ap != tp {
+			t.Errorf("%s should alias %s widths (intentional approximation)", alias, target)
+		}
+	}
+	pin("Times-Italic", "Times-Roman")
+	pin("Times-BoldItalic", "Times-Bold")
+
+	// Public API must return a fresh copy that the caller can mutate
+	// without corrupting subsequent calls.
+	w1 := StdFontWidths("Helvetica")
+	w1[0x41] = 999
+	w2 := StdFontWidths("Helvetica")
+	if w2[0x41] == 999 {
+		t.Error("StdFontWidths must return a defensive copy, not the shared map")
 	}
 }
 

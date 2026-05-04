@@ -236,7 +236,7 @@ func buildMergedPDF(prepared []preparedSource, cfg mergeConfig) ([]byte, int, er
 		return nil, 0, fmt.Errorf("writing Catalog: %w", err)
 	}
 
-	data, err := w.Finish(catalogRef)
+	data, err := w.FinishWithID(catalogRef, prepared[0].reader.OriginalID())
 	if err != nil {
 		return nil, 0, err
 	}

@@ -751,6 +751,17 @@ func (r *Reader) parseObjectAt(pos int) (any, error) {
 // Trailer returns the trailer dictionary.
 func (r *Reader) Trailer() Dict { return r.trailer }
 
+// OriginalID returns the trailer's /ID array, or nil if absent. Pass it to
+// Writer.FinishWithID when rewriting a PDF so Adobe doesn't flag the output
+// as modified and prompt the user to save.
+func (r *Reader) OriginalID() Array {
+	if r.trailer == nil {
+		return nil
+	}
+	id, _ := r.trailer.Array("ID")
+	return id
+}
+
 // XRef returns the cross-reference table (for debugging).
 func (r *Reader) XRef() map[int]int64 { return r.xref }
 

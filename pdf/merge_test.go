@@ -191,6 +191,40 @@ func TestXrefEntriesAreTwentyBytes(t *testing.T) {
 	}
 }
 
+func TestMergePreservesSourceID(t *testing.T) {
+	src := testPDF(t, "Source")
+	srcReader, err := Open(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srcID, _ := srcReader.Trailer().Array("ID")
+	if len(srcID) < 1 {
+		t.Fatal("source PDF missing /ID")
+	}
+	srcCreation, _ := srcID[0].(string)
+
+	merged, err := MergeBytes(src, testPDF(t, "Other"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mergedReader, err := Open(merged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mergedID, ok := mergedReader.Trailer().Array("ID")
+	if !ok || len(mergedID) != 2 {
+		t.Fatalf("merged PDF missing /ID array of length 2, got %v", mergedID)
+	}
+	creation, _ := mergedID[0].(string)
+	mod, _ := mergedID[1].(string)
+	if creation != srcCreation {
+		t.Error("merged creation ID does not match first source's creation ID")
+	}
+	if creation == mod {
+		t.Error("merged /ID has identical creation and mod IDs (Adobe will prompt to save)")
+	}
+}
+
 func TestMergeWithOptions_NoLimit(t *testing.T) {
 	pdf1 := testMultiPagePDF(t, "Page A", "Page B")
 	pdf2 := testPDF(t, "Page C")

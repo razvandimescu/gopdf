@@ -100,9 +100,6 @@ func TestStdFontWidths_Aliases(t *testing.T) {
 		}
 	}
 
-	// Times-Italic and Times-BoldItalic intentionally reuse the upright
-	// Times metrics (see stdfonts.go) — pin so the approximation isn't
-	// "fixed" by accident. A real italic AFM would have different widths.
 	if !maps.Equal(stdFontWidths("Times-Italic"), stdFontWidths("Times-Roman")) {
 		t.Error("Times-Italic should reuse Times-Roman widths (intentional approximation)")
 	}

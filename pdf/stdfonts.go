@@ -35,11 +35,7 @@ func stdFontWidths(baseName string) map[int]float64 {
 	case "Helvetica-Bold", "Helvetica-BoldOblique",
 		"Arial-BoldMT", "Arial-Bold", "Arial-BoldItalicMT":
 		return helveticaBoldWidths
-	// Times-Italic and Times-BoldItalic are mapped to the upright Times
-	// metrics as a deliberate metric-compatible fallback. Italic Times is
-	// a redesigned face with its own AFM (several glyph widths differ from
-	// the upright by ~5–20 units), but reusing the upright metrics is much
-	// closer than the 0.6 default and avoids shipping a fourth width table.
+	// Times-Italic / Times-BoldItalic use upright metrics as a deliberate approximation (real italic AFM differs by ~5–20 units; closer than the 0.6 default).
 	case "Times-Roman", "Times-Italic",
 		"TimesNewRomanPSMT", "TimesNewRoman", "TimesNewRomanPS-ItalicMT":
 		return timesRomanWidths

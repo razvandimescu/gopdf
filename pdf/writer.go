@@ -122,6 +122,8 @@ func (w *Writer) WriteStream(ref Ref, dict Dict, data []byte) error {
 }
 
 // Finish appends the xref table, trailer, and %%EOF. Returns the complete PDF.
+// When rewriting a source PDF, prefer FinishWithID(rootRef, reader.OriginalID())
+// to avoid Adobe's "save changes?" prompt.
 func (w *Writer) Finish(rootRef Ref) ([]byte, error) {
 	return w.FinishWithID(rootRef, nil)
 }

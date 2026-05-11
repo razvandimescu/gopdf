@@ -12,10 +12,13 @@ type Dict map[Name]any
 // Array is a PDF array.
 type Array []any
 
-// Stream is a PDF stream object (dictionary + raw bytes).
+// Stream is a PDF stream object (dictionary + decoded bytes).
+// Raw holds the original pre-filter bytes when available, so callers (e.g. merge)
+// can re-emit the stream verbatim with its source Filter/DecodeParms.
 type Stream struct {
 	Dict Dict
 	Data []byte
+	Raw  []byte
 }
 
 // Helper accessors for Dict.

@@ -381,7 +381,11 @@ func (ctx *copyContext) copyObject(obj any) any {
 
 		// Stream dedup: reuse byte-identical streams across sources.
 		if stream, ok := resolved.(*Stream); ok && ctx.streamHash != nil {
-			hash := sha256.Sum256(stream.Data)
+			hashSrc := stream.Raw
+			if hashSrc == nil {
+				hashSrc = stream.Data
+			}
+			hash := sha256.Sum256(hashSrc)
 			if existingRef, ok := ctx.streamHash[hash]; ok {
 				ctx.refCache[v.Num] = existingRef
 				return existingRef
@@ -424,24 +428,25 @@ func (ctx *copyContext) copyObject(obj any) any {
 	}
 }
 
-// copyStream writes a deep-copied stream object to the writer.
+// copyStream writes a deep-copied stream object to the writer. Emitting the
+// source's raw bytes verbatim avoids round-tripping image data through our
+// filter decoders.
 func (ctx *copyContext) copyStream(ref Ref, stream *Stream) {
 	copiedDict := ctx.copyDict(stream.Dict)
-	if isPassthroughFilter(stream.Dict) {
-		data := stream.Data
-		if ctx.imageQuality > 0 && isDCTDecode(stream.Dict) {
-			if recompressed := recompressJPEG(data, ctx.imageQuality); recompressed != nil {
-				data = recompressed
-			}
-		}
-		copiedDict["Length"] = len(data)
-		ctx.writer.WriteObject(ref, &Stream{Dict: copiedDict, Data: data})
-	} else {
-		delete(copiedDict, "Filter")
-		delete(copiedDict, "Length")
+	if stream.Raw == nil {
+		// Synthetic stream (constructed in code): re-encode via FlateDecode.
 		delete(copiedDict, "DecodeParms")
 		ctx.writer.WriteStream(ref, copiedDict, stream.Data)
+		return
 	}
+	data := stream.Raw
+	if ctx.imageQuality > 0 && isDCTDecode(stream.Dict) {
+		if recompressed := recompressJPEG(data, ctx.imageQuality); recompressed != nil {
+			data = recompressed
+		}
+	}
+	copiedDict["Length"] = len(data)
+	ctx.writer.WriteObject(ref, &Stream{Dict: copiedDict, Data: data})
 }
 
 // recompressJPEG decodes and re-encodes JPEG data at the given quality.
@@ -468,19 +473,6 @@ func recompressJPEG(data []byte, quality int) []byte {
 func isDCTDecode(d Dict) bool {
 	filters := filterNames(d)
 	return len(filters) > 0 && filters[0] == "DCTDecode"
-}
-
-// isPassthroughFilter returns true if the stream uses a filter that our reader
-// doesn't decode (images, etc.), meaning Data contains the raw encoded bytes
-// and the original Filter must be preserved.
-func isPassthroughFilter(d Dict) bool {
-	for _, f := range filterNames(d) {
-		switch f {
-		case "DCTDecode", "JPXDecode", "CCITTFaxDecode", "JBIG2Decode":
-			return true
-		}
-	}
-	return false
 }
 
 func (ctx *copyContext) copyDict(d Dict) Dict {

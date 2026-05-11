@@ -220,7 +220,7 @@ func (r *Reader) readXRefStream(pos int) error {
 	}
 
 	// Read the stream data.
-	streamData, err := r.readStreamData(lex, d)
+	streamData, _, err := r.readStreamData(lex, d)
 	if err != nil {
 		return fmt.Errorf("reading xref stream data: %w", err)
 	}
@@ -297,7 +297,9 @@ func (r *Reader) readXRefStream(pos int) error {
 }
 
 // readStreamData reads raw stream bytes after a dict, handling FlateDecode.
-func (r *Reader) readStreamData(lex *Lexer, d Dict) ([]byte, error) {
+// readStreamData returns the decoded stream bytes and the original
+// pre-filter raw bytes (a slice into the underlying PDF data).
+func (r *Reader) readStreamData(lex *Lexer, d Dict) ([]byte, []byte, error) {
 	// Expect "stream" keyword.
 	lex.skipWhitespaceAndComments()
 	pos := lex.Pos()
@@ -305,7 +307,7 @@ func (r *Reader) readStreamData(lex *Lexer, d Dict) ([]byte, error) {
 	// Find "stream" keyword followed by EOL.
 	idx := bytes.Index(r.data[pos:], []byte("stream"))
 	if idx < 0 {
-		return nil, fmt.Errorf("stream keyword not found")
+		return nil, nil, fmt.Errorf("stream keyword not found")
 	}
 	dataStart := pos + idx + len("stream")
 	// Skip the EOL after "stream".
@@ -332,7 +334,7 @@ func (r *Reader) readStreamData(lex *Lexer, d Dict) ([]byte, error) {
 		// Try to find endstream.
 		endIdx := bytes.Index(r.data[dataStart:], []byte("endstream"))
 		if endIdx < 0 {
-			return nil, fmt.Errorf("cannot determine stream length")
+			return nil, nil, fmt.Errorf("cannot determine stream length")
 		}
 		length = endIdx
 		// Trim trailing whitespace before endstream.
@@ -343,17 +345,7 @@ func (r *Reader) readStreamData(lex *Lexer, d Dict) ([]byte, error) {
 
 	raw := r.data[dataStart : dataStart+length]
 
-	// Build filter chain.
-	var filters []Name
-	if f, ok := d.Name("Filter"); ok {
-		filters = []Name{f}
-	} else if fa, ok := d.Array("Filter"); ok {
-		for _, item := range fa {
-			if n, ok := item.(Name); ok {
-				filters = append(filters, n)
-			}
-		}
-	}
+	filters := filterNames(d)
 
 	// Build matching DecodeParms chain.
 	var parmsList []Dict
@@ -379,10 +371,10 @@ func (r *Reader) readStreamData(lex *Lexer, d Dict) ([]byte, error) {
 		var err error
 		data, err = applyFilter(data, f, parms)
 		if err != nil {
-			return nil, fmt.Errorf("filter %s: %w", f, err)
+			return nil, nil, fmt.Errorf("filter %s: %w", f, err)
 		}
 	}
-	return data, nil
+	return data, raw, nil
 }
 
 func applyFilter(data []byte, filter Name, parms Dict) ([]byte, error) {
@@ -465,7 +457,11 @@ func applyPredictorWithParms(data []byte, dp Dict) ([]byte, error) {
 	bytesPerRow := columns * colors * bpc / 8
 
 	if predictor >= 10 {
-		return pngUnpredict(data, bytesPerRow)
+		bytesPerPixel := colors * bpc / 8
+		if bytesPerPixel < 1 {
+			bytesPerPixel = 1
+		}
+		return pngUnpredict(data, bytesPerRow, bytesPerPixel)
 	}
 
 	// TIFF predictor 2 — not yet implemented.
@@ -508,61 +504,61 @@ func decodeASCIIHex(data []byte) ([]byte, error) {
 	return buf, nil
 }
 
-// pngUnpredict reverses PNG row filters.
-func pngUnpredict(data []byte, columns int) ([]byte, error) {
-	rowSize := columns + 1 // +1 for filter byte
+// pngUnpredict reverses PNG row filters. bytesPerRow excludes the filter byte;
+// bytesPerPixel is the stride to the left neighbor (e.g. 3 for RGB-8).
+func pngUnpredict(data []byte, bytesPerRow, bytesPerPixel int) ([]byte, error) {
+	rowSize := bytesPerRow + 1 // +1 for filter byte
 	if len(data)%rowSize != 0 {
 		// Try without assuming filter byte (some PDFs).
-		if len(data)%columns == 0 {
+		if len(data)%bytesPerRow == 0 {
 			return data, nil
 		}
 		return nil, fmt.Errorf("PNG predictor: data len %d not divisible by row size %d", len(data), rowSize)
 	}
 
 	nRows := len(data) / rowSize
-	out := make([]byte, 0, nRows*columns)
-	prev := make([]byte, columns)
+	out := make([]byte, 0, nRows*bytesPerRow)
+	prev := make([]byte, bytesPerRow)
+	bpp := bytesPerPixel
 
 	for row := 0; row < nRows; row++ {
 		offset := row * rowSize
 		filterByte := data[offset]
 		rowData := data[offset+1 : offset+rowSize]
-		current := make([]byte, columns)
+		current := make([]byte, bytesPerRow)
 
 		switch filterByte {
 		case 0: // None
 			copy(current, rowData)
 		case 1: // Sub
-			for i := 0; i < columns; i++ {
+			for i := 0; i < bytesPerRow; i++ {
 				left := byte(0)
-				if i > 0 {
-					left = current[i-1]
+				if i >= bpp {
+					left = current[i-bpp]
 				}
 				current[i] = rowData[i] + left
 			}
 		case 2: // Up
-			for i := 0; i < columns; i++ {
+			for i := 0; i < bytesPerRow; i++ {
 				current[i] = rowData[i] + prev[i]
 			}
 		case 3: // Average
-			for i := 0; i < columns; i++ {
+			for i := 0; i < bytesPerRow; i++ {
 				left := byte(0)
-				if i > 0 {
-					left = current[i-1]
+				if i >= bpp {
+					left = current[i-bpp]
 				}
 				current[i] = rowData[i] + byte((int(left)+int(prev[i]))/2)
 			}
 		case 4: // Paeth
-			for i := 0; i < columns; i++ {
+			for i := 0; i < bytesPerRow; i++ {
 				left := byte(0)
-				if i > 0 {
-					left = current[i-1]
+				upLeft := byte(0)
+				if i >= bpp {
+					left = current[i-bpp]
+					upLeft = prev[i-bpp]
 				}
 				up := prev[i]
-				upLeft := byte(0)
-				if i > 0 {
-					upLeft = prev[i-1]
-				}
 				current[i] = rowData[i] + paethPredictor(left, up, upLeft)
 			}
 		default:
@@ -737,11 +733,11 @@ func (r *Reader) parseObjectAt(pos int) (any, error) {
 		savedPos := lex.Pos()
 		// Check for "stream" keyword.
 		if savedPos+6 <= len(r.data) && string(r.data[savedPos:savedPos+6]) == "stream" {
-			data, err := r.readStreamData(lex, d)
+			data, raw, err := r.readStreamData(lex, d)
 			if err != nil {
 				return nil, err
 			}
-			return &Stream{Dict: d, Data: data}, nil
+			return &Stream{Dict: d, Data: data, Raw: raw}, nil
 		}
 	}
 

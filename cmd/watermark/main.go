@@ -1,5 +1,14 @@
 // watermark applies an image as a diagonal watermark on every page of a PDF.
-// Run with -h for flags.
+//
+// Usage:
+//
+//	watermark -i input.pdf -img logo.png -o out.pdf [flags]
+//
+// Flags:
+//
+//	-angle    rotation in degrees, counter-clockwise (default 45)
+//	-opacity  0..1, where 1 is fully opaque (default 0.15)
+//	-scale    fraction of the page diagonal to occupy (default 0.85)
 package main
 
 import (

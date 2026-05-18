@@ -45,6 +45,7 @@ If you need to create, read, search, or edit PDFs in Go without CGo or AGPL lice
 - PDF merge with page selection and size constraints (fail/truncate/shrink with JPEG recompression)
 - Text overlay (Helvetica, configurable size and color)
 - Visual redaction (filled rectangles with configurable color)
+- Image overlay / watermark (PNG/JPEG, rotation, opacity, transparent SMask)
 - PDF creation with text, rectangles, lines, and multiple fonts
 - Pure Go — no CGo, no system dependencies
 
@@ -269,6 +270,35 @@ ed.AddText(pdf.TextOverlay{              // write new text
 result, err := ed.Apply()
 ```
 
+### Image watermark
+
+```go
+logo, _ := pdf.LoadImage("logo.png")     // PNG or JPEG; alpha becomes an SMask
+
+ed := pdf.NewEditor(data)
+for i := 0; i < doc.NumPages(); i++ {
+    mb := doc.Page(i).MediaBox()
+    ed.AddImage(pdf.ImageOverlay{
+        Page:     i,
+        Image:    logo,
+        CX:       (mb[0] + mb[2]) / 2,   // page center
+        CY:       (mb[1] + mb[3]) / 2,
+        Width:    400, Height: 140,
+        Rotation: 45,                    // diagonal
+        Opacity:  0.15,
+    })
+}
+result, err := ed.Apply()
+```
+
+The same image is written once and shared by every page that references it.
+The bundled `cmd/watermark` wraps this for one-shot usage:
+
+```
+go run ./cmd/watermark -i in.pdf -img logo.png -o out.pdf \
+    -angle 45 -opacity 0.15 -scale 0.85
+```
+
 ## API Reference
 
 ### Document
@@ -348,7 +378,10 @@ result, err := ed.Apply()
 | `ed.AddText(overlay)` | | Draw text (Helvetica, any size/color) |
 | `ed.Redact(region)` | | Cover area with filled rectangle |
 | `ed.RedactText(query, r, g, b)` | `error` | Search and redact all matches |
+| `ed.AddImage(overlay)` | | Place an image (rotation, opacity, alpha) |
 | `ed.Apply()` | `[]byte, error` | Produce modified PDF |
+| `pdf.LoadImage(path)` | `*Image, error` | Decode PNG/JPEG for use with `AddImage` |
+| `pdf.LoadImageBytes(data)` | `*Image, error` | Decode PNG/JPEG from memory |
 
 ### Types
 
@@ -433,7 +466,8 @@ pdf/
   table.go      Table detection: header anchors, gap-based auto-detect, multi-page
   writer.go     PDF object serializer, xref generation, FlateDecode compression
   merge.go      PDF merge: size constraints (fail/truncate/shrink), stream dedup, JPEG recompression
-  edit.go       Text search, text overlay, visual redaction
+  edit.go       Text search, text overlay, image overlay, visual redaction
+  image.go      Image decoding (PNG/JPEG) → RGB + grayscale SMask streams
   creator.go    PDF creation from scratch (text, shapes, fonts)
   lexer.go      PDF byte stream tokenizer
   parser.go     Token -> object parser (dicts, arrays, refs)

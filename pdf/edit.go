@@ -7,6 +7,20 @@ import (
 	"strings"
 )
 
+// ImageOverlay places an image on a page. The image is anchored by its center
+// at (CX, CY) in PDF user-space points (origin bottom-left), drawn at size
+// (Width, Height), and rotated by Rotation degrees counter-clockwise around
+// the anchor. Opacity is in [0, 1]; a value of 0 is treated as 1 (fully
+// opaque), so the zero value renders as a normal image.
+type ImageOverlay struct {
+	Page          int
+	Image         *Image
+	CX, CY        float64
+	Width, Height float64
+	Rotation      float64
+	Opacity       float64
+}
+
 // Rect is a bounding rectangle on a page.
 type Rect struct {
 	X, Y          float64 // bottom-left corner
@@ -189,6 +203,7 @@ type Editor struct {
 	data       []byte
 	overlays   []TextOverlay
 	redactions []RedactRegion
+	images     []ImageOverlay
 }
 
 // NewEditor creates an Editor from PDF bytes.
@@ -222,6 +237,14 @@ func (e *Editor) Redact(region RedactRegion) {
 	e.redactions = append(e.redactions, region)
 }
 
+// AddImage places an image on a page (e.g., a watermark or logo).
+func (e *Editor) AddImage(overlay ImageOverlay) {
+	if overlay.Image == nil {
+		return
+	}
+	e.images = append(e.images, overlay)
+}
+
 // RedactText searches for text and covers all occurrences.
 func (e *Editor) RedactText(query string, r, g, b float64) error {
 	doc, err := OpenBytes(e.data)
@@ -250,7 +273,7 @@ func (e *Editor) Apply() ([]byte, error) {
 		return nil, err
 	}
 
-	// Group overlays and redactions by page.
+	// Group overlays, redactions, and images by page.
 	pageOverlays := make(map[int][]TextOverlay)
 	for _, o := range e.overlays {
 		pageOverlays[o.Page] = append(pageOverlays[o.Page], o)
@@ -258,6 +281,10 @@ func (e *Editor) Apply() ([]byte, error) {
 	pageRedactions := make(map[int][]RedactRegion)
 	for _, r := range e.redactions {
 		pageRedactions[r.Page] = append(pageRedactions[r.Page], r)
+	}
+	pageImages := make(map[int][]ImageOverlay)
+	for _, im := range e.images {
+		pageImages[im.Page] = append(pageImages[im.Page], im)
 	}
 
 	w := NewWriter()
@@ -270,13 +297,31 @@ func (e *Editor) Apply() ([]byte, error) {
 		refCache: make(map[int]Ref),
 	}
 
+	// Write each unique image XObject (plus its alpha SMask, if any) once and
+	// assign it a stable resource name. Pages that use the same image then
+	// share a single set of objects.
+	imageNames := make(map[*Image]Name)
+	imageRefs := make(map[*Image]Ref)
+	for _, ov := range e.images {
+		if _, done := imageRefs[ov.Image]; done {
+			continue
+		}
+		ref, err := writeImageXObject(w, ov.Image)
+		if err != nil {
+			return nil, fmt.Errorf("writing image: %w", err)
+		}
+		imageRefs[ov.Image] = ref
+		imageNames[ov.Image] = Name(fmt.Sprintf("Im_gopdf_wm_%d", len(imageNames)))
+	}
+
 	var pageRefs []Ref
 
 	for i, pageDict := range pages {
 		overlays := pageOverlays[i]
 		redactions := pageRedactions[i]
+		images := pageImages[i]
 
-		if len(overlays) == 0 && len(redactions) == 0 {
+		if len(overlays) == 0 && len(redactions) == 0 && len(images) == 0 {
 			// No modifications — copy page as-is.
 			copiedObj := ctx.copyObject(pageDict)
 			copiedPage := copiedObj.(Dict)
@@ -295,8 +340,9 @@ func (e *Editor) Apply() ([]byte, error) {
 		delete(copiedPage, "Parent")
 		copiedPage["Parent"] = pagesRef
 
-		// ensureOverlayFont needs inline Dicts it can modify, not Refs.
-		if len(overlays) > 0 {
+		// ensureOverlayFont / image-XObject registration need inline Dicts they
+		// can modify, not Refs.
+		if len(overlays) > 0 || len(images) > 0 {
 			inlineResourceDicts(ctx, copiedPage, pageDict)
 		}
 
@@ -323,6 +369,64 @@ func (e *Editor) Apply() ([]byte, error) {
 				r, g, b := ov.R, ov.G, ov.B
 				fmt.Fprintf(&extra, "q BT %.3f %.3f %.3f rg /%s %.1f Tf %.2f %.2f Td (%s) Tj ET Q\n",
 					r, g, b, fontName, ov.FontSize, ov.X, ov.Y, escapeStringPDF(ov.Text))
+			}
+		}
+
+		// Images: register XObject(s) in Resources, then draw.
+		if len(images) > 0 {
+			res := copiedPage["Resources"].(Dict)
+			xobj, ok := res["XObject"].(Dict)
+			if !ok {
+				xobj = make(Dict)
+				res["XObject"] = xobj
+			}
+			seenImage := make(map[*Image]bool)
+			seenGS := make(map[Name]bool)
+
+			for _, im := range images {
+				if !seenImage[im.Image] {
+					xobj[imageNames[im.Image]] = imageRefs[im.Image]
+					seenImage[im.Image] = true
+				}
+
+				opacity := im.Opacity
+				if opacity == 0 {
+					opacity = 1
+				}
+				gsName := Name("")
+				if opacity < 1 {
+					gsName = Name(fmt.Sprintf("GS_gopdf_wm%03d", int(math.Round(opacity*100))))
+					if !seenGS[gsName] {
+						gs, ok := res["ExtGState"].(Dict)
+						if !ok {
+							gs = make(Dict)
+							res["ExtGState"] = gs
+						}
+						gs[gsName] = Dict{
+							"Type": Name("ExtGState"),
+							"ca":   opacity,
+							"CA":   opacity,
+						}
+						seenGS[gsName] = true
+					}
+				}
+
+				theta := im.Rotation * math.Pi / 180
+				cosT, sinT := math.Cos(theta), math.Sin(theta)
+				W, H := im.Width, im.Height
+				a := W * cosT
+				b := W * sinT
+				c := -H * sinT
+				d := H * cosT
+				eX := im.CX - W*cosT/2 + H*sinT/2
+				fY := im.CY - W*sinT/2 - H*cosT/2
+
+				extra.WriteString("q ")
+				if gsName != "" {
+					fmt.Fprintf(&extra, "/%s gs ", gsName)
+				}
+				fmt.Fprintf(&extra, "%.4f %.4f %.4f %.4f %.4f %.4f cm /%s Do Q\n",
+					a, b, c, d, eX, fY, imageNames[im.Image])
 			}
 		}
 
@@ -364,10 +468,11 @@ func (e *Editor) Apply() ([]byte, error) {
 	return w.FinishWithID(catalogRef, reader.OriginalID())
 }
 
-// inlineResourceDicts ensures Resources and its Font sub-dict are inline Dicts
-// in copiedPage (not Refs to already-written objects), so ensureOverlayFont can
-// modify them. Sub-refs within these dicts (individual fonts, XObjects) stay as
-// Refs and are reused from the copyContext cache.
+// inlineResourceDicts ensures Resources and its Font / XObject / ExtGState
+// sub-dicts are inline Dicts in copiedPage (not Refs to already-written
+// objects), so the overlay/image registration code can add entries to them.
+// Sub-refs within these dicts (individual fonts, XObjects) stay as Refs and
+// are reused from the copyContext cache.
 func inlineResourceDicts(ctx *copyContext, copiedPage Dict, srcPage Dict) {
 	srcRes, _ := ctx.reader.ResolveDict(srcPage["Resources"])
 
@@ -381,13 +486,53 @@ func inlineResourceDicts(ctx *copyContext, copiedPage Dict, srcPage Dict) {
 		copiedPage["Resources"] = res
 	}
 
-	if _, ok := res["Font"].(Dict); !ok {
-		if srcRes != nil {
-			if srcFont, ok := ctx.reader.ResolveDict(srcRes["Font"]); ok {
-				res["Font"] = ctx.copyDict(srcFont)
-			}
+	for _, sub := range []Name{"Font", "XObject", "ExtGState"} {
+		if _, ok := res[sub].(Dict); ok {
+			continue
+		}
+		if srcRes == nil {
+			continue
+		}
+		if srcSub, ok := ctx.reader.ResolveDict(srcRes[sub]); ok {
+			res[sub] = ctx.copyDict(srcSub)
 		}
 	}
+}
+
+// writeImageXObject writes an Image as a PDF XObject (plus a grayscale SMask
+// sub-object if the image has any transparency) and returns the indirect
+// reference to the main image stream.
+func writeImageXObject(w *Writer, img *Image) (Ref, error) {
+	mainDict := Dict{
+		"Type":             Name("XObject"),
+		"Subtype":          Name("Image"),
+		"Width":            img.Width,
+		"Height":           img.Height,
+		"ColorSpace":       Name("DeviceRGB"),
+		"BitsPerComponent": 8,
+	}
+
+	if img.alpha != nil {
+		smaskRef := w.AllocRef()
+		smaskDict := Dict{
+			"Type":             Name("XObject"),
+			"Subtype":          Name("Image"),
+			"Width":            img.Width,
+			"Height":           img.Height,
+			"ColorSpace":       Name("DeviceGray"),
+			"BitsPerComponent": 8,
+		}
+		if err := w.WriteStream(smaskRef, smaskDict, img.alpha); err != nil {
+			return Ref{}, fmt.Errorf("writing alpha mask: %w", err)
+		}
+		mainDict["SMask"] = smaskRef
+	}
+
+	ref := w.AllocRef()
+	if err := w.WriteStream(ref, mainDict, img.rgb); err != nil {
+		return Ref{}, err
+	}
+	return ref, nil
 }
 
 // ensureOverlayFont adds a Helvetica font to the page's Resources if needed.

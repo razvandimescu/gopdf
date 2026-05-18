@@ -38,40 +38,39 @@ func main() {
 	if err != nil {
 		die("read input pdf: %v", err)
 	}
-	doc, err := pdf.OpenBytes(data)
-	if err != nil {
-		die("open pdf: %v", err)
-	}
 	logo, err := pdf.LoadImage(*img)
 	if err != nil {
 		die("load image: %v", err)
 	}
 
 	editor := pdf.NewEditor(data)
+	doc, err := editor.Document()
+	if err != nil {
+		die("parse pdf: %v", err)
+	}
+
 	aspect := float64(logo.Height) / float64(logo.Width)
+	theta := *angle * math.Pi / 180
+	cosT, sinT := math.Abs(math.Cos(theta)), math.Abs(math.Sin(theta))
+	// Rotated bounding box of a W×H rectangle has projections
+	// (W·|cos|+H·|sin|, W·|sin|+H·|cos|). Pick the W that keeps both ≤ scale
+	// of the corresponding page dimension so the watermark fits at any angle.
+	hFactor := cosT + aspect*sinT // horizontal projection / W
+	vFactor := sinT + aspect*cosT // vertical projection / W
 
 	for i := 0; i < doc.NumPages(); i++ {
 		mb := doc.Page(i).MediaBox()
 		pageW := mb[2] - mb[0]
 		pageH := mb[3] - mb[1]
-		cx := mb[0] + pageW/2
-		cy := mb[1] + pageH/2
-
-		// Size the image so the longest edge of the rotated bounding box
-		// covers `scale` × min(page width, page height). This keeps the
-		// watermark from spilling over the page at any angle.
-		theta := *angle * math.Pi / 180
-		w := math.Min(pageW, pageH) * (*scale) /
-			(math.Abs(math.Cos(theta)) + aspect*math.Abs(math.Sin(theta)))
-		h := w * aspect
+		w := math.Min(pageW*(*scale)/hFactor, pageH*(*scale)/vFactor)
 
 		editor.AddImage(pdf.ImageOverlay{
 			Page:     i,
 			Image:    logo,
-			CX:       cx,
-			CY:       cy,
+			CX:       mb[0] + pageW/2,
+			CY:       mb[1] + pageH/2,
 			Width:    w,
-			Height:   h,
+			Height:   w * aspect,
 			Rotation: *angle,
 			Opacity:  *opacity,
 		})

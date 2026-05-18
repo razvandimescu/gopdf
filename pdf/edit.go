@@ -7,11 +7,9 @@ import (
 	"strings"
 )
 
-// ImageOverlay places an image on a page. The image is anchored by its center
-// at (CX, CY) in PDF user-space points (origin bottom-left), drawn at size
-// (Width, Height), and rotated by Rotation degrees counter-clockwise around
-// the anchor. Opacity is in [0, 1]; a value of 0 is treated as 1 (fully
-// opaque), so the zero value renders as a normal image.
+// ImageOverlay places an image on a page, anchored by its center at (CX, CY)
+// in PDF user-space points, drawn at size (Width, Height), rotated by Rotation
+// degrees counter-clockwise around the anchor, with Opacity in [0, 1].
 type ImageOverlay struct {
 	Page          int
 	Image         *Image
@@ -201,6 +199,7 @@ type RedactRegion struct {
 // Editor modifies a PDF by adding overlays and redactions.
 type Editor struct {
 	data       []byte
+	doc        *Document // lazily parsed on first use; shared across Apply/RedactText/callers
 	overlays   []TextOverlay
 	redactions []RedactRegion
 	images     []ImageOverlay
@@ -245,14 +244,27 @@ func (e *Editor) AddImage(overlay ImageOverlay) {
 	e.images = append(e.images, overlay)
 }
 
+// Document returns the parsed PDF, parsing it on first call and caching the
+// result. Callers (and Apply / RedactText internally) share a single parse.
+func (e *Editor) Document() (*Document, error) {
+	if e.doc != nil {
+		return e.doc, nil
+	}
+	doc, err := OpenBytes(e.data)
+	if err != nil {
+		return nil, err
+	}
+	e.doc = doc
+	return doc, nil
+}
+
 // RedactText searches for text and covers all occurrences.
 func (e *Editor) RedactText(query string, r, g, b float64) error {
-	doc, err := OpenBytes(e.data)
+	doc, err := e.Document()
 	if err != nil {
 		return err
 	}
-	results := doc.Search(query)
-	for _, res := range results {
+	for _, res := range doc.Search(query) {
 		e.redactions = append(e.redactions, RedactRegion{
 			Page: res.Page,
 			Rect: res.Rect,
@@ -264,16 +276,13 @@ func (e *Editor) RedactText(query string, r, g, b float64) error {
 
 // Apply produces the modified PDF bytes.
 func (e *Editor) Apply() ([]byte, error) {
-	reader, err := Open(e.data)
+	doc, err := e.Document()
 	if err != nil {
 		return nil, err
 	}
-	pages, err := reader.Pages()
-	if err != nil {
-		return nil, err
-	}
+	reader := doc.reader
+	pages := doc.pages
 
-	// Group overlays, redactions, and images by page.
 	pageOverlays := make(map[int][]TextOverlay)
 	for _, o := range e.overlays {
 		pageOverlays[o.Page] = append(pageOverlays[o.Page], o)
@@ -297,21 +306,21 @@ func (e *Editor) Apply() ([]byte, error) {
 		refCache: make(map[int]Ref),
 	}
 
-	// Write each unique image XObject (plus its alpha SMask, if any) once and
-	// assign it a stable resource name. Pages that use the same image then
-	// share a single set of objects.
-	imageNames := make(map[*Image]Name)
-	imageRefs := make(map[*Image]Ref)
+	// Write each unique image XObject (and its alpha SMask, if any) once, so
+	// pages that share an image share a single object.
+	imageEntries := make(map[*Image]imageEntry)
 	for _, ov := range e.images {
-		if _, done := imageRefs[ov.Image]; done {
+		if _, done := imageEntries[ov.Image]; done {
 			continue
 		}
 		ref, err := writeImageXObject(w, ov.Image)
 		if err != nil {
 			return nil, fmt.Errorf("writing image: %w", err)
 		}
-		imageRefs[ov.Image] = ref
-		imageNames[ov.Image] = Name(fmt.Sprintf("Im_gopdf_wm_%d", len(imageNames)))
+		imageEntries[ov.Image] = imageEntry{
+			ref:  ref,
+			name: Name(fmt.Sprintf("Im_gopdf_wm_%d", len(imageEntries))),
+		}
 	}
 
 	var pageRefs []Ref
@@ -322,7 +331,6 @@ func (e *Editor) Apply() ([]byte, error) {
 		images := pageImages[i]
 
 		if len(overlays) == 0 && len(redactions) == 0 && len(images) == 0 {
-			// No modifications — copy page as-is.
 			copiedObj := ctx.copyObject(pageDict)
 			copiedPage := copiedObj.(Dict)
 			delete(copiedPage, "Parent")
@@ -334,34 +342,28 @@ func (e *Editor) Apply() ([]byte, error) {
 			continue
 		}
 
-		// Page has modifications. Copy it, then append operators.
 		copiedObj := ctx.copyObject(pageDict)
 		copiedPage := copiedObj.(Dict)
 		delete(copiedPage, "Parent")
 		copiedPage["Parent"] = pagesRef
 
-		// ensureOverlayFont / image-XObject registration need inline Dicts they
-		// can modify, not Refs.
+		// ensureOverlayFont and the image-XObject / ExtGState registrations
+		// below need inline Dicts they can modify, not Refs.
 		if len(overlays) > 0 || len(images) > 0 {
 			inlineResourceDicts(ctx, copiedPage, pageDict)
 		}
 
-		// Get the existing content stream data.
 		existingContent, _ := reader.PageContent(pageDict)
 
-		// Build the extra operators to append.
 		var extra strings.Builder
 
-		// Redactions: draw filled rectangles.
 		for _, red := range redactions {
 			fmt.Fprintf(&extra, "q %.3f %.3f %.3f rg %.2f %.2f %.2f %.2f re f Q\n",
 				red.R, red.G, red.B,
 				red.Rect.X, red.Rect.Y, red.Rect.Width, red.Rect.Height)
 		}
 
-		// Overlays: draw text.
 		if len(overlays) > 0 {
-			// We need a font in Resources. Use Helvetica with a known name.
 			fontName := Name("F_gopdf_overlay")
 			ensureOverlayFont(copiedPage, fontName)
 
@@ -372,65 +374,10 @@ func (e *Editor) Apply() ([]byte, error) {
 			}
 		}
 
-		// Images: register XObject(s) in Resources, then draw.
 		if len(images) > 0 {
-			res := copiedPage["Resources"].(Dict)
-			xobj, ok := res["XObject"].(Dict)
-			if !ok {
-				xobj = make(Dict)
-				res["XObject"] = xobj
-			}
-			seenImage := make(map[*Image]bool)
-			seenGS := make(map[Name]bool)
-
-			for _, im := range images {
-				if !seenImage[im.Image] {
-					xobj[imageNames[im.Image]] = imageRefs[im.Image]
-					seenImage[im.Image] = true
-				}
-
-				opacity := im.Opacity
-				if opacity == 0 {
-					opacity = 1
-				}
-				gsName := Name("")
-				if opacity < 1 {
-					gsName = Name(fmt.Sprintf("GS_gopdf_wm%03d", int(math.Round(opacity*100))))
-					if !seenGS[gsName] {
-						gs, ok := res["ExtGState"].(Dict)
-						if !ok {
-							gs = make(Dict)
-							res["ExtGState"] = gs
-						}
-						gs[gsName] = Dict{
-							"Type": Name("ExtGState"),
-							"ca":   opacity,
-							"CA":   opacity,
-						}
-						seenGS[gsName] = true
-					}
-				}
-
-				theta := im.Rotation * math.Pi / 180
-				cosT, sinT := math.Cos(theta), math.Sin(theta)
-				W, H := im.Width, im.Height
-				a := W * cosT
-				b := W * sinT
-				c := -H * sinT
-				d := H * cosT
-				eX := im.CX - W*cosT/2 + H*sinT/2
-				fY := im.CY - W*sinT/2 - H*cosT/2
-
-				extra.WriteString("q ")
-				if gsName != "" {
-					fmt.Fprintf(&extra, "/%s gs ", gsName)
-				}
-				fmt.Fprintf(&extra, "%.4f %.4f %.4f %.4f %.4f %.4f cm /%s Do Q\n",
-					a, b, c, d, eX, fY, imageNames[im.Image])
-			}
+			writeImageOps(&extra, copiedPage, images, imageEntries)
 		}
 
-		// Combine existing content + new operators into a single stream.
 		var combined []byte
 		if len(existingContent) > 0 {
 			combined = append(combined, existingContent...)
@@ -438,11 +385,8 @@ func (e *Editor) Apply() ([]byte, error) {
 		}
 		combined = append(combined, []byte(extra.String())...)
 
-		// Write the combined content as a new stream.
 		contentRef := w.AllocRef()
 		w.WriteStream(contentRef, Dict{}, combined)
-
-		// Point the page to the new content stream.
 		copiedPage["Contents"] = contentRef
 
 		pageRef := w.AllocRef()
@@ -450,7 +394,6 @@ func (e *Editor) Apply() ([]byte, error) {
 		pageRefs = append(pageRefs, pageRef)
 	}
 
-	// Build Pages and Catalog.
 	kids := make(Array, len(pageRefs))
 	for i, ref := range pageRefs {
 		kids[i] = ref
@@ -499,30 +442,32 @@ func inlineResourceDicts(ctx *copyContext, copiedPage Dict, srcPage Dict) {
 	}
 }
 
+// imageEntry pairs an image XObject's indirect ref with the resource name it
+// is registered under on each page that draws it.
+type imageEntry struct {
+	ref  Ref
+	name Name
+}
+
 // writeImageXObject writes an Image as a PDF XObject (plus a grayscale SMask
 // sub-object if the image has any transparency) and returns the indirect
 // reference to the main image stream.
 func writeImageXObject(w *Writer, img *Image) (Ref, error) {
-	mainDict := Dict{
-		"Type":             Name("XObject"),
-		"Subtype":          Name("Image"),
-		"Width":            img.Width,
-		"Height":           img.Height,
-		"ColorSpace":       Name("DeviceRGB"),
-		"BitsPerComponent": 8,
-	}
-
-	if img.alpha != nil {
-		smaskRef := w.AllocRef()
-		smaskDict := Dict{
+	imageStreamDict := func(colorSpace Name) Dict {
+		return Dict{
 			"Type":             Name("XObject"),
 			"Subtype":          Name("Image"),
 			"Width":            img.Width,
 			"Height":           img.Height,
-			"ColorSpace":       Name("DeviceGray"),
+			"ColorSpace":       colorSpace,
 			"BitsPerComponent": 8,
 		}
-		if err := w.WriteStream(smaskRef, smaskDict, img.alpha); err != nil {
+	}
+
+	mainDict := imageStreamDict("DeviceRGB")
+	if img.alpha != nil {
+		smaskRef := w.AllocRef()
+		if err := w.WriteStream(smaskRef, imageStreamDict("DeviceGray"), img.alpha); err != nil {
 			return Ref{}, fmt.Errorf("writing alpha mask: %w", err)
 		}
 		mainDict["SMask"] = smaskRef
@@ -533,6 +478,56 @@ func writeImageXObject(w *Writer, img *Image) (Ref, error) {
 		return Ref{}, err
 	}
 	return ref, nil
+}
+
+// writeImageOps registers each overlay's image XObject and (if its opacity
+// is below 1) its ExtGState on the page's Resources, then emits the
+// content-stream operators to draw them.
+func writeImageOps(buf *strings.Builder, page Dict, overlays []ImageOverlay, entries map[*Image]imageEntry) {
+	res := page["Resources"].(Dict)
+	xobj, ok := res["XObject"].(Dict)
+	if !ok {
+		xobj = make(Dict)
+		res["XObject"] = xobj
+	}
+
+	for _, ov := range overlays {
+		entry := entries[ov.Image]
+		xobj[entry.name] = entry.ref
+
+		gsName := Name("")
+		if ov.Opacity < 1 {
+			gsName = Name(fmt.Sprintf("GS_gopdf_wm%03d", int(math.Round(ov.Opacity*100))))
+			gs, ok := res["ExtGState"].(Dict)
+			if !ok {
+				gs = make(Dict)
+				res["ExtGState"] = gs
+			}
+			gs[gsName] = Dict{
+				"Type": Name("ExtGState"),
+				"ca":   ov.Opacity,
+				"CA":   ov.Opacity,
+			}
+		}
+
+		theta := ov.Rotation * math.Pi / 180
+		cosT, sinT := math.Cos(theta), math.Sin(theta)
+		W, H := ov.Width, ov.Height
+		// cm = T(CX, CY) · R(θ) · T(-W/2, -H/2) · S(W, H)
+		a := W * cosT
+		b := W * sinT
+		c := -H * sinT
+		d := H * cosT
+		eX := ov.CX - W*cosT/2 + H*sinT/2
+		fY := ov.CY - W*sinT/2 - H*cosT/2
+
+		buf.WriteString("q ")
+		if gsName != "" {
+			fmt.Fprintf(buf, "/%s gs ", gsName)
+		}
+		fmt.Fprintf(buf, "%.4f %.4f %.4f %.4f %.4f %.4f cm /%s Do Q\n",
+			a, b, c, d, eX, fY, entry.name)
+	}
 }
 
 // ensureOverlayFont adds a Helvetica font to the page's Resources if needed.

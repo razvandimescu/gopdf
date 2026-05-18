@@ -4,16 +4,14 @@ import (
 	"bytes"
 	"fmt"
 	"image"
-	_ "image/jpeg" // register JPEG decoder
-	_ "image/png"  // register PNG decoder
+	_ "image/jpeg"
+	_ "image/png"
 	"os"
 )
 
-// Image is a decoded raster image, ready to embed as a PDF XObject.
-// The pixel data is stored as 8-bit-per-component RGB (rgb) plus an optional
-// 8-bit grayscale alpha mask (alpha). Pixels are row-major, top-to-bottom —
-// matching the orientation PDF expects when an Image XObject is drawn with a
-// positive CTM scale.
+// Image is a decoded raster image, ready to embed as a PDF XObject. Pixels
+// are row-major, top-to-bottom — the orientation PDF Image XObjects expect
+// when drawn with a positive CTM scale.
 type Image struct {
 	Width, Height int
 	rgb           []byte // len = Width*Height*3

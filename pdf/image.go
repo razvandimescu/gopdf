@@ -35,9 +35,6 @@ func LoadImageBytes(data []byte) (*Image, error) {
 	}
 	b := img.Bounds()
 	w, h := b.Dx(), b.Dy()
-	if w <= 0 || h <= 0 {
-		return nil, fmt.Errorf("image has zero dimensions")
-	}
 
 	rgb := make([]byte, 0, w*h*3)
 	alpha := make([]byte, 0, w*h)

@@ -1,14 +1,5 @@
-// watermark applies a single image as a diagonal watermark on every page of a PDF.
-//
-// Usage:
-//
-//	watermark -i input.pdf -img logo.png -o out.pdf [flags]
-//
-// Flags:
-//
-//	-angle    rotation in degrees, counter-clockwise (default 45)
-//	-opacity  0..1, where 1 is fully opaque (default 0.15)
-//	-scale    fraction of the page diagonal to occupy (default 0.85)
+// watermark applies an image as a diagonal watermark on every page of a PDF.
+// Run with -h for flags.
 package main
 
 import (
@@ -55,8 +46,8 @@ func main() {
 	// Rotated bounding box of a W×H rectangle has projections
 	// (W·|cos|+H·|sin|, W·|sin|+H·|cos|). Pick the W that keeps both ≤ scale
 	// of the corresponding page dimension so the watermark fits at any angle.
-	hFactor := cosT + aspect*sinT // horizontal projection / W
-	vFactor := sinT + aspect*cosT // vertical projection / W
+	hFactor := cosT + aspect*sinT
+	vFactor := sinT + aspect*cosT
 
 	for i := 0; i < doc.NumPages(); i++ {
 		mb := doc.Page(i).MediaBox()

@@ -199,7 +199,7 @@ type RedactRegion struct {
 // Editor modifies a PDF by adding overlays and redactions.
 type Editor struct {
 	data       []byte
-	doc        *Document // lazily parsed on first use; shared across Apply/RedactText/callers
+	doc        *Document
 	overlays   []TextOverlay
 	redactions []RedactRegion
 	images     []ImageOverlay
@@ -306,8 +306,6 @@ func (e *Editor) Apply() ([]byte, error) {
 		refCache: make(map[int]Ref),
 	}
 
-	// Write each unique image XObject (and its alpha SMask, if any) once, so
-	// pages that share an image share a single object.
 	imageEntries := make(map[*Image]imageEntry)
 	for _, ov := range e.images {
 		if _, done := imageEntries[ov.Image]; done {

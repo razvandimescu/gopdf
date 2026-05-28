@@ -278,13 +278,16 @@ logo, _ := pdf.LoadImage("logo.png")     // PNG or JPEG; alpha becomes an SMask
 ed := pdf.NewEditor(data)
 for i := 0; i < doc.NumPages(); i++ {
     mb := doc.Page(i).MediaBox()
+    pageW, pageH := mb[2]-mb[0], mb[3]-mb[1]
+    // Size so the rotated watermark fills 85% of the page at any angle.
+    w, h := logo.FitRotated(pageW, pageH, 45, 0.85)
     ed.AddImage(pdf.ImageOverlay{
         Page:     i,
         Image:    logo,
-        CX:       (mb[0] + mb[2]) / 2,   // page center
-        CY:       (mb[1] + mb[3]) / 2,
-        Width:    400, Height: 140,
-        Rotation: 45,                    // diagonal
+        CX:       mb[0] + pageW/2,        // page center
+        CY:       mb[1] + pageH/2,
+        Width:    w, Height: h,
+        Rotation: 45,                     // diagonal
         Opacity:  0.15,
     })
 }
@@ -382,6 +385,7 @@ go run ./cmd/watermark -i in.pdf -img logo.png -o out.pdf \
 | `ed.Apply()` | `[]byte, error` | Produce modified PDF |
 | `pdf.LoadImage(path)` | `*Image, error` | Decode PNG/JPEG for use with `AddImage` |
 | `pdf.LoadImageBytes(data)` | `*Image, error` | Decode PNG/JPEG from memory |
+| `img.FitRotated(pageW, pageH, rotation, scale)` | `width, height float64` | Size a watermark so its rotated bbox fits the page |
 
 ### Types
 

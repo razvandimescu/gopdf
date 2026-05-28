@@ -6,6 +6,7 @@ import (
 	"image"
 	_ "image/jpeg"
 	_ "image/png"
+	"math"
 	"os"
 )
 
@@ -63,4 +64,20 @@ func LoadImageBytes(data []byte) (*Image, error) {
 		alpha = nil
 	}
 	return &Image{Width: w, Height: h, rgb: rgb, alpha: alpha}, nil
+}
+
+// FitRotated returns the width and height at which to draw the image, centered
+// on a page of size (pageW, pageH), so that after rotating by `rotation`
+// degrees its bounding box occupies `scale` (0..1) of the page in both
+// dimensions. The image's aspect ratio is preserved. Pair it with an
+// ImageOverlay whose Width/Height are the returned values and whose Rotation
+// matches `rotation`.
+func (img *Image) FitRotated(pageW, pageH, rotation, scale float64) (width, height float64) {
+	aspect := float64(img.Height) / float64(img.Width)
+	theta := rotation * math.Pi / 180
+	cosT, sinT := math.Abs(math.Cos(theta)), math.Abs(math.Sin(theta))
+	// Rotated bounding box of a w×h rectangle spans w·|cos|+h·|sin| horizontally
+	// and w·|sin|+h·|cos| vertically; bound both against the page.
+	w := math.Min(pageW*scale/(cosT+aspect*sinT), pageH*scale/(sinT+aspect*cosT))
+	return w, w * aspect
 }

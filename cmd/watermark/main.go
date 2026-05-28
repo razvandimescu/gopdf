@@ -14,7 +14,6 @@ package main
 import (
 	"flag"
 	"fmt"
-	"math"
 	"os"
 
 	"github.com/razvandimescu/gopdf/pdf"
@@ -49,20 +48,11 @@ func main() {
 		die("parse pdf: %v", err)
 	}
 
-	aspect := float64(logo.Height) / float64(logo.Width)
-	theta := *angle * math.Pi / 180
-	cosT, sinT := math.Abs(math.Cos(theta)), math.Abs(math.Sin(theta))
-	// Rotated bounding box of a W×H rectangle has projections
-	// (W·|cos|+H·|sin|, W·|sin|+H·|cos|). Pick the W that keeps both ≤ scale
-	// of the corresponding page dimension so the watermark fits at any angle.
-	hFactor := cosT + aspect*sinT
-	vFactor := sinT + aspect*cosT
-
 	for i := 0; i < doc.NumPages(); i++ {
 		mb := doc.Page(i).MediaBox()
 		pageW := mb[2] - mb[0]
 		pageH := mb[3] - mb[1]
-		w := math.Min(pageW*(*scale)/hFactor, pageH*(*scale)/vFactor)
+		w, h := logo.FitRotated(pageW, pageH, *angle, *scale)
 
 		editor.AddImage(pdf.ImageOverlay{
 			Page:     i,
@@ -70,7 +60,7 @@ func main() {
 			CX:       mb[0] + pageW/2,
 			CY:       mb[1] + pageH/2,
 			Width:    w,
-			Height:   w * aspect,
+			Height:   h,
 			Rotation: *angle,
 			Opacity:  *opacity,
 		})

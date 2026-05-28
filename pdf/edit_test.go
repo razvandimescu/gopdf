@@ -150,6 +150,71 @@ func TestRedactRegion(t *testing.T) {
 	}
 }
 
+// TestOverlayIsolatesExistingCTM is a regression test: when a page's content
+// stream applies a top-level CTM (here a y-flip) outside any q/Q and never
+// restores it, an appended overlay must not inherit that transform. Apply()
+// wraps the original content in q/Q so overlays render from the page default.
+func TestOverlayIsolatesExistingCTM(t *testing.T) {
+	flipped := "0.75 0 0 -0.75 0 792 cm\nBT /F1 12 Tf 72 750 Td (Flipped) Tj ET"
+	data := buildRawPDF(t, func(w *Writer, pagesRef Ref) Dict {
+		fontRef := w.AllocRef()
+		contentRef := w.AllocRef()
+		w.WriteObject(fontRef, Dict{
+			"Type": Name("Font"), "Subtype": Name("Type1"), "BaseFont": Name("Helvetica"),
+		})
+		w.WriteStream(contentRef, Dict{}, []byte(flipped))
+		return Dict{
+			"Type": Name("Page"), "Parent": pagesRef,
+			"MediaBox":  Array{0, 0, 612, 792},
+			"Resources": Dict{"Font": Dict{Name("F1"): fontRef}},
+			"Contents":  contentRef,
+		}
+	})
+
+	ed := NewEditor(data)
+	ed.AddText(TextOverlay{Page: 0, X: 100, Y: 50, Text: "WM", FontSize: 24})
+	result, err := ed.Apply()
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	reader, err := Open(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pages, err := reader.Pages()
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := reader.PageContent(pages[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(content)
+
+	if !strings.HasPrefix(s, "q\n") {
+		t.Errorf("original content not wrapped in q/Q; stream starts with %q", s[:minInt(20, len(s))])
+	}
+	flipIdx := strings.Index(s, "0.75 0 0 -0.75")
+	overlayIdx := strings.Index(s, "F_gopdf_overlay")
+	if flipIdx < 0 || overlayIdx < 0 {
+		t.Fatalf("expected original flip (%d) and overlay (%d) in stream", flipIdx, overlayIdx)
+	}
+	// A closing Q must sit between the original CTM and the overlay, so the
+	// overlay executes from the restored (identity) graphics state.
+	closeIdx := strings.LastIndex(s[:overlayIdx], "\nQ\n")
+	if closeIdx <= flipIdx {
+		t.Errorf("overlay not isolated from original CTM: flipIdx=%d closeQ=%d overlayIdx=%d", flipIdx, closeIdx, overlayIdx)
+	}
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // buildRawPDF creates a single-page PDF from a page Dict built by the caller.
 // Handles Pages/Catalog boilerplate; the caller controls page content.
 func buildRawPDF(t *testing.T, pageFn func(w *Writer, pagesRef Ref) Dict) []byte {

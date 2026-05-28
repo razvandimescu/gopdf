@@ -376,10 +376,16 @@ func (e *Editor) Apply() ([]byte, error) {
 			writeImageOps(&extra, copiedPage, images, imageEntries)
 		}
 
+		// Wrap the original content in q/Q so overlays start from the page's
+		// default graphics state. Some content streams apply a top-level CTM
+		// (e.g. a y-flip "0.75 0 0 -0.75 ... cm") outside any q/Q and never
+		// restore it; without this isolation, appended overlays inherit that
+		// transform and render flipped or mispositioned.
 		var combined []byte
 		if len(existingContent) > 0 {
+			combined = append(combined, 'q', '\n')
 			combined = append(combined, existingContent...)
-			combined = append(combined, '\n')
+			combined = append(combined, '\n', 'Q', '\n')
 		}
 		combined = append(combined, []byte(extra.String())...)
 

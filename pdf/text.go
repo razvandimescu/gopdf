@@ -49,21 +49,26 @@ func ExtractPageText(page Dict, reader *Reader) []TextSpan {
 		return spans
 	}
 
-	// Get page dimensions from MediaBox [llx lly urx ury].
-	var width, height float64
+	// Get page origin and dimensions from MediaBox [llx lly urx ury]. The
+	// origin (x0, y0) is carried through so rotated span positions stay in the
+	// page's displayed space about its true origin — the inverse of the map
+	// rotateOverlaySpace applies to overlays, so the two round-trip exactly.
+	var x0, y0, width, height float64
 	if mb, ok := page.Array("MediaBox"); ok && len(mb) >= 4 {
-		width = asFloat(mb[2]) - asFloat(mb[0])
-		height = asFloat(mb[3]) - asFloat(mb[1])
+		x0 = asFloat(mb[0])
+		y0 = asFloat(mb[1])
+		width = asFloat(mb[2]) - x0
+		height = asFloat(mb[3]) - y0
 	}
 
 	var rotM [6]float64
 	switch rotate % 360 {
 	case 90:
-		rotM = [6]float64{0, -1, 1, 0, 0, width}
+		rotM = [6]float64{0, -1, 1, 0, x0 - y0, width + x0 + y0}
 	case 180:
-		rotM = [6]float64{-1, 0, 0, -1, width, height}
+		rotM = [6]float64{-1, 0, 0, -1, width + 2*x0, height + 2*y0}
 	case 270:
-		rotM = [6]float64{0, 1, -1, 0, height, 0}
+		rotM = [6]float64{0, 1, -1, 0, height + x0 + y0, y0 - x0}
 	default:
 		return spans
 	}

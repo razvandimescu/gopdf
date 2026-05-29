@@ -7,9 +7,14 @@ import (
 	"strings"
 )
 
-// ImageOverlay places an image on a page, anchored by its center at (CX, CY)
-// in PDF user-space points, drawn at size (Width, Height), rotated by Rotation
-// degrees counter-clockwise around the anchor, with Opacity in [0, 1].
+// ImageOverlay places an image on a page, anchored by its center at (CX, CY),
+// drawn at size (Width, Height), rotated by Rotation degrees counter-clockwise
+// around the anchor, with Opacity in [0, 1].
+//
+// (CX, CY) is in displayed space: the coordinate system the viewer shows after
+// applying the page's /Rotate, with the MediaBox origin — the same space
+// Page.Search reports matches in. On an unrotated, origin-0 page this is plain
+// user space; the Editor maps it back to unrotated user space before drawing.
 type ImageOverlay struct {
 	Page          int
 	Image         *Image
@@ -29,7 +34,7 @@ type Rect struct {
 type SearchResult struct {
 	Page     int    // 0-based page index
 	Text     string // matched text
-	Rect     Rect   // bounding rectangle
+	Rect     Rect   // bounding rectangle in displayed space (see ImageOverlay)
 	FontSize float64
 }
 
@@ -183,13 +188,15 @@ func spanCharWidth(span TextSpan) float64 {
 // TextOverlay describes text to draw on a page.
 type TextOverlay struct {
 	Page     int     // 0-based page index
-	X, Y     float64 // position (PDF coordinates: origin bottom-left)
+	X, Y     float64 // position in displayed space (origin bottom-left; see ImageOverlay)
 	Text     string
 	FontSize float64
 	R, G, B  float64 // color (0-1 range), default black
 }
 
-// RedactRegion describes an area to cover with a filled rectangle.
+// RedactRegion describes an area to cover with a filled rectangle. Rect is in
+// displayed space (see ImageOverlay), so a region from Search/RedactText lands
+// on the matched text even on rotated pages.
 type RedactRegion struct {
 	Page    int
 	Rect    Rect
@@ -384,7 +391,7 @@ func (e *Editor) Apply() ([]byte, error) {
 			combined = append(combined, suffix...)
 		}
 		mb := doc.Page(i).MediaBox()
-		injected := rotateOverlaySpace(doc.Page(i).Rotation(), mb[2]-mb[0], mb[3]-mb[1], extra.String())
+		injected := rotateOverlaySpace(doc.Page(i).Rotation(), mb[0], mb[1], mb[2]-mb[0], mb[3]-mb[1], extra.String())
 		combined = append(combined, []byte(injected)...)
 
 		contentRef := w.AllocRef()
@@ -566,112 +573,74 @@ func isolateExistingContent(content []byte) (prefix, suffix string) {
 	return pre.String(), suf.String()
 }
 
-// scanContentNesting walks a content stream tracking q/Q and BDC|BMC/EMC
-// nesting, returning the final and minimum depth of each. It skips over
-// (literal strings), <hex strings>, /names, and BI…EI inline image data so
-// operator-like bytes inside them are not miscounted.
+// scanContentNesting tokenizes a content stream with the shared Lexer,
+// tracking q/Q and BDC|BMC/EMC nesting and returning the final and minimum
+// depth of each. Driving the lexer means (literal strings), <hex strings>,
+// <<dicts>>, /names, % comments, and BI…EI inline image data are all skipped
+// by the same code the rest of the library trusts, so operator-like bytes
+// inside them are never miscounted. Malformed bytes that the lexer rejects
+// are stepped over so the scan still reaches the end of a broken stream.
 func scanContentNesting(s []byte) (qFinal, qMin, mcFinal, mcMin int) {
-	for i, n := 0, len(s); i < n; {
-		switch c := s[i]; {
-		case c == '(':
-			i = skipLiteralString(s, i)
-		case c == '<':
-			i++
-			for i < n && s[i] != '>' {
-				i++
+	lex := NewLexer(s)
+	for {
+		start := lex.Pos()
+		tok, err := lex.NextToken()
+		if err != nil {
+			if lex.Pos() <= start {
+				lex.SetPos(start + 1)
 			}
-			i++
-		case c == '/':
-			i++
-			for i < n && !isContentDelim(s[i]) {
-				i++
-			}
-		case c == 'q' && isToken(s, i, 1):
+			continue
+		}
+		if tok.Type == TEOF {
+			return
+		}
+		if tok.Type != TKeyword {
+			continue
+		}
+		switch tok.Str {
+		case "q":
 			qFinal++
-			i++
-		case c == 'Q' && isToken(s, i, 1):
+		case "Q":
 			qFinal--
 			qMin = min(qMin, qFinal)
-			i++
-		case (c == 'B') && i+3 <= n && (string(s[i:i+3]) == "BDC" || string(s[i:i+3]) == "BMC") && isToken(s, i, 3):
+		case "BDC", "BMC":
 			mcFinal++
-			i += 3
-		case c == 'E' && i+3 <= n && string(s[i:i+3]) == "EMC" && isToken(s, i, 3):
+		case "EMC":
 			mcFinal--
 			mcMin = min(mcMin, mcFinal)
-			i += 3
-		case c == 'I' && i+2 <= n && string(s[i:i+2]) == "ID" && isToken(s, i, 2):
-			i = skipInlineImageBytes(s, i+2)
-		default:
-			i++
+		case "BI":
+			skipInlineImage(lex)
 		}
 	}
-	return
-}
-
-func skipLiteralString(s []byte, i int) int {
-	depth, n := 1, len(s)
-	for i++; i < n && depth > 0; i++ {
-		switch s[i] {
-		case '\\':
-			i++
-		case '(':
-			depth++
-		case ')':
-			depth--
-		}
-	}
-	return i
-}
-
-// skipInlineImageBytes advances past raw inline-image data (after ID) to just
-// after the closing EI operator.
-func skipInlineImageBytes(s []byte, i int) int {
-	for n := len(s); i < n; i++ {
-		if s[i] == 'E' && i+1 < n && s[i+1] == 'I' &&
-			(i == 0 || isContentDelim(s[i-1])) &&
-			(i+2 >= n || isContentDelim(s[i+2])) {
-			return i + 2
-		}
-	}
-	return len(s)
-}
-
-func isContentDelim(c byte) bool {
-	switch c {
-	case ' ', '\t', '\r', '\n', '\f', 0, '(', ')', '<', '>', '[', ']', '{', '}', '/', '%':
-		return true
-	}
-	return false
-}
-
-func isToken(s []byte, i, length int) bool {
-	if i > 0 && !isContentDelim(s[i-1]) {
-		return false
-	}
-	j := i + length
-	return j >= len(s) || isContentDelim(s[j])
 }
 
 // rotateOverlaySpace lets overlay coordinates be expressed in the page's
-// displayed (post-/Rotate) space. Page content is drawn in unrotated user
-// space and the viewer applies /Rotate on top, so an overlay emitted naively
-// inherits that rotation (e.g. a 45° watermark flips to 135° on a 90° page).
-// Prepending the inverse-rotation matrix cancels the viewer's rotation, so
-// the overlay renders identically to one on an unrotated page. w and h are
-// the unrotated MediaBox dimensions; content is the overlay operators to wrap.
-func rotateOverlaySpace(rotation int, w, h float64, content string) string {
+// displayed (post-/Rotate) space — the same space Page.Search returns. Page
+// content is drawn in unrotated user space and the viewer applies /Rotate on
+// top, so an overlay emitted naively inherits that rotation (e.g. a 45°
+// watermark flips to 135° on a 90° page). Prepending the inverse-rotation
+// matrix cancels the viewer's rotation, so the overlay renders identically to
+// one on an unrotated page.
+//
+// The matrix is the displayed→user map for a MediaBox [x0, y0, x0+w, y0+h],
+// derived by conjugating the origin-0 rotation with T(x0, y0): M = T(x0,y0) ·
+// R⁻¹ · T(-x0,-y0). This keeps the MediaBox origin in displayed space (so it
+// agrees with the rotated TextSpan positions Search produces) and reduces to
+// the bare origin-0 matrix when x0 = y0 = 0. Rotation 0 maps displayed space
+// onto user space identically, so it (and any non-orthogonal angle) passes
+// through untouched. x0/y0 are the MediaBox origin; w/h its dimensions.
+func rotateOverlaySpace(rotation int, x0, y0, w, h float64, content string) string {
 	if content == "" {
 		return content
 	}
 	var cm string
 	switch ((rotation % 360) + 360) % 360 {
 	case 90:
-		cm = fmt.Sprintf("0 1 -1 0 %.4f 0", w)
+		cm = fmt.Sprintf("0 1 -1 0 %.4f %.4f", w+x0+y0, y0-x0)
 	case 180:
-		cm = fmt.Sprintf("-1 0 0 -1 %.4f %.4f", w, h)
+		cm = fmt.Sprintf("-1 0 0 -1 %.4f %.4f", w+2*x0, h+2*y0)
 	case 270:
-		cm = fmt.Sprintf("0 -1 1 0 0 %.4f", h)
+		cm = fmt.Sprintf("0 -1 1 0 %.4f %.4f", x0-y0, h+x0+y0)
 	default:
 		return content
 	}

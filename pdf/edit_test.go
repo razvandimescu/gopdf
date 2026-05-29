@@ -1,43 +1,163 @@
 package pdf
 
 import (
+	"fmt"
+	"math"
 	"strings"
 	"testing"
 )
 
+func TestScanContentNestingSkipsNonOperators(t *testing.T) {
+	// A balanced stream whose comment, literal string, hex string, and
+	// marked-content property dict all contain bytes that look like q/Q or
+	// BMC/BDC/EMC operators. None may be counted.
+	const src = "q\n" +
+		"% spurious Q and EMC live inside a comment\n" +
+		"(a literal q Q BMC EMC string) Tj\n" +
+		"<48656c6c6f> Tj\n" +
+		"/P <</MCID 0 /Tag (Q)>> BDC\n" +
+		"BT ET\n" +
+		"EMC\n" +
+		"Q\n"
+	qf, qm, mf, mm := scanContentNesting([]byte(src))
+	if qf != 0 || qm < 0 || mf != 0 || mm < 0 {
+		t.Errorf("balanced stream miscounted: q final=%d min=%d, mc final=%d min=%d", qf, qm, mf, mm)
+	}
+}
+
 func TestRotateOverlaySpace(t *testing.T) {
 	const content = "q 1 0 0 1 0 0 cm /Im Do Q\n"
+	const w, h = 595.0, 842.0
 
-	// Unrotated pages are left untouched.
+	// Unrotated pages are left untouched — including non-zero-origin ones,
+	// since displayed space equals user space when there is no rotation.
 	for _, r := range []int{0, 360, -360} {
-		if got := rotateOverlaySpace(r, 595, 842, content); got != content {
+		if got := rotateOverlaySpace(r, 0, 0, w, h, content); got != content {
 			t.Errorf("rotation %d: expected passthrough, got %q", r, got)
 		}
 	}
+	if got := rotateOverlaySpace(0, 50, 30, w, h, content); got != content {
+		t.Errorf("rotation 0 with origin: expected passthrough, got %q", got)
+	}
 
 	// Empty content never gets wrapped.
-	if got := rotateOverlaySpace(90, 595, 842, ""); got != "" {
+	if got := rotateOverlaySpace(90, 0, 0, w, h, ""); got != "" {
 		t.Errorf("empty content: got %q", got)
 	}
 
-	cases := map[int]string{
-		90:  "q 0 1 -1 0 595.0000 0 cm\n",
-		180: "q -1 0 0 -1 595.0000 842.0000 cm\n",
-		270: "q 0 -1 1 0 0 842.0000 cm\n",
+	// Exact matrices for origin 0 (reduces to the bare rotation) and a
+	// non-zero origin (x0=50, y0=30) via M = T(x0,y0)·R⁻¹·T(-x0,-y0).
+	type key struct {
+		rot    int
+		x0, y0 float64
 	}
-	for rot, prefix := range cases {
-		got := rotateOverlaySpace(rot, 595, 842, content)
+	cases := map[key]string{
+		{90, 0, 0}:    "q 0 1 -1 0 595.0000 0.0000 cm\n",
+		{180, 0, 0}:   "q -1 0 0 -1 595.0000 842.0000 cm\n",
+		{270, 0, 0}:   "q 0 -1 1 0 0.0000 842.0000 cm\n",
+		{90, 50, 30}:  "q 0 1 -1 0 675.0000 -20.0000 cm\n",
+		{180, 50, 30}: "q -1 0 0 -1 695.0000 902.0000 cm\n",
+		{270, 50, 30}: "q 0 -1 1 0 20.0000 922.0000 cm\n",
+	}
+	for k, prefix := range cases {
+		got := rotateOverlaySpace(k.rot, k.x0, k.y0, w, h, content)
 		if !strings.HasPrefix(got, prefix) {
-			t.Errorf("rotation %d: want prefix %q, got %q", rot, prefix, got)
+			t.Errorf("rot %d origin (%g,%g): want prefix %q, got %q", k.rot, k.x0, k.y0, prefix, got)
 		}
 		if !strings.HasSuffix(got, content+"Q\n") {
-			t.Errorf("rotation %d: content not wrapped, got %q", rot, got)
+			t.Errorf("rot %d: content not wrapped, got %q", k.rot, got)
 		}
-		// Normalized rotation must match its canonical form.
-		if alt := rotateOverlaySpace(rot+360, 595, 842, content); alt != got {
-			t.Errorf("rotation %d not normalized: %q != %q", rot, alt, got)
+		if alt := rotateOverlaySpace(k.rot+360, k.x0, k.y0, w, h, content); alt != got {
+			t.Errorf("rot %d not normalized: %q != %q", k.rot, alt, got)
 		}
 	}
+}
+
+// TestRotateOverlaySpaceCentersVisually feeds the center the watermark CLI
+// computes (displayed space, origin-inclusive) through the emitted matrix and
+// asserts it lands on the page's true visual center — the Bug A property.
+func TestRotateOverlaySpaceCentersVisually(t *testing.T) {
+	const w, h = 595.0, 842.0
+	for _, origin := range [][2]float64{{0, 0}, {50, 30}} {
+		x0, y0 := origin[0], origin[1]
+		visualCX, visualCY := x0+w/2, y0+h/2
+		for _, rot := range []int{90, 180, 270} {
+			dispW, dispH := w, h
+			if rot == 90 || rot == 270 {
+				dispW, dispH = h, w // CLI swaps dimensions on quarter turns
+			}
+			cx, cy := x0+dispW/2, y0+dispH/2
+			m := parseCM(t, rotateOverlaySpace(rot, x0, y0, w, h, "Z"))
+			gx, gy := applyCM(m, cx, cy)
+			if math.Abs(gx-visualCX) > 1e-6 || math.Abs(gy-visualCY) > 1e-6 {
+				t.Errorf("rot %d origin (%g,%g): center maps to (%.4f,%.4f), want (%.4f,%.4f)",
+					rot, x0, y0, gx, gy, visualCX, visualCY)
+			}
+		}
+	}
+}
+
+// TestOverlayRoundTripsRotatedTextSpace proves text.go's forward rotation and
+// the overlay inverse are true inverses on a non-zero-origin rotated page: a
+// span extracted in displayed space, mapped back through the overlay matrix,
+// must return to the user-space spot it was drawn at.
+func TestOverlayRoundTripsRotatedTextSpace(t *testing.T) {
+	const drawX, drawY = 120.0, 70.0
+	data := buildRawPDF(t, func(w *Writer, pagesRef Ref) Dict {
+		fontRef := w.AllocRef()
+		w.WriteObject(fontRef, Dict{
+			"Type": Name("Font"), "Subtype": Name("Type1"), "BaseFont": Name("Helvetica"),
+		})
+		contentRef := w.AllocRef()
+		w.WriteStream(contentRef, Dict{},
+			[]byte(fmt.Sprintf("BT /F1 12 Tf %g %g Td (Anchor) Tj ET", drawX, drawY)))
+		return Dict{
+			"Type": Name("Page"), "Parent": pagesRef,
+			"MediaBox":  Array{50, 30, 645, 872},
+			"Rotate":    90,
+			"Resources": Dict{"Font": Dict{Name("F1"): fontRef}},
+			"Contents":  contentRef,
+		}
+	})
+
+	doc, err := OpenBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := doc.Page(0)
+	spans, err := page.TextSpans()
+	if err != nil || len(spans) == 0 {
+		t.Fatalf("no spans extracted: err=%v n=%d", err, len(spans))
+	}
+
+	mb := page.MediaBox()
+	m := parseCM(t, rotateOverlaySpace(page.Rotation(), mb[0], mb[1], mb[2]-mb[0], mb[3]-mb[1], "Z"))
+	ux, uy := applyCM(m, spans[0].X, spans[0].Y)
+	if math.Abs(ux-drawX) > 1 || math.Abs(uy-drawY) > 1 {
+		t.Errorf("round-trip: displayed (%.2f,%.2f) -> user (%.2f,%.2f), want ~(%.0f,%.0f)",
+			spans[0].X, spans[0].Y, ux, uy, drawX, drawY)
+	}
+}
+
+// parseCM extracts the 6 affine coefficients from a "q a b c d e f cm …"
+// wrapper as produced by rotateOverlaySpace.
+func parseCM(t *testing.T, wrapped string) [6]float64 {
+	t.Helper()
+	fields := strings.Fields(wrapped)
+	if len(fields) < 8 || fields[0] != "q" || fields[7] != "cm" {
+		t.Fatalf("not a cm wrapper: %q", wrapped)
+	}
+	var m [6]float64
+	for i := range m {
+		if _, err := fmt.Sscanf(fields[1+i], "%g", &m[i]); err != nil {
+			t.Fatalf("parsing cm field %d (%q): %v", i, fields[1+i], err)
+		}
+	}
+	return m
+}
+
+func applyCM(m [6]float64, x, y float64) (float64, float64) {
+	return m[0]*x + m[2]*y + m[4], m[1]*x + m[3]*y + m[5]
 }
 
 func TestOverlayIsolatesExistingCTM(t *testing.T) {

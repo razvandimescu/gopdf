@@ -5,6 +5,124 @@ import (
 	"testing"
 )
 
+func TestRotateOverlaySpace(t *testing.T) {
+	const content = "q 1 0 0 1 0 0 cm /Im Do Q\n"
+
+	// Unrotated pages are left untouched.
+	for _, r := range []int{0, 360, -360} {
+		if got := rotateOverlaySpace(r, 595, 842, content); got != content {
+			t.Errorf("rotation %d: expected passthrough, got %q", r, got)
+		}
+	}
+
+	// Empty content never gets wrapped.
+	if got := rotateOverlaySpace(90, 595, 842, ""); got != "" {
+		t.Errorf("empty content: got %q", got)
+	}
+
+	cases := map[int]string{
+		90:  "q 0 1 -1 0 595.0000 0 cm\n",
+		180: "q -1 0 0 -1 595.0000 842.0000 cm\n",
+		270: "q 0 -1 1 0 0 842.0000 cm\n",
+	}
+	for rot, prefix := range cases {
+		got := rotateOverlaySpace(rot, 595, 842, content)
+		if !strings.HasPrefix(got, prefix) {
+			t.Errorf("rotation %d: want prefix %q, got %q", rot, prefix, got)
+		}
+		if !strings.HasSuffix(got, content+"Q\n") {
+			t.Errorf("rotation %d: content not wrapped, got %q", rot, got)
+		}
+		// Normalized rotation must match its canonical form.
+		if alt := rotateOverlaySpace(rot+360, 595, 842, content); alt != got {
+			t.Errorf("rotation %d not normalized: %q != %q", rot, alt, got)
+		}
+	}
+}
+
+func TestOverlayIsolatesExistingCTM(t *testing.T) {
+	// A page whose content applies a top-level vertical-flip CTM and never
+	// resets it — as top-left-origin generators (e.g. Chromium/Skia) emit.
+	data := buildRawPDF(t, func(w *Writer, pagesRef Ref) Dict {
+		contentRef := w.AllocRef()
+		w.WriteStream(contentRef, Dict{}, []byte("1 0 0 -1 0 792 cm\nBT /F1 12 Tf 0 0 Td (flipped) Tj ET"))
+		return Dict{
+			"Type": Name("Page"), "Parent": pagesRef,
+			"MediaBox": Array{0, 0, 612, 792}, "Contents": contentRef,
+		}
+	})
+
+	ed := NewEditor(data)
+	ed.AddImage(ImageOverlay{Page: 0, Image: &Image{Width: 1, Height: 1, rgb: []byte{255, 0, 0}},
+		CX: 306, CY: 396, Width: 100, Height: 100, Rotation: 45, Opacity: 1})
+	out, err := ed.Apply()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := Open(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pages, _ := r.Pages()
+	s := string(mustContent(t, r, pages[0]))
+
+	flip := strings.Index(s, "1 0 0 -1 0 792 cm")
+	draw := strings.Index(s, "/Im_gopdf")
+	if flip < 0 || draw < 0 {
+		t.Fatalf("missing flip (%d) or overlay draw (%d) in: %q", flip, draw, s)
+	}
+	// The existing flip must be closed by a Q before the overlay is drawn,
+	// so the watermark is not flipped along with the page content.
+	closing := strings.Index(s[flip:], "Q")
+	if closing < 0 || flip+closing > draw {
+		t.Errorf("existing CTM not isolated before overlay; content: %q", s)
+	}
+}
+
+func TestOverlayBalancesMalformedContent(t *testing.T) {
+	// Source content with a graphics-stack underflow (extra Q) and an
+	// unbalanced EMC — as seen when a generator splits content into chunks
+	// and one chunk goes missing. The rewritten stream must be well-formed.
+	data := buildRawPDF(t, func(w *Writer, pagesRef Ref) Dict {
+		contentRef := w.AllocRef()
+		w.WriteStream(contentRef, Dict{}, []byte("q 1 0 0 1 0 0 cm Q Q EMC Q"))
+		return Dict{
+			"Type": Name("Page"), "Parent": pagesRef,
+			"MediaBox": Array{0, 0, 612, 792}, "Contents": contentRef,
+		}
+	})
+
+	ed := NewEditor(data)
+	ed.AddImage(ImageOverlay{Page: 0, Image: &Image{Width: 1, Height: 1, rgb: []byte{0, 0, 0}},
+		CX: 100, CY: 100, Width: 10, Height: 10, Opacity: 1})
+	out, err := ed.Apply()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := Open(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pages, _ := r.Pages()
+	c := mustContent(t, r, pages[0])
+	qf, qm, mf, mm := scanContentNesting(c)
+	if qf != 0 || qm < 0 || mf != 0 || mm < 0 {
+		t.Errorf("output not well-formed: q/Q final=%d min=%d, MC final=%d min=%d\n%s",
+			qf, qm, mf, mm, c)
+	}
+}
+
+func mustContent(t *testing.T, r *Reader, page Dict) []byte {
+	t.Helper()
+	c, err := r.PageContent(page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
 func TestSearchText(t *testing.T) {
 	data := testPDF(t, "Invoice Total: $500", "Company: Acme Corp")
 

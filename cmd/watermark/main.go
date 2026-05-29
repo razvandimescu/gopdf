@@ -6,9 +6,11 @@
 //
 // Flags:
 //
-//	-angle    rotation in degrees, counter-clockwise (default 45)
-//	-opacity  0..1, where 1 is fully opaque (default 0.15)
-//	-scale    fraction of the page diagonal to occupy (default 0.85)
+//	-angle       rotation in degrees, counter-clockwise (default 45)
+//	-opacity     0..1, where 1 is fully opaque (default 0.15)
+//	-scale       fraction of the page diagonal to occupy (default 0.85)
+//	-skip-first  leave the first page (cover) un-watermarked
+//	-skip-last   leave the last page un-watermarked
 package main
 
 import (
@@ -27,6 +29,8 @@ func main() {
 	angle := flag.Float64("angle", 45, "rotation in degrees, counter-clockwise")
 	opacity := flag.Float64("opacity", 0.15, "opacity in [0, 1]")
 	scale := flag.Float64("scale", 0.85, "watermark size as a fraction of the page diagonal")
+	skipFirst := flag.Bool("skip-first", false, "leave the first page un-watermarked")
+	skipLast := flag.Bool("skip-last", false, "leave the last page un-watermarked")
 	flag.Parse()
 
 	if *in == "" || *img == "" || *out == "" {
@@ -59,9 +63,18 @@ func main() {
 	vFactor := sinT + aspect*cosT
 
 	for i := 0; i < doc.NumPages(); i++ {
+		if (*skipFirst && i == 0) || (*skipLast && i == doc.NumPages()-1) {
+			continue
+		}
 		mb := doc.Page(i).MediaBox()
 		pageW := mb[2] - mb[0]
 		pageH := mb[3] - mb[1]
+		// On 90°/270° pages the displayed page is sideways; size and center
+		// against the visible dimensions. The editor places the overlay in
+		// displayed space, so this stays consistent across all pages.
+		if rot := doc.Page(i).Rotation(); rot == 90 || rot == 270 {
+			pageW, pageH = pageH, pageW
+		}
 		w := math.Min(pageW*(*scale)/hFactor, pageH*(*scale)/vFactor)
 
 		editor.AddImage(pdf.ImageOverlay{

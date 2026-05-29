@@ -378,10 +378,14 @@ func (e *Editor) Apply() ([]byte, error) {
 
 		var combined []byte
 		if len(existingContent) > 0 {
+			prefix, suffix := isolateExistingContent(existingContent)
+			combined = append(combined, prefix...)
 			combined = append(combined, existingContent...)
-			combined = append(combined, '\n')
+			combined = append(combined, suffix...)
 		}
-		combined = append(combined, []byte(extra.String())...)
+		mb := doc.Page(i).MediaBox()
+		injected := rotateOverlaySpace(doc.Page(i).Rotation(), mb[2]-mb[0], mb[3]-mb[1], extra.String())
+		combined = append(combined, []byte(injected)...)
 
 		contentRef := w.AllocRef()
 		w.WriteStream(contentRef, Dict{}, combined)
@@ -526,6 +530,152 @@ func writeImageOps(buf *strings.Builder, page Dict, overlays []ImageOverlay, ent
 		fmt.Fprintf(buf, "%.4f %.4f %.4f %.4f %.4f %.4f cm /%s Do Q\n",
 			a, b, c, d, eX, fY, entry.name)
 	}
+}
+
+// isolateExistingContent returns the operators to wrap a page's existing
+// content with so that appended overlays draw in the default graphics state.
+// It always opens at least one q/Q pair, so a CTM the original leaves applied
+// (e.g. a top-level "1 0 0 -1 0 H cm" flip from top-left-origin generators)
+// cannot leak into the overlay. It also pads for any unbalanced q/Q or
+// marked-content (BDC/EMC) nesting in the original — some generators emit
+// stack-underflowing streams that make Acrobat report "An error exists on
+// this page" — so the rewritten stream is well-formed regardless.
+func isolateExistingContent(content []byte) (prefix, suffix string) {
+	qFinal, qMin, mcFinal, mcMin := scanContentNesting(content)
+
+	leadQ := 1 - min(0, qMin) // ≥1 for isolation, plus cover for underflow
+	trailQ := leadQ + qFinal  // depth after original; always ≥1
+	leadMC := -min(0, mcMin)
+	trailMC := leadMC + mcFinal
+
+	var pre, suf strings.Builder
+	for i := 0; i < leadQ; i++ {
+		pre.WriteString("q\n")
+	}
+	for i := 0; i < leadMC; i++ {
+		pre.WriteString("/Artifact BMC\n")
+	}
+	// q/Q and marked content are independent stacks, so close order is free.
+	for i := 0; i < trailMC; i++ {
+		suf.WriteString("EMC\n")
+	}
+	suf.WriteString("\n")
+	for i := 0; i < trailQ; i++ {
+		suf.WriteString("Q\n")
+	}
+	return pre.String(), suf.String()
+}
+
+// scanContentNesting walks a content stream tracking q/Q and BDC|BMC/EMC
+// nesting, returning the final and minimum depth of each. It skips over
+// (literal strings), <hex strings>, /names, and BI…EI inline image data so
+// operator-like bytes inside them are not miscounted.
+func scanContentNesting(s []byte) (qFinal, qMin, mcFinal, mcMin int) {
+	for i, n := 0, len(s); i < n; {
+		switch c := s[i]; {
+		case c == '(':
+			i = skipLiteralString(s, i)
+		case c == '<':
+			i++
+			for i < n && s[i] != '>' {
+				i++
+			}
+			i++
+		case c == '/':
+			i++
+			for i < n && !isContentDelim(s[i]) {
+				i++
+			}
+		case c == 'q' && isToken(s, i, 1):
+			qFinal++
+			i++
+		case c == 'Q' && isToken(s, i, 1):
+			qFinal--
+			qMin = min(qMin, qFinal)
+			i++
+		case (c == 'B') && i+3 <= n && (string(s[i:i+3]) == "BDC" || string(s[i:i+3]) == "BMC") && isToken(s, i, 3):
+			mcFinal++
+			i += 3
+		case c == 'E' && i+3 <= n && string(s[i:i+3]) == "EMC" && isToken(s, i, 3):
+			mcFinal--
+			mcMin = min(mcMin, mcFinal)
+			i += 3
+		case c == 'I' && i+2 <= n && string(s[i:i+2]) == "ID" && isToken(s, i, 2):
+			i = skipInlineImageBytes(s, i+2)
+		default:
+			i++
+		}
+	}
+	return
+}
+
+func skipLiteralString(s []byte, i int) int {
+	depth, n := 1, len(s)
+	for i++; i < n && depth > 0; i++ {
+		switch s[i] {
+		case '\\':
+			i++
+		case '(':
+			depth++
+		case ')':
+			depth--
+		}
+	}
+	return i
+}
+
+// skipInlineImageBytes advances past raw inline-image data (after ID) to just
+// after the closing EI operator.
+func skipInlineImageBytes(s []byte, i int) int {
+	for n := len(s); i < n; i++ {
+		if s[i] == 'E' && i+1 < n && s[i+1] == 'I' &&
+			(i == 0 || isContentDelim(s[i-1])) &&
+			(i+2 >= n || isContentDelim(s[i+2])) {
+			return i + 2
+		}
+	}
+	return len(s)
+}
+
+func isContentDelim(c byte) bool {
+	switch c {
+	case ' ', '\t', '\r', '\n', '\f', 0, '(', ')', '<', '>', '[', ']', '{', '}', '/', '%':
+		return true
+	}
+	return false
+}
+
+func isToken(s []byte, i, length int) bool {
+	if i > 0 && !isContentDelim(s[i-1]) {
+		return false
+	}
+	j := i + length
+	return j >= len(s) || isContentDelim(s[j])
+}
+
+// rotateOverlaySpace lets overlay coordinates be expressed in the page's
+// displayed (post-/Rotate) space. Page content is drawn in unrotated user
+// space and the viewer applies /Rotate on top, so an overlay emitted naively
+// inherits that rotation (e.g. a 45° watermark flips to 135° on a 90° page).
+// Prepending the inverse-rotation matrix cancels the viewer's rotation, so
+// the overlay renders identically to one on an unrotated page. w and h are
+// the unrotated MediaBox dimensions; content is the overlay operators to wrap.
+func rotateOverlaySpace(rotation int, w, h float64, content string) string {
+	if content == "" {
+		return content
+	}
+	var cm string
+	switch ((rotation % 360) + 360) % 360 {
+	case 90:
+		cm = fmt.Sprintf("0 1 -1 0 %.4f 0", w)
+	case 180:
+		cm = fmt.Sprintf("-1 0 0 -1 %.4f %.4f", w, h)
+	case 270:
+		cm = fmt.Sprintf("0 -1 1 0 0 %.4f", h)
+	default:
+		return content
+	}
+	return "q " + cm + " cm\n" + content + "Q\n"
 }
 
 // ensureOverlayFont adds a Helvetica font to the page's Resources if needed.

@@ -567,11 +567,14 @@ func isolateExistingContent(content []byte) (prefix, suffix string) {
 	for i := 0; i < leadMC; i++ {
 		pre.WriteString("/Artifact BMC\n")
 	}
-	// q/Q and marked content are independent stacks, so close order is free.
+	// Lead with a separator so the suffix can't fuse with a content stream
+	// that ends mid-token (PageContent returns a single stream verbatim, with
+	// no trailing newline). q/Q and marked content are independent stacks, so
+	// close order is free.
+	suf.WriteString("\n")
 	for i := 0; i < trailMC; i++ {
 		suf.WriteString("EMC\n")
 	}
-	suf.WriteString("\n")
 	for i := 0; i < trailQ; i++ {
 		suf.WriteString("Q\n")
 	}

@@ -234,6 +234,39 @@ func TestOverlayBalancesMalformedContent(t *testing.T) {
 	}
 }
 
+func TestOverlayClosesUnclosedMarkedContent(t *testing.T) {
+	// Single content stream with an unclosed BMC that ends mid-token ("ET",
+	// no trailing newline — as PageContent returns a lone stream verbatim).
+	// The appended isolation suffix must not fuse with that trailing token,
+	// or the closing EMC is lost and the stream stays unbalanced.
+	data := buildRawPDF(t, func(w *Writer, pagesRef Ref) Dict {
+		contentRef := w.AllocRef()
+		w.WriteStream(contentRef, Dict{}, []byte("/Artifact BMC q BT /F1 12 Tf 0 0 Td (x) Tj ET"))
+		return Dict{
+			"Type": Name("Page"), "Parent": pagesRef,
+			"MediaBox": Array{0, 0, 612, 792}, "Contents": contentRef,
+		}
+	})
+
+	ed := NewEditor(data)
+	ed.AddImage(ImageOverlay{Page: 0, Image: &Image{Width: 1, Height: 1, rgb: []byte{0, 0, 0}},
+		CX: 100, CY: 100, Width: 10, Height: 10, Opacity: 1})
+	out, err := ed.Apply()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := Open(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pages, _ := r.Pages()
+	c := mustContent(t, r, pages[0])
+	if qf, _, mf, _ := scanContentNesting(c); qf != 0 || mf != 0 {
+		t.Errorf("output not balanced: q/Q final=%d, MC final=%d\n%s", qf, mf, c)
+	}
+}
+
 func mustContent(t *testing.T, r *Reader, page Dict) []byte {
 	t.Helper()
 	c, err := r.PageContent(page)

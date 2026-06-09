@@ -7,9 +7,14 @@ import (
 	"strings"
 )
 
-// ImageOverlay places an image on a page, anchored by its center at (CX, CY)
-// in PDF user-space points, drawn at size (Width, Height), rotated by Rotation
-// degrees counter-clockwise around the anchor, with Opacity in [0, 1].
+// ImageOverlay places an image on a page, anchored by its center at (CX, CY),
+// drawn at size (Width, Height), rotated by Rotation degrees counter-clockwise
+// around the anchor, with Opacity in [0, 1].
+//
+// (CX, CY) is in displayed space: the coordinate system the viewer shows after
+// applying the page's /Rotate, with the MediaBox origin — the same space
+// Page.Search reports matches in. On an unrotated, origin-0 page this is plain
+// user space; the Editor maps it back to unrotated user space before drawing.
 type ImageOverlay struct {
 	Page          int
 	Image         *Image
@@ -29,7 +34,7 @@ type Rect struct {
 type SearchResult struct {
 	Page     int    // 0-based page index
 	Text     string // matched text
-	Rect     Rect   // bounding rectangle
+	Rect     Rect   // bounding rectangle in displayed space (see ImageOverlay)
 	FontSize float64
 }
 
@@ -183,13 +188,15 @@ func spanCharWidth(span TextSpan) float64 {
 // TextOverlay describes text to draw on a page.
 type TextOverlay struct {
 	Page     int     // 0-based page index
-	X, Y     float64 // position (PDF coordinates: origin bottom-left)
+	X, Y     float64 // position in displayed space (origin bottom-left; see ImageOverlay)
 	Text     string
 	FontSize float64
 	R, G, B  float64 // color (0-1 range), default black
 }
 
-// RedactRegion describes an area to cover with a filled rectangle.
+// RedactRegion describes an area to cover with a filled rectangle. Rect is in
+// displayed space (see ImageOverlay), so a region from Search/RedactText lands
+// on the matched text even on rotated pages.
 type RedactRegion struct {
 	Page    int
 	Rect    Rect
@@ -383,11 +390,14 @@ func (e *Editor) Apply() ([]byte, error) {
 		// transform and render flipped or mispositioned.
 		var combined []byte
 		if len(existingContent) > 0 {
-			combined = append(combined, 'q', '\n')
+			prefix, suffix := isolateExistingContent(existingContent)
+			combined = append(combined, prefix...)
 			combined = append(combined, existingContent...)
-			combined = append(combined, '\n', 'Q', '\n')
+			combined = append(combined, suffix...)
 		}
-		combined = append(combined, []byte(extra.String())...)
+		mb := doc.Page(i).MediaBox()
+		injected := rotateOverlaySpace(doc.Page(i).Rotation(), mb[0], mb[1], mb[2]-mb[0], mb[3]-mb[1], extra.String())
+		combined = append(combined, []byte(injected)...)
 
 		contentRef := w.AllocRef()
 		w.WriteStream(contentRef, Dict{}, combined)
@@ -532,6 +542,117 @@ func writeImageOps(buf *strings.Builder, page Dict, overlays []ImageOverlay, ent
 		fmt.Fprintf(buf, "%.4f %.4f %.4f %.4f %.4f %.4f cm /%s Do Q\n",
 			a, b, c, d, eX, fY, entry.name)
 	}
+}
+
+// isolateExistingContent returns the operators to wrap a page's existing
+// content with so that appended overlays draw in the default graphics state.
+// It always opens at least one q/Q pair, so a CTM the original leaves applied
+// (e.g. a top-level "1 0 0 -1 0 H cm" flip from top-left-origin generators)
+// cannot leak into the overlay. It also pads for any unbalanced q/Q or
+// marked-content (BDC/EMC) nesting in the original — some generators emit
+// stack-underflowing streams that make Acrobat report "An error exists on
+// this page" — so the rewritten stream is well-formed regardless.
+func isolateExistingContent(content []byte) (prefix, suffix string) {
+	qFinal, qMin, mcFinal, mcMin := scanContentNesting(content)
+
+	leadQ := 1 - min(0, qMin) // ≥1 for isolation, plus cover for underflow
+	trailQ := leadQ + qFinal  // depth after original; always ≥1
+	leadMC := -min(0, mcMin)
+	trailMC := leadMC + mcFinal
+
+	var pre, suf strings.Builder
+	for i := 0; i < leadQ; i++ {
+		pre.WriteString("q\n")
+	}
+	for i := 0; i < leadMC; i++ {
+		pre.WriteString("/Artifact BMC\n")
+	}
+	// Lead with a separator so the suffix can't fuse with a content stream
+	// that ends mid-token (PageContent returns a single stream verbatim, with
+	// no trailing newline). q/Q and marked content are independent stacks, so
+	// close order is free.
+	suf.WriteString("\n")
+	for i := 0; i < trailMC; i++ {
+		suf.WriteString("EMC\n")
+	}
+	for i := 0; i < trailQ; i++ {
+		suf.WriteString("Q\n")
+	}
+	return pre.String(), suf.String()
+}
+
+// scanContentNesting tokenizes a content stream with the shared Lexer,
+// tracking q/Q and BDC|BMC/EMC nesting and returning the final and minimum
+// depth of each. Driving the lexer means (literal strings), <hex strings>,
+// <<dicts>>, /names, % comments, and BI…EI inline image data are all skipped
+// by the same code the rest of the library trusts, so operator-like bytes
+// inside them are never miscounted. Malformed bytes that the lexer rejects
+// are stepped over so the scan still reaches the end of a broken stream.
+func scanContentNesting(s []byte) (qFinal, qMin, mcFinal, mcMin int) {
+	lex := NewLexer(s)
+	for {
+		start := lex.Pos()
+		tok, err := lex.NextToken()
+		if err != nil {
+			if lex.Pos() <= start {
+				lex.SetPos(start + 1)
+			}
+			continue
+		}
+		if tok.Type == TEOF {
+			return
+		}
+		if tok.Type != TKeyword {
+			continue
+		}
+		switch tok.Str {
+		case "q":
+			qFinal++
+		case "Q":
+			qFinal--
+			qMin = min(qMin, qFinal)
+		case "BDC", "BMC":
+			mcFinal++
+		case "EMC":
+			mcFinal--
+			mcMin = min(mcMin, mcFinal)
+		case "BI":
+			skipInlineImage(lex)
+		}
+	}
+}
+
+// rotateOverlaySpace lets overlay coordinates be expressed in the page's
+// displayed (post-/Rotate) space — the same space Page.Search returns. Page
+// content is drawn in unrotated user space and the viewer applies /Rotate on
+// top, so an overlay emitted naively inherits that rotation (e.g. a 45°
+// watermark flips to 135° on a 90° page). Prepending the inverse-rotation
+// matrix cancels the viewer's rotation, so the overlay renders identically to
+// one on an unrotated page.
+//
+// The matrix is the displayed→user map for a MediaBox [x0, y0, x0+w, y0+h],
+// derived by conjugating the origin-0 rotation with T(x0, y0): M = T(x0,y0) ·
+// R⁻¹ · T(-x0,-y0). This keeps the MediaBox origin in displayed space (so it
+// agrees with the rotated TextSpan positions Search produces) and reduces to
+// the bare origin-0 matrix when x0 = y0 = 0. Rotation 0 maps displayed space
+// onto user space identically, so it (and any non-orthogonal angle) passes
+// through untouched. x0/y0 are the MediaBox origin; w/h its dimensions.
+func rotateOverlaySpace(rotation int, x0, y0, w, h float64, content string) string {
+	if content == "" {
+		return content
+	}
+	var cm string
+	switch ((rotation % 360) + 360) % 360 {
+	case 90:
+		cm = fmt.Sprintf("0 1 -1 0 %.4f %.4f", w+x0+y0, y0-x0)
+	case 180:
+		cm = fmt.Sprintf("-1 0 0 -1 %.4f %.4f", w+2*x0, h+2*y0)
+	case 270:
+		cm = fmt.Sprintf("0 -1 1 0 %.4f %.4f", x0-y0, h+x0+y0)
+	default:
+		return content
+	}
+	return "q " + cm + " cm\n" + content + "Q\n"
 }
 
 // ensureOverlayFont adds a Helvetica font to the page's Resources if needed.

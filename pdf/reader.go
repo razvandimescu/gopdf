@@ -5,6 +5,7 @@ import (
 	"compress/lzw"
 	"compress/zlib"
 	"encoding/ascii85"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -429,7 +430,19 @@ func decompress(data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("zlib init: %w", err)
 	}
 	defer zr.Close()
-	return io.ReadAll(zr)
+	out, err := io.ReadAll(zr)
+	// Some producers terminate the stream with a deflate sync-flush
+	// (00 00 FF FF) and omit the final block + Adler-32 checksum; zlib reports
+	// the missing tail as ErrUnexpectedEOF. The bytes decoded before the cut
+	// are complete and usable, so keep them rather than discarding a whole
+	// xref/object stream over a missing tail. We only do this when something
+	// decoded — a zero-length result means the stream was truncated before any
+	// block, which is real corruption we must surface, not silently treat as an
+	// empty stream.
+	if errors.Is(err, io.ErrUnexpectedEOF) && len(out) > 0 {
+		return out, nil
+	}
+	return out, err
 }
 
 func applyPredictorWithParms(data []byte, dp Dict) ([]byte, error) {

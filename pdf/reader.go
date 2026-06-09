@@ -5,6 +5,7 @@ import (
 	"compress/lzw"
 	"compress/zlib"
 	"encoding/ascii85"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -429,7 +430,15 @@ func decompress(data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("zlib init: %w", err)
 	}
 	defer zr.Close()
-	return io.ReadAll(zr)
+	out, err := io.ReadAll(zr)
+	// Some producers terminate the stream with a deflate sync-flush
+	// (00 00 FF FF) and omit the final block + Adler-32 checksum. The bytes
+	// decoded before the truncation are complete and usable, so keep them
+	// rather than discarding a whole xref/object stream over a missing tail.
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return out, nil
+	}
+	return out, err
 }
 
 func applyPredictorWithParms(data []byte, dp Dict) ([]byte, error) {

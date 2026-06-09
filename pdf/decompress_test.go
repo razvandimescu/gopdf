@@ -30,3 +30,23 @@ func TestDecompressSyncFlushTruncation(t *testing.T) {
 		t.Fatalf("recovered %d bytes, want %d", len(got), len(want))
 	}
 }
+
+// A stream truncated before any block decodes (here: a valid zlib header and
+// nothing else) is real corruption, not a recoverable missing tail. decompress
+// must surface the error rather than return an empty stream as if it were valid.
+func TestDecompressTruncatedBeforeAnyBlock(t *testing.T) {
+	var buf bytes.Buffer
+	zw := zlib.NewWriter(&buf)
+	if _, err := zw.Write([]byte("payload")); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	headerOnly := buf.Bytes()[:2] // zlib header, no deflate blocks
+	got, err := decompress(headerOnly)
+	if err == nil {
+		t.Fatalf("expected error on header-only stream, got %d bytes", len(got))
+	}
+}

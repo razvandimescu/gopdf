@@ -20,22 +20,20 @@ type compressedRef struct {
 
 // Reader reads and resolves objects from a PDF file.
 type Reader struct {
-	data         []byte
-	headerOffset int                   // bytes preceding "%PDF-"; added to every stored offset
-	xref         map[int]int64         // object number → byte offset (type 1)
-	compressed   map[int]compressedRef // object number → ObjStm ref (type 2)
-	trailer      Dict
-	cache        map[int]any
+	data       []byte
+	xref       map[int]int64         // object number → byte offset (type 1)
+	compressed map[int]compressedRef // object number → ObjStm ref (type 2)
+	trailer    Dict
+	cache      map[int]any
 }
 
 // Open parses a PDF from raw bytes.
 func Open(data []byte) (*Reader, error) {
 	r := &Reader{
-		data:         data,
-		headerOffset: headerOffset(data),
-		xref:         make(map[int]int64),
-		compressed:   make(map[int]compressedRef),
-		cache:        make(map[int]any),
+		data:       data[headerOffset(data):],
+		xref:       make(map[int]int64),
+		compressed: make(map[int]compressedRef),
+		cache:      make(map[int]any),
 	}
 	if err := r.parseXRef(); err != nil {
 		return nil, fmt.Errorf("parsing xref: %w", err)
@@ -46,9 +44,9 @@ func Open(data []byte) (*Reader, error) {
 // headerOffset returns the position of the "%PDF-" marker. The spec requires it
 // at byte 0, but some producers and transports prepend bytes (cache/transport
 // envelopes, HTTP framing), which shifts every stored byte offset. Adobe and
-// pdf.js tolerate this by treating the marker position as the origin for all
-// offsets; we match that, scanning the first 1024 bytes per Adobe's convention.
-// Absent a marker there, we assume 0 and let the existing logic proceed.
+// pdf.js tolerate this by treating the marker position as the origin; we match
+// that by trimming the leading bytes, scanning the first 1024 bytes per Adobe's
+// convention. Absent a marker there, we return 0 and parse from byte 0.
 func headerOffset(data []byte) int {
 	window := 1024
 	if window > len(data) {
@@ -109,7 +107,7 @@ func (r *Reader) parseXRef() error {
 func (r *Reader) readXRefAt(pos int) error {
 	// Check if it's a traditional xref table or an xref stream.
 	lex := NewLexer(r.data)
-	lex.SetPos(pos + r.headerOffset)
+	lex.SetPos(pos)
 	lex.skipWhitespaceAndComments()
 
 	// Read first keyword.
@@ -220,7 +218,7 @@ func (r *Reader) readTraditionalXRef(lex *Lexer) error {
 func (r *Reader) readXRefStream(pos int) error {
 	// Parse the xref stream object.
 	lex := NewLexer(r.data)
-	lex.SetPos(pos + r.headerOffset)
+	lex.SetPos(pos)
 	parser := &Parser{lex: lex}
 
 	// Read: objNum gen obj
@@ -740,7 +738,7 @@ func (r *Reader) ResolveArray(obj any) (Array, bool) {
 
 func (r *Reader) parseObjectAt(pos int) (any, error) {
 	lex := NewLexer(r.data)
-	lex.SetPos(pos + r.headerOffset)
+	lex.SetPos(pos)
 	parser := &Parser{lex: lex}
 
 	// Read "N G obj".

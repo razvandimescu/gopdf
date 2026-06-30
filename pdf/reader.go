@@ -30,7 +30,7 @@ type Reader struct {
 // Open parses a PDF from raw bytes.
 func Open(data []byte) (*Reader, error) {
 	r := &Reader{
-		data:       data,
+		data:       data[headerOffset(data):],
 		xref:       make(map[int]int64),
 		compressed: make(map[int]compressedRef),
 		cache:      make(map[int]any),
@@ -39,6 +39,23 @@ func Open(data []byte) (*Reader, error) {
 		return nil, fmt.Errorf("parsing xref: %w", err)
 	}
 	return r, nil
+}
+
+// headerOffset returns the position of the "%PDF-" marker. The spec requires it
+// at byte 0, but some producers and transports prepend bytes (cache/transport
+// envelopes, HTTP framing), which shifts every stored byte offset. Adobe and
+// pdf.js tolerate this by treating the marker position as the origin; we match
+// that by trimming the leading bytes, scanning the first 1024 bytes per Adobe's
+// convention. Absent a marker there, we return 0 and parse from byte 0.
+func headerOffset(data []byte) int {
+	window := 1024
+	if window > len(data) {
+		window = len(data)
+	}
+	if i := bytes.Index(data[:window], []byte("%PDF-")); i > 0 {
+		return i
+	}
+	return 0
 }
 
 // parseXRef locates and reads the xref table and trailer.

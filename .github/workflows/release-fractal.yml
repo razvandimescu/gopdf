@@ -1,12 +1,11 @@
 name: Release Fractal
 
-# On a published release, append a deterministic "release fingerprint" fractal + changelog
-# to the notes (image hosted on a release-fractals orphan branch). Releases here are created
+# On a published release, attach a deterministic "release fingerprint" fractal + stats to
+# the notes (image hosted on a release-fractals orphan branch). Releases here are created
 # manually, so the release event fires normally (no goreleaser/GITHUB_TOKEN chaining needed).
 #
-# Tier-1 LLM is enabled because gopdf's commits aren't conventional; the model classifies
-# them into proper sections instead of a flat "Other". Classifications are cached by commit
-# subject on the release-fractals branch, so only new subjects hit the model each release.
+# changelog: keep -> the fractal decorates gopdf's own hand-written notes + GitHub's PR list
+# rather than generating a mechanical commit-subject list. No classifier, no LLM download.
 on:
   release:
     types: [published]
@@ -18,4 +17,4 @@ jobs:
   fractal:
     uses: razvandimescu/fractal-of-the-day/.github/workflows/release-fractal.reusable.yml@main
     with:
-      model: qwen3:4b-instruct-2507-q4_K_M
+      changelog: keep

@@ -944,6 +944,91 @@ func TestIntegration_BCR_MultiPage(t *testing.T) {
 	}
 }
 
+// isAmountToken reports whether s is a single numeric amount (e.g. "1.000,00").
+func isAmountToken(s string) bool {
+	hasDigit := false
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		case r == '.' || r == ',' || r == '-':
+		default:
+			return false
+		}
+	}
+	return hasDigit
+}
+
+// amountTokenCount counts space-separated amount tokens in a cell. >1 means
+// several records' values were merged into one cell.
+func amountTokenCount(s string) int {
+	n := 0
+	for _, f := range strings.Fields(s) {
+		if isAmountToken(f) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestIntegration_BCR_AutoTune verifies that zero-config AutoTune on a dense
+// multi-line bank statement does NOT chain several transactions into one row.
+// Regression guard for the over-merge bug: numeric (Debit/Credit) columns must
+// hold at most one amount per cell.
+func TestIntegration_BCR_AutoTune(t *testing.T) {
+	doc := openTestPDF(t, "BCR_Cont_principal.pdf")
+	pages := allPageSpans(doc)
+
+	tbl := FindTableAcrossPages(pages, &TableOpts{AutoTune: true})
+	if tbl == nil {
+		t.Fatal("AutoTune returned nil on BCR")
+	}
+
+	// Records must be separated, not collapsed into the old ~70-row blob.
+	if len(tbl.Rows) < 150 {
+		t.Errorf("expected >= 150 rows after per-record separation, got %d", len(tbl.Rows))
+	}
+
+	// Non-record rows (repeated headers, section labels, footer prose) must be
+	// filtered: every transaction is keyed by a date, so every row's key column
+	// (column 0) starts with a digit.
+	for ri := range tbl.Rows {
+		key := strings.TrimSpace(tbl.CellText(ri, 0))
+		if key == "" || key[0] < '0' || key[0] > '9' {
+			t.Errorf("row %d has non-record key %q (noise row not filtered)", ri, key)
+		}
+	}
+
+	// Identify numeric columns: those whose non-empty cells are all-amount.
+	numericCols := 0
+	for ci := range tbl.Columns {
+		nonEmpty, allAmount := 0, 0
+		for ri := range tbl.Rows {
+			v := tbl.CellText(ri, ci)
+			if v == "" {
+				continue
+			}
+			nonEmpty++
+			if amountTokenCount(v) >= 1 && len(strings.Fields(v)) == amountTokenCount(v) {
+				allAmount++
+			}
+		}
+		if nonEmpty >= 10 && float64(allAmount)/float64(nonEmpty) >= 0.6 {
+			numericCols++
+			// No cell in a numeric column may hold more than one amount.
+			for ri := range tbl.Rows {
+				if n := amountTokenCount(tbl.CellText(ri, ci)); n > 1 {
+					t.Errorf("column %q (%d) row %d has %d merged amounts: %q",
+						tbl.Columns[ci].Name, ci, ri, n, tbl.CellText(ri, ci))
+				}
+			}
+		}
+	}
+	if numericCols == 0 {
+		t.Error("no numeric (Debit/Credit) columns detected — extraction likely broken")
+	}
+}
+
 func TestIntegration_BCR_WrappedSubHeaders(t *testing.T) {
 	// BCR has a sub-header row ("Data Valorii" / "Document") below the main
 	// headers. These should NOT merge into the main headers because they're

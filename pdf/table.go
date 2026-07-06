@@ -19,6 +19,11 @@ const (
 	anchorMinColSpacing  = 20.0 // min X-distance between anchor columns (filters char-level spans)
 	anchorMaxColumns     = 10   // reject anchor detection with more columns than this
 	headerDedupXTol      = 1.0  // X-distance for deduplicating header spans
+
+	minAnchorRows          = 10   // min raw rows before anchor-layout detection applies
+	anchorContinuationFrac = 0.2  // min fraction of rows with an empty key column to treat as multi-line records
+	maxAnchorEmptyFrac     = 0.95 // above this, the key column is likely mis-detected, not a real anchor
+	recordShapeMajority    = 0.6  // min fraction one key-shape class must hold before non-record rows are filtered
 )
 
 // Table is a detected table with named columns and data rows.
@@ -296,6 +301,22 @@ var (
 )
 
 func autoTuneExtract(pages [][]TextSpan, headers []string, colOverrides []Column, opts *TableOpts) *Table {
+	// Multi-line records (e.g. bank statements) delimit rows semantically: a new
+	// record starts where the key column is filled, and continuation lines leave
+	// it empty. Blind spatial MergeGap can't see that boundary — it chains records
+	// together, piling several records' values into one cell. When the layout shows
+	// this continuation structure, merge by the anchor column instead.
+	if anchor := detectAnchorColumn(pages, headers, colOverrides, opts); anchor != "" {
+		cand := copyOpts(opts)
+		cand.Headers = headers
+		cand.columnOverrides = colOverrides
+		cand.AnchorColumn = anchor
+		cand.MergeGap = 0
+		if t := FindTableAcrossPages(pages, cand); t != nil && len(t.Rows) > 0 {
+			return filterNonRecordRows(t, t.ColumnByName(anchor))
+		}
+	}
+
 	var best *Table
 	bestScore := -1.0
 
@@ -318,6 +339,94 @@ func autoTuneExtract(pages [][]TextSpan, headers []string, colOverrides []Column
 		}
 	}
 	return best
+}
+
+// detectAnchorColumn returns the leftmost column's name when the layout has
+// multi-line records — the key (leftmost) column is empty on a meaningful
+// fraction of raw lines (continuation lines), while other lines fill it. Returns
+// "" for flat tables where every row is keyed, so spatial merging still applies.
+func detectAnchorColumn(pages [][]TextSpan, headers []string, cols []Column, opts *TableOpts) string {
+	if len(cols) == 0 {
+		return ""
+	}
+	// Extract raw, unmerged rows to inspect key-column occupancy.
+	probe := copyOpts(opts)
+	probe.Headers = headers
+	probe.columnOverrides = cols
+	probe.MergeGap = 0
+	probe.MaxRowGap = 0
+	probe.AnchorColumn = ""
+	t := FindTableAcrossPages(pages, probe)
+	if t == nil || len(t.Rows) < minAnchorRows {
+		return ""
+	}
+
+	empty := 0
+	for _, r := range t.Rows {
+		if len(r.Cells) == 0 || r.Cells[0].Text == "" {
+			empty++
+		}
+	}
+	frac := float64(empty) / float64(len(t.Rows))
+	if frac >= anchorContinuationFrac && frac <= maxAnchorEmptyFrac {
+		return cols[0].Name
+	}
+	return ""
+}
+
+// filterNonRecordRows drops rows whose key-column value doesn't share the
+// dominant "shape" of that column. After anchor merging each real record holds
+// one row, but repeated per-page headers, section labels, balance lines, and
+// footer prose share the record layout while not being records — they differ
+// from records by key shape (e.g. dates/quantities are digit-leading, labels are
+// not). The filter is shape-agnostic: it keeps whichever class dominates.
+func filterNonRecordRows(t *Table, keyCol int) *Table {
+	if t == nil || keyCol < 0 || keyCol >= len(t.Columns) || len(t.Rows) < minAnchorRows {
+		return t
+	}
+
+	// Records in the layouts this targets (bank statements, quotations) are
+	// digit-keyed: dates, quantities. Non-record rows — repeated headers, section
+	// labels, footer/terms prose — are alpha-keyed. Strip only alpha-leading rows,
+	// and only when digit-keyed keys clearly dominate, so a digit-keyed record is
+	// never dropped. Alpha-keyed tables fall below the threshold and pass through
+	// unfiltered.
+	digit, total := 0, 0
+	for _, r := range t.Rows {
+		if v := keyCellText(r, keyCol); v != "" {
+			total++
+			if startsWithDigit(v) {
+				digit++
+			}
+		}
+	}
+	if total == 0 || float64(digit)/float64(total) < recordShapeMajority {
+		return t
+	}
+
+	kept := make([]Row, 0, digit)
+	for _, r := range t.Rows {
+		if v := keyCellText(r, keyCol); v != "" && startsWithDigit(v) {
+			kept = append(kept, r)
+		}
+	}
+	out := *t
+	out.Rows = kept
+	return &out
+}
+
+func keyCellText(r Row, col int) string {
+	if col < 0 || col >= len(r.Cells) {
+		return ""
+	}
+	return strings.TrimSpace(r.Cells[col].Text)
+}
+
+func startsWithDigit(s string) bool {
+	for _, r := range s {
+		return r >= '0' && r <= '9'
+	}
+	return false
 }
 
 // scoreTable ranks a table extraction result. Higher = better.

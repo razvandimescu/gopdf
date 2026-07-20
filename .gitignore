@@ -1,5 +1,15 @@
-gopdf
 *.pdf
-example_out/
+example_out
 .DS_Store
 docs/
+BUGS.md
+
+# Built command binaries (same name as their cmd/ directory)
+/gopdf
+/extract_tables
+/inspect
+/merge
+/quote
+/sample
+/watermark
+/xfa-translate

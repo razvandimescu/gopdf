@@ -19,7 +19,7 @@ To regenerate the Adobe Glyph List: download `glyphlist.txt` to `/tmp/`, then `g
 
 ## Architecture
 
-Two-layer design: generic PDF library (`pdf/`) and domain-specific quotation extractor (root package).
+The library lives in `pdf/`; everything under `cmd/` is a thin CLI over it.
 
 ### PDF Library (`pdf/`)
 
@@ -39,12 +39,6 @@ Key design decisions:
 - Compressed objects (ObjStm) and xref streams (PDF 1.5+) are fully supported
 - Resource inheritance propagates `Resources`/`MediaBox`/`CropBox`/`Rotate` down the page tree during `collectPages`
 - Font encoding chain: ToUnicode CMap → Encoding Differences → WinAnsi/MacRoman fallback
-
-### Quotation Extractor (root package)
-
-`extract.go` parses structured data from quotation PDFs: company, quote name, ref, table headers, line items, supplier codes. Uses column detection by finding the "Suppliers Code" header span's X position, then classifies data spans by nearest column. Handles multi-page tables, multi-line wrapped headers, and continuation rows (codes split across lines like `SC-0045/B-MF-C/P`).
-
-`extract_test.go` validates against 10 real PDFs with 40 assertions covering supplier codes (exact set match + order), header fields, and table headers.
 
 ## Constraints
 

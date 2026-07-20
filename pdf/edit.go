@@ -239,6 +239,10 @@ func (e *Editor) AddText(overlay TextOverlay) {
 }
 
 // Redact covers a region with a filled rectangle.
+//
+// This is visual redaction only. The underlying text remains in the content
+// stream and is still recoverable by copy/paste, text extraction, or any PDF
+// parser. Do not use it to remove sensitive data.
 func (e *Editor) Redact(region RedactRegion) {
 	e.redactions = append(e.redactions, region)
 }
@@ -266,6 +270,9 @@ func (e *Editor) Document() (*Document, error) {
 }
 
 // RedactText searches for text and covers all occurrences.
+//
+// This is visual redaction only — see [Editor.Redact]. The matched text is not
+// removed from the content stream and remains extractable.
 func (e *Editor) RedactText(query string, r, g, b float64) error {
 	doc, err := e.Document()
 	if err != nil {

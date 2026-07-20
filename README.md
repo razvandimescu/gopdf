@@ -6,7 +6,7 @@
 [![codecov](https://codecov.io/gh/razvandimescu/gopdf/branch/main/graph/badge.svg)](https://codecov.io/gh/razvandimescu/gopdf)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Pure Go library for PDF text extraction, table detection, creation, merging, search, and editing — no CGo, no external dependencies.
+Pure Go table extraction from PDFs — plus positioned text, search, creation, merge, and editing. No CGo, no AGPL, no dependencies outside the standard library.
 
 <p align="center">
   <img src="assets/sample-invoice.png" width="380" alt="Sample Invoice" />
@@ -14,11 +14,19 @@ Pure Go library for PDF text extraction, table detection, creation, merging, sea
 </p>
 <p align="center"><em>Generated entirely from Go code — <code>go run ./cmd/sample/</code></em></p>
 
-Extract text with accurate spatial positioning and font metadata. Detect and extract tables with column/row structure. Create PDFs with text, shapes, and multiple fonts. Search with bounding rectangles. Merge files with page selection. Overlay text and redact regions. All from a single, MIT-licensed package with zero dependencies outside the Go standard library.
+Getting structured rows and columns out of an invoice, bank statement, or report normally means shelling out to `pdftotext -layout` and regexing the columns back together, or leaving Go for Python's camelot/tabula. `gopdf` does it natively: tables are located by header anchors or auto-detected from column gaps, with multi-line cell merging and multi-page continuation.
+
+```go
+doc, _ := pdf.OpenFile("statement.pdf")
+tables, _ := doc.Page(0).Tables()
+fmt.Println(tables[0].CellByName(0, "Amount")) // "1,204.50"
+```
+
+The same package also covers positioned text extraction (X/Y, font, size), search with bounding rectangles, PDF creation, merge with size constraints, and text/image overlay — all MIT-licensed with zero external dependencies.
 
 ## Why gopdf?
 
-If you need to create, read, search, or edit PDFs in Go without CGo or AGPL licensing constraints, gopdf is the only option that combines PDF creation, positioned text extraction, table detection, search with bounding rectangles, merge, overlay, and redaction in a single zero-dependency MIT-licensed package.
+Structure-aware table extraction in pure Go doesn't otherwise exist. That's the reason to reach for this library; the rest of the feature set is there so you don't need a second one for the surrounding work.
 
 | | gopdf | unipdf | pdfcpu | ledongthuc/pdf | MuPDF bindings |
 |---|---|---|---|---|---|
@@ -34,13 +42,22 @@ If you need to create, read, search, or edit PDFs in Go without CGo or AGPL lice
 | **Encryption** | No | Yes | Yes | No | Yes |
 | **Dependencies** | 0 | Many | 0 | 0 | System lib |
 
+### When to use something else
+
+- **[pdfcpu](https://github.com/pdfcpu/pdfcpu)** — for document operations as your primary need: encryption, form filling, optimization, page manipulation, or a batch CLI. It is more mature and more broadly tested than gopdf on all of them.
+- **[unipdf](https://github.com/unidoc/unipdf)** — for breadth and commercial support, if AGPL or a paid licence works for you.
+- **[go-pdf/fpdf](https://github.com/go-pdf/fpdf)** — for generating documents with embedded fonts and rich layout. gopdf's creator covers the standard 14 fonts only.
+- **MuPDF bindings** — for rendering fidelity, if CGo and AGPL are acceptable.
+
+Reach for gopdf when you need tabular data out of PDFs in pure Go, or when CGo and AGPL are both off the table.
+
 ## Features
 
-- Text extraction with X/Y coordinates, font name, and font size
-- Line reconstruction with intelligent spacing
 - Table detection with column/row extraction (explicit headers or auto-detection)
 - Multi-line cell merging for tables with wrapped content (bank statements, invoices)
 - Multi-page table support with automatic header re-detection
+- Text extraction with X/Y coordinates, font name, and font size
+- Line reconstruction with intelligent spacing
 - Text search returning bounding rectangles
 - PDF merge with page selection and size constraints (fail/truncate/shrink with JPEG recompression)
 - Text overlay (Helvetica, configurable size and color)
@@ -453,11 +470,11 @@ type Rect struct {
 
 ## Limitations
 
-- No encryption/password support (planned)
+- **Redaction is visual only.** A rectangle is drawn over the text; the text stays in the content stream and remains recoverable by copy/paste or any PDF parser. Do not use it to remove sensitive data.
+- **No encryption/password support** (planned). Encrypted PDFs are not currently detected either — extraction on one will return garbage rather than an error.
 - No image extraction
 - PDF creation supports standard 14 fonts only (no font embedding)
 - Merge drops interactive features (forms, bookmarks, JS)
-- Redaction is visual only (rectangle drawn over text, not removed from stream)
 - Text overlay uses Helvetica only
 
 ## Architecture

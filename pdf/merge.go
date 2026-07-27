@@ -346,12 +346,14 @@ func filterNames(d Dict) []Name {
 
 // copyContext tracks object remapping for a single source document.
 type copyContext struct {
-	reader       *Reader
-	writer       *Writer
-	refCache     map[int]Ref      // source obj num → new ref
-	streamHash   map[[32]byte]Ref // content hash → ref; shared across sources; nil = no dedup
-	stripMeta    bool
-	imageQuality int // JPEG recompression quality; 0 = passthrough
+	reader         *Reader
+	writer         *Writer
+	refCache       map[int]Ref      // source obj num → new ref
+	streamHash     map[[32]byte]Ref // content hash → ref; shared across sources; nil = no dedup
+	stripMeta      bool
+	imageQuality   int            // JPEG recompression quality; 0 = passthrough
+	streamSubs     map[int][]byte // source obj num → replacement decoded bytes (re-flated on write)
+	preserveParent bool           // keep /Parent links during dict copy (needed for single-doc rewrite)
 }
 
 var metadataKeys = map[Name]bool{
@@ -377,6 +379,19 @@ func (ctx *copyContext) copyObject(obj any) any {
 			ctx.refCache[v.Num] = newRef
 			ctx.writer.WriteObject(newRef, nil)
 			return newRef
+		}
+
+		// Stream substitution: replace decoded data wholesale (re-flated on write).
+		if subs, ok := ctx.streamSubs[v.Num]; ok {
+			if srcStream, isStream := resolved.(*Stream); isStream {
+				newRef := ctx.writer.AllocRef()
+				ctx.refCache[v.Num] = newRef
+				copiedDict := ctx.copyDict(srcStream.Dict)
+				delete(copiedDict, "Filter")
+				delete(copiedDict, "DecodeParms")
+				ctx.writer.WriteStream(newRef, copiedDict, subs)
+				return newRef
+			}
 		}
 
 		// Stream dedup: reuse byte-identical streams across sources.
@@ -478,7 +493,7 @@ func isDCTDecode(d Dict) bool {
 func (ctx *copyContext) copyDict(d Dict) Dict {
 	newDict := make(Dict, len(d))
 	for k, v := range d {
-		if k == "Parent" {
+		if k == "Parent" && !ctx.preserveParent {
 			continue
 		}
 		if ctx.stripMeta && metadataKeys[k] {

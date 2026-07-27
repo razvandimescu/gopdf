@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 go build ./...              # build everything
-go build -o gopdf .         # build CLI binary
+go build -o merge ./cmd/merge  # build one CLI (no main package at repo root)
 go test ./...               # run all tests
 go test -v -run TestSupplierCodes ./...  # run a single test
 go test -count=1 ./...      # skip test cache
@@ -30,6 +30,7 @@ Pipeline: **Lexer** (bytes→tokens) → **Parser** (tokens→objects) → **Rea
 - `text.go` — Content stream interpretation: all text operators (BT/ET/Tf/Tm/Td/TJ/Tj/T\*/'/"), graphics state stack (q/Q), CTM tracking (cm), Form XObject recursion (Do), MarkedContent/ActualText (BMC/BDC/EMC), CIDFont 2-byte handling, page rotation
 - `writer.go` — PDF serializer: object writing, FlateDecode compression, xref table generation
 - `merge.go` — PDF merge: deep object graph copy with Ref remapping, page tree construction, `MergeFiles`/`MergeBytes`/`Merger` API
+- `rewrite.go` — Single-document rewrite: `Reader.Rewrite` replaces named stream objects in place (reusing `merge.go`'s copy machinery), plus XFA packet lookup. Drives `cmd/xfa-translate`
 - `glyphlist.go` — Generated: 4200-entry Adobe Glyph List (glyph name→rune)
 - `stdfonts.go` — Width tables for standard 14 fonts (Courier, Helvetica, Times)
 
@@ -42,8 +43,7 @@ Key design decisions:
 
 ## Constraints
 
-- Pure Go only — no CGo, no external C libraries
-- `github.com/ledongthuc/pdf` is only in `cmd/compare` (benchmark utility), not in the core library
+- Pure Go only — no CGo, no dependencies outside the standard library
 - PDF files are git-ignored; test PDFs live in `example_out/`
 - Do not reference customer/client names in commit messages or public-facing text
 - Encryption support is not yet implemented (Phase 5, deferred)

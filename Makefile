@@ -22,8 +22,9 @@ cyclo:
 ineffassign:
 	ineffassign ./...
 
+# -i: Romanian source strings in cmd/xfa-translate, not English misspellings.
 misspell:
-	misspell -error .
+	misspell -error -i anual,contine .
 
 staticcheck:
 	staticcheck ./...

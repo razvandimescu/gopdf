@@ -36,6 +36,7 @@ type OversizeError struct {
 	MaxSize int64
 }
 
+// Error implements the error interface.
 func (e *OversizeError) Error() string {
 	return fmt.Sprintf("merged PDF size %d bytes exceeds limit of %d bytes",
 		e.Size, e.MaxSize)

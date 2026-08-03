@@ -21,8 +21,7 @@ type Stream struct {
 	Raw  []byte
 }
 
-// Helper accessors for Dict.
-
+// Name returns the value at key as a PDF name.
 func (d Dict) Name(key Name) (Name, bool) {
 	v, ok := d[key]
 	if !ok {
@@ -32,6 +31,7 @@ func (d Dict) Name(key Name) (Name, bool) {
 	return n, ok
 }
 
+// Dict returns the value at key as a dictionary.
 func (d Dict) Dict(key Name) (Dict, bool) {
 	v, ok := d[key]
 	if !ok {
@@ -41,6 +41,7 @@ func (d Dict) Dict(key Name) (Dict, bool) {
 	return dd, ok
 }
 
+// Array returns the value at key as an array.
 func (d Dict) Array(key Name) (Array, bool) {
 	v, ok := d[key]
 	if !ok {
@@ -50,6 +51,7 @@ func (d Dict) Array(key Name) (Array, bool) {
 	return a, ok
 }
 
+// Ref returns the value at key as an indirect reference.
 func (d Dict) Ref(key Name) (Ref, bool) {
 	v, ok := d[key]
 	if !ok {
@@ -59,6 +61,7 @@ func (d Dict) Ref(key Name) (Ref, bool) {
 	return r, ok
 }
 
+// Int returns the value at key as an int, converting from float64 if needed.
 func (d Dict) Int(key Name) (int, bool) {
 	v, ok := d[key]
 	if !ok {
@@ -73,6 +76,7 @@ func (d Dict) Int(key Name) (int, bool) {
 	return 0, false
 }
 
+// Float returns the value at key as a float64, converting from int if needed.
 func (d Dict) Float(key Name) (float64, bool) {
 	v, ok := d[key]
 	if !ok {
@@ -87,6 +91,7 @@ func (d Dict) Float(key Name) (float64, bool) {
 	return 0, false
 }
 
+// String returns the value at key as a string.
 func (d Dict) String(key Name) (string, bool) {
 	v, ok := d[key]
 	if !ok {
@@ -96,6 +101,7 @@ func (d Dict) String(key Name) (string, bool) {
 	return s, ok
 }
 
+// Stream returns the value at key as a stream.
 func (d Dict) Stream(key Name) (*Stream, bool) {
 	v, ok := d[key]
 	if !ok {

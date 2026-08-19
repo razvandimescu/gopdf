@@ -26,7 +26,6 @@ type Reader struct {
 	trailer    Dict
 	cache      map[int]any
 	crypt      *encryptInfo // nil when the document is not encrypted
-	encryptNum int          // object number of the /Encrypt dict, never decrypted
 }
 
 // Open parses a PDF from raw bytes. Encrypted files open when the user password
@@ -391,7 +390,7 @@ func (r *Reader) readStreamData(lex *Lexer, d Dict, num, gen int) ([]byte, []byt
 	// it is the outermost layer. Raw keeps the decrypted-but-still-filtered
 	// bytes, which is what merge and rewrite re-emit verbatim into output that
 	// is not itself encrypted.
-	if r.streamIsEncrypted(d, num) {
+	if r.streamIsEncrypted(d) {
 		raw = r.crypt.decrypt(raw, num, gen, r.crypt.streams)
 	}
 
@@ -688,6 +687,11 @@ func (r *Reader) Resolve(obj any) any {
 }
 
 // resolveFromObjStm extracts an object from a compressed object stream.
+//
+// Objects here are parsed straight out of the containing ObjStm's already
+// decrypted body, so their strings are plaintext. They must never pass through
+// decryptStrings — routing this via parseObjectAt would decrypt them a second
+// time and silently corrupt every string in the document.
 func (r *Reader) resolveFromObjStm(cref compressedRef) any {
 	// First, resolve the ObjStm itself (it must be a regular stream).
 	stmObj := r.Resolve(Ref{Num: cref.StreamObj})
@@ -773,8 +777,7 @@ func (r *Reader) parseObjectAt(pos int) (any, error) {
 	lex.SetPos(pos)
 	parser := &Parser{lex: lex}
 
-	// Read "N G obj". The number and generation are kept: decryption derives a
-	// per-object key from them.
+	// Read "N G obj". The number and generation feed the per-object crypt key.
 	numTok, _ := parser.lex.NextToken()
 	genTok, _ := parser.lex.NextToken()
 	tok, err := parser.lex.NextToken()
@@ -801,12 +804,12 @@ func (r *Reader) parseObjectAt(pos int) (any, error) {
 			if err != nil {
 				return nil, err
 			}
-			stream := &Stream{Dict: d, Data: data, Raw: raw}
-			r.decryptStrings(d, num, gen)
-			return stream, nil
+			obj = &Stream{Dict: d, Data: data, Raw: raw}
 		}
 	}
 
+	// This is the only place strings are decrypted, which is what keeps objects
+	// unpacked from an ObjStm correct — see resolveFromObjStm.
 	return r.decryptStrings(obj, num, gen), nil
 }
 

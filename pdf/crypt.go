@@ -39,7 +39,7 @@ const (
 // encryptInfo holds the derived file encryption key and the per-use filters.
 type encryptInfo struct {
 	key             []byte
-	v, r            int
+	v               int
 	streams         cryptMethod
 	strings         cryptMethod
 	encryptMetadata bool
@@ -68,11 +68,10 @@ func (r *Reader) setupEncryption(password string) error {
 	if !ok {
 		return nil
 	}
-	// Record the object number so the dictionary's own strings (/O, /U, /OE,
-	// /UE, /Perms) are never treated as encrypted.
-	if ref, ok := encObj.(Ref); ok {
-		r.encryptNum = ref.Num
-	}
+	// Resolving /Encrypt here, while r.crypt is still nil, is what keeps the
+	// dictionary's own strings (/O, /U, /OE, /UE, /Perms) in plaintext:
+	// decryption is inert during this resolve, and Resolve caches the result, so
+	// no later lookup re-parses it once the key is armed.
 	enc, ok := r.ResolveDict(encObj)
 	if !ok {
 		return fmt.Errorf("pdf: /Encrypt is not a dictionary")
@@ -88,7 +87,7 @@ func (r *Reader) setupEncryption(password string) error {
 		return fmt.Errorf("pdf: /Encrypt missing /R")
 	}
 
-	info := &encryptInfo{v: v, r: rev, encryptMetadata: true}
+	info := &encryptInfo{v: v, encryptMetadata: true}
 	if em, ok := enc["EncryptMetadata"].(bool); ok {
 		info.encryptMetadata = em
 	}
@@ -116,11 +115,8 @@ func (r *Reader) setupEncryption(password string) error {
 	default:
 		return fmt.Errorf("%w: /V %d", ErrUnsupportedEncryption, v)
 	}
-	if v == 5 {
-		keyLen = 32
-	}
 
-	key, err := r.deriveKey(enc, info, password, keyLen)
+	key, err := r.deriveKey(enc, rev, info.encryptMetadata, password, keyLen)
 	if err != nil {
 		return err
 	}
@@ -168,39 +164,50 @@ func (r *Reader) cryptFilter(enc Dict, name Name) (cryptMethod, int) {
 
 // deriveKey validates the password and returns the file encryption key, trying
 // the user password first and then the owner password.
-func (r *Reader) deriveKey(enc Dict, info *encryptInfo, password string, keyLen int) ([]byte, error) {
+func (r *Reader) deriveKey(enc Dict, rev int, encryptMetadata bool, password string, keyLen int) ([]byte, error) {
 	o := []byte(dictString(enc, "O"))
 	u := []byte(dictString(enc, "U"))
 
-	if info.r >= 5 {
-		return deriveKeyR5R6(enc, info.r, password, o, u)
+	if rev >= 5 {
+		return deriveKeyR5R6(enc, rev, password, o, u)
 	}
 
 	perm, _ := enc.Int("P")
 	var idFirst []byte
-	if id, ok := r.trailer.Array("ID"); ok && len(id) > 0 {
+	if id := r.OriginalID(); len(id) > 0 {
 		if s, ok := id[0].(string); ok {
 			idFirst = []byte(s)
 		}
 	}
+	keyLen = clampKeyLen(rev, keyLen)
 
-	key := legacyFileKey(padPassword(password), o, perm, idFirst, info.r, keyLen, info.encryptMetadata)
-	if validateUserPassword(key, u, idFirst, info.r) {
+	key := legacyFileKey(padPassword(password), o, perm, idFirst, rev, keyLen, encryptMetadata)
+	if validateUserPassword(key, u, idFirst, rev) {
 		return key, nil
 	}
 
 	// Try the password as the owner password: recover the user password from /O
 	// (Algorithm 7), then validate that.
-	if userPwd := recoverUserPassword(password, o, info.r, keyLen); userPwd != nil {
-		key = legacyFileKey(userPwd, o, perm, idFirst, info.r, keyLen, info.encryptMetadata)
-		if validateUserPassword(key, u, idFirst, info.r) {
+	if userPwd := recoverUserPassword(password, o, rev, keyLen); userPwd != nil {
+		key = legacyFileKey(userPwd, o, perm, idFirst, rev, keyLen, encryptMetadata)
+		if validateUserPassword(key, u, idFirst, rev) {
 			return key, nil
 		}
 	}
 	return nil, ErrWrongPassword
 }
 
-// legacyFileKey implements Algorithm 2 for revisions 2 through 4.
+// clampKeyLen bounds the file key length to the range the standard handler
+// allows. Revision 2 is fixed at 40 bits regardless of what /Length claims.
+func clampKeyLen(rev, keyLen int) int {
+	if rev == 2 {
+		return 5
+	}
+	return min(max(keyLen, 5), 16)
+}
+
+// legacyFileKey implements Algorithm 2 for revisions 2 through 4. keyLen must
+// already be clamped by clampKeyLen.
 func legacyFileKey(padded, o []byte, perm int, idFirst []byte, rev, keyLen int, encryptMetadata bool) []byte {
 	h := md5.New()
 	h.Write(padded)
@@ -213,15 +220,6 @@ func legacyFileKey(padded, o []byte, perm int, idFirst []byte, rev, keyLen int, 
 	}
 	key := h.Sum(nil)
 
-	if rev == 2 {
-		keyLen = 5
-	}
-	if keyLen < 5 {
-		keyLen = 5
-	}
-	if keyLen > 16 {
-		keyLen = 16
-	}
 	if rev >= 3 {
 		for i := 0; i < 50; i++ {
 			sum := md5.Sum(key[:keyLen])
@@ -249,22 +247,17 @@ func validateUserPassword(key, u, idFirst []byte, rev int) bool {
 }
 
 // recoverUserPassword implements Algorithm 7: decrypt /O with a key derived from
-// the owner password to recover the padded user password.
+// the owner password to recover the padded user password. keyLen must already be
+// clamped by clampKeyLen.
+//
+// Note the 50-round loop here hashes the full digest, where Algorithm 2 hashes
+// only the first keyLen bytes. The difference is deliberate and specified.
 func recoverUserPassword(password string, o []byte, rev, keyLen int) []byte {
 	if len(o) < 32 {
 		return nil
 	}
 	sum := md5.Sum(padPassword(password))
 	key := sum[:]
-	if rev == 2 {
-		keyLen = 5
-	}
-	if keyLen < 5 {
-		keyLen = 5
-	}
-	if keyLen > 16 {
-		keyLen = 16
-	}
 	if rev >= 3 {
 		for i := 0; i < 50; i++ {
 			s := md5.Sum(key)
@@ -333,9 +326,16 @@ func hash2B(password, salt, udata []byte, rev int) []byte {
 		return k
 	}
 
+	// Both buffers are sized for the largest k the loop can produce (SHA-512, 64
+	// bytes) and reused across rounds. Allocating inside the loop costs ~1.2 MB
+	// of garbage per call, since it runs at least 64 times.
+	maxRound := 64 * (len(password) + sha512.Size + len(udata))
+	k1 := make([]byte, 0, maxRound)
+	buf := make([]byte, maxRound)
+
 	var e []byte
 	for i := 0; ; i++ {
-		k1 := make([]byte, 0, 64*(len(password)+len(k)+len(udata)))
+		k1 = k1[:0]
 		for j := 0; j < 64; j++ {
 			k1 = append(k1, password...)
 			k1 = append(k1, k...)
@@ -345,7 +345,7 @@ func hash2B(password, salt, udata []byte, rev int) []byte {
 		if err != nil {
 			return k
 		}
-		e = make([]byte, len(k1))
+		e = buf[:len(k1)]
 		cipher.NewCBCEncrypter(block, k[16:32]).CryptBlocks(e, k1)
 
 		sum := 0
@@ -396,7 +396,11 @@ func (e *encryptInfo) decrypt(data []byte, num, gen int, m cryptMethod) []byte {
 	if m == cryptNone || len(data) == 0 {
 		return data
 	}
-	key := e.objectKey(num, gen, m)
+	return e.apply(e.objectKey(num, gen, m), data, m)
+}
+
+// apply runs one cipher against an already-derived object key.
+func (e *encryptInfo) apply(key, data []byte, m cryptMethod) []byte {
 	switch m {
 	case cryptRC4:
 		return rc4Bytes(key, data)
@@ -460,23 +464,33 @@ func dictString(d Dict, key Name) string {
 // decryptStrings walks a parsed object and decrypts every string in place.
 // Streams are handled separately in readStreamData; only their dictionaries are
 // walked here.
+//
+// The object key is derived once here rather than per string: it is invariant
+// for the whole object, and deriving it costs an MD5 each time.
 func (r *Reader) decryptStrings(obj any, num, gen int) any {
-	if r.crypt == nil || r.crypt.strings == cryptNone || num == r.encryptNum {
+	if r.crypt == nil || r.crypt.strings == cryptNone {
 		return obj
 	}
+	return r.crypt.walkStrings(obj, r.crypt.objectKey(num, gen, r.crypt.strings))
+}
+
+func (e *encryptInfo) walkStrings(obj any, key []byte) any {
 	switch v := obj.(type) {
 	case string:
-		return string(r.crypt.decrypt([]byte(v), num, gen, r.crypt.strings))
+		if v == "" {
+			return v
+		}
+		return string(e.apply(key, []byte(v), e.strings))
 	case Dict:
 		for k, item := range v {
-			v[k] = r.decryptStrings(item, num, gen)
+			v[k] = e.walkStrings(item, key)
 		}
 	case Array:
 		for i, item := range v {
-			v[i] = r.decryptStrings(item, num, gen)
+			v[i] = e.walkStrings(item, key)
 		}
 	case *Stream:
-		r.decryptStrings(v.Dict, num, gen)
+		e.walkStrings(v.Dict, key)
 	}
 	return obj
 }
@@ -484,8 +498,8 @@ func (r *Reader) decryptStrings(obj any, num, gen int) any {
 // streamIsEncrypted reports whether a stream body should be decrypted. Cross
 // reference streams are never encrypted, and metadata is exempt when the
 // document sets /EncryptMetadata false.
-func (r *Reader) streamIsEncrypted(d Dict, num int) bool {
-	if r.crypt == nil || r.crypt.streams == cryptNone || num == r.encryptNum {
+func (r *Reader) streamIsEncrypted(d Dict) bool {
+	if r.crypt == nil || r.crypt.streams == cryptNone {
 		return false
 	}
 	switch t, _ := d.Name("Type"); t {

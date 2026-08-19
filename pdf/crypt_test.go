@@ -325,7 +325,7 @@ func TestOpenEncryptedWithUserPassword(t *testing.T) {
 		t.Run(s.name, func(t *testing.T) {
 			data := buildEncryptedPDF(s)
 
-			doc, err := OpenBytesWithPassword(data, testUserPassword)
+			doc, err := OpenBytes(data, WithPassword(testUserPassword))
 			if err != nil {
 				t.Fatalf("open: %v", err)
 			}
@@ -345,7 +345,7 @@ func TestOpenEncryptedWithOwnerPassword(t *testing.T) {
 		t.Run(s.name, func(t *testing.T) {
 			data := buildEncryptedPDF(s)
 
-			doc, err := OpenBytesWithPassword(data, testOwnerPassword)
+			doc, err := OpenBytes(data, WithPassword(testOwnerPassword))
 			if err != nil {
 				t.Fatalf("open with owner password: %v", err)
 			}
@@ -361,7 +361,7 @@ func TestEncryptedStringsAreDecrypted(t *testing.T) {
 		t.Run(s.name, func(t *testing.T) {
 			data := buildEncryptedPDF(s)
 
-			r, err := OpenWithPassword(data, testUserPassword)
+			r, err := Open(data, WithPassword(testUserPassword))
 			if err != nil {
 				t.Fatalf("open: %v", err)
 			}
@@ -381,7 +381,7 @@ func TestWrongPassword(t *testing.T) {
 		t.Run(s.name, func(t *testing.T) {
 			data := buildEncryptedPDF(s)
 
-			_, err := OpenBytesWithPassword(data, "not-the-password")
+			_, err := OpenBytes(data, WithPassword("not-the-password"))
 			if !errors.Is(err, ErrWrongPassword) {
 				t.Errorf("err = %v, want ErrWrongPassword", err)
 			}

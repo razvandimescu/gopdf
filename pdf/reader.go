@@ -28,15 +28,12 @@ type Reader struct {
 	crypt      *encryptInfo // nil when the document is not encrypted
 }
 
-// Open parses a PDF from raw bytes. Encrypted files open when the user password
-// is empty; otherwise Open returns ErrEncrypted and OpenWithPassword is needed.
-func Open(data []byte) (*Reader, error) {
-	return OpenWithPassword(data, "")
-}
-
-// OpenWithPassword parses a PDF, decrypting it with the given user or owner
-// password. The password is ignored for unencrypted files.
-func OpenWithPassword(data []byte, password string) (*Reader, error) {
+// Open parses a PDF from raw bytes.
+//
+// Encrypted files open as-is when the user password is empty; otherwise Open
+// returns ErrEncrypted, and [WithPassword] supplies the password.
+func Open(data []byte, opts ...Option) (*Reader, error) {
+	cfg := newOpenConfig(opts)
 	r := &Reader{
 		data:       data[headerOffset(data):],
 		xref:       make(map[int]int64),
@@ -50,18 +47,14 @@ func OpenWithPassword(data []byte, password string) (*Reader, error) {
 	// is reached through the trailer, and before any content object is resolved.
 	// Objects touched during xref parsing are cross-reference streams, which the
 	// spec exempts from encryption.
-	if err := r.setupEncryption(password); err != nil {
-		if errors.Is(err, ErrWrongPassword) && password == "" {
+	if err := r.setupEncryption(cfg.password); err != nil {
+		if errors.Is(err, ErrWrongPassword) && cfg.password == "" {
 			return nil, ErrEncrypted
 		}
 		return nil, err
 	}
 	return r, nil
 }
-
-// IsEncrypted reports whether the source file was encrypted. It stays true after
-// a successful decrypt, since it describes the input rather than the reader.
-func (r *Reader) IsEncrypted() bool { return r.crypt != nil }
 
 // headerOffset returns the position of the "%PDF-" marker. The spec requires it
 // at byte 0, but some producers and transports prepend bytes (cache/transport

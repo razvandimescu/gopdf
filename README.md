@@ -198,7 +198,7 @@ you can prompt for one rather than guessing at a parse failure:
 ```go
 doc, err := pdf.OpenFile("statement.pdf")
 if errors.Is(err, pdf.ErrEncrypted) {
-    doc, err = pdf.OpenFileWithPassword("statement.pdf", os.Getenv("PDF_PASSWORD"))
+    doc, err = pdf.OpenFile("statement.pdf", pdf.WithPassword(os.Getenv("PDF_PASSWORD")))
 }
 if errors.Is(err, pdf.ErrWrongPassword) {
     log.Fatal("wrong password")

@@ -8,7 +8,9 @@ type Document struct {
 	pages  []Dict
 }
 
-// OpenFile opens a PDF from a file path.
+// OpenFile opens a PDF from a file path. Encrypted files open when the user
+// password is empty; otherwise OpenFile returns ErrEncrypted and
+// OpenFileWithPassword is needed.
 func OpenFile(path string) (*Document, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -17,9 +19,29 @@ func OpenFile(path string) (*Document, error) {
 	return OpenBytes(data)
 }
 
-// OpenBytes opens a PDF from raw bytes.
+// OpenBytes opens a PDF from raw bytes. Encrypted files open when the user
+// password is empty; otherwise OpenBytes returns ErrEncrypted and
+// OpenBytesWithPassword is needed.
 func OpenBytes(data []byte) (*Document, error) {
-	r, err := Open(data)
+	return OpenBytesWithPassword(data, "")
+}
+
+// OpenFileWithPassword opens an encrypted PDF from a file path. The password may
+// be either the user or the owner password, and is ignored for unencrypted
+// files. It returns ErrWrongPassword if neither matches.
+func OpenFileWithPassword(path, password string) (*Document, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return OpenBytesWithPassword(data, password)
+}
+
+// OpenBytesWithPassword opens an encrypted PDF from raw bytes. The password may
+// be either the user or the owner password, and is ignored for unencrypted
+// files. It returns ErrWrongPassword if neither matches.
+func OpenBytesWithPassword(data []byte, password string) (*Document, error) {
+	r, err := OpenWithPassword(data, password)
 	if err != nil {
 		return nil, err
 	}
@@ -29,6 +51,9 @@ func OpenBytes(data []byte) (*Document, error) {
 	}
 	return &Document{reader: r, pages: pages}, nil
 }
+
+// IsEncrypted reports whether the source file was encrypted.
+func (d *Document) IsEncrypted() bool { return d.reader.IsEncrypted() }
 
 // NumPages returns the number of pages in the document.
 func (d *Document) NumPages() int {

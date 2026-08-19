@@ -31,6 +31,7 @@ Pipeline: **Lexer** (bytes→tokens) → **Parser** (tokens→objects) → **Rea
 - `writer.go` — PDF serializer: object writing, FlateDecode compression, xref table generation
 - `merge.go` — PDF merge: deep object graph copy with Ref remapping, page tree construction, `MergeFiles`/`MergeBytes`/`Merger` API
 - `rewrite.go` — Single-document rewrite: `Reader.Rewrite` replaces named stream objects in place (reusing `merge.go`'s copy machinery), plus XFA packet lookup. Drives `cmd/xfa-translate`
+- `crypt.go` — Standard security handler: file-key derivation (RC4 40/128, AES-128, AES-256 R5/R6), user/owner password validation, per-object keys. Hooks into `readStreamData` (before the filter chain) and `parseObjectAt` (string walk)
 - `glyphlist.go` — Generated: 4200-entry Adobe Glyph List (glyph name→rune)
 - `stdfonts.go` — Width tables for standard 14 fonts (Courier, Helvetica, Times)
 
@@ -46,4 +47,4 @@ Key design decisions:
 - Pure Go only — no CGo, no dependencies outside the standard library
 - PDF files are git-ignored; test PDFs live in `example_out/`
 - Do not reference customer/client names in commit messages or public-facing text
-- Encryption support is not yet implemented (Phase 5, deferred)
+- Reading encrypted PDFs is supported (`crypt.go`); writing encrypted output is not

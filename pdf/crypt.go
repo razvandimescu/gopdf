@@ -141,9 +141,10 @@ func (r *Reader) cryptFilter(enc Dict, name Name) (cryptMethod, int) {
 	}
 	length := 0
 	if n, ok := f.Int("Length"); ok {
-		// Spec says bytes; many producers write bits. Values above 40 can only
-		// be bits, since no filter uses a 40-byte key.
-		if n > 40 {
+		// Spec says bytes; many producers write bits. 40 and above can only be
+		// bits, since no filter uses a key that long — 40 itself is the legacy
+		// RC4-40 case, which some producers emit here in bits.
+		if n >= 40 {
 			n /= 8
 		}
 		length = n
@@ -314,6 +315,16 @@ func unwrapFileKey(ikey, wrapped []byte) ([]byte, error) {
 	return out, nil
 }
 
+// hash2BDone implements Algorithm 2.B step (e): after at least 64 rounds, stop
+// once the last byte of E is no longer greater than the round count minus 32.
+//
+// rounds counts completed rounds. Expressing this against a 0-based loop index
+// shifts the threshold by one and silently derives the wrong key for a few
+// percent of passwords, so it is kept separate and tested directly.
+func hash2BDone(rounds int, lastE byte) bool {
+	return rounds >= 64 && int(lastE) <= rounds-32
+}
+
 // hash2B implements the revision 6 hardened hash (Algorithm 2.B). For revision 5
 // it degrades to a single SHA-256, which is what that revision specifies.
 func hash2B(password, salt, udata []byte, rev int) []byte {
@@ -333,8 +344,11 @@ func hash2B(password, salt, udata []byte, rev int) []byte {
 	k1 := make([]byte, 0, maxRound)
 	buf := make([]byte, maxRound)
 
+	// rounds counts completed rounds, which is what step (e) is expressed in
+	// terms of. Counting from 0 instead makes the threshold off by one and
+	// derives a wrong key for roughly one file in 38.
 	var e []byte
-	for i := 0; ; i++ {
+	for rounds := 1; ; rounds++ {
 		k1 = k1[:0]
 		for j := 0; j < 64; j++ {
 			k1 = append(k1, password...)
@@ -363,8 +377,7 @@ func hash2B(password, salt, udata []byte, rev int) []byte {
 			s := sha512.Sum512(e)
 			k = s[:]
 		}
-		// At least 64 rounds, then continue while the last byte exceeds i-32.
-		if i >= 63 && int(e[len(e)-1]) <= i-32 {
+		if hash2BDone(rounds, e[len(e)-1]) {
 			break
 		}
 	}

@@ -131,7 +131,7 @@ func encHash2B(pw, salt, udata []byte) []byte {
 	h.Write(salt)
 	h.Write(udata)
 	k := h.Sum(nil)
-	for i := 0; ; i++ {
+	for rounds := 1; ; rounds++ {
 		var k1 []byte
 		for j := 0; j < 64; j++ {
 			k1 = append(k1, pw...)
@@ -156,7 +156,7 @@ func encHash2B(pw, salt, udata []byte) []byte {
 			s := sha512.Sum512(e)
 			k = s[:]
 		}
-		if i >= 63 && int(e[len(e)-1]) <= i-32 {
+		if rounds >= 64 && int(e[len(e)-1]) <= rounds-32 {
 			break
 		}
 	}
@@ -278,6 +278,35 @@ func encryptDict(s encScheme, o, u, ue, oe []byte, perm int) string {
 }
 
 // --- tests ------------------------------------------------------------------
+
+// TestHash2BTermination pins Algorithm 2.B step (e) against explicit cases.
+//
+// The round-trip tests above cannot catch an error here: crypt_test.go's
+// encHash2B would have to make the same mistake to still agree, which is exactly
+// what happened when both were written from one reading of the spec. These cases
+// are taken from the rule itself — stop when the last byte of E is no longer
+// greater than the number of completed rounds minus 32.
+func TestHash2BTermination(t *testing.T) {
+	cases := []struct {
+		rounds int
+		lastE  byte
+		want   bool
+	}{
+		{rounds: 1, lastE: 0, want: false},   // 64 rounds are mandatory
+		{rounds: 63, lastE: 0, want: false},  // still one short
+		{rounds: 64, lastE: 31, want: true},  // 31 is not greater than 64-32
+		{rounds: 64, lastE: 32, want: true},  // boundary: equal, so stop
+		{rounds: 64, lastE: 33, want: false}, // greater, so continue
+		{rounds: 70, lastE: 38, want: true},
+		{rounds: 70, lastE: 39, want: false},
+		{rounds: 96, lastE: 255, want: false},
+	}
+	for _, c := range cases {
+		if got := hash2BDone(c.rounds, c.lastE); got != c.want {
+			t.Errorf("hash2BDone(%d, %d) = %v, want %v", c.rounds, c.lastE, got, c.want)
+		}
+	}
+}
 
 // assertPageText checks that the document's only page decrypted to readable text.
 func assertPageText(t *testing.T, doc *Document) {

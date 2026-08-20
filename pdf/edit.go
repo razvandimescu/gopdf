@@ -368,9 +368,7 @@ func (e *Editor) Apply() ([]byte, error) {
 			continue
 		}
 
-		copiedObj := ctx.copyObject(pageDict)
-		copiedPage := copiedObj.(Dict)
-		delete(copiedPage, "Parent")
+		copiedPage := copyPageForRewrite(ctx, pageDict)
 		copiedPage["Parent"] = pagesRef
 
 		// ensureOverlayFont and the image-XObject / ExtGState registrations
@@ -447,6 +445,22 @@ func (e *Editor) Apply() ([]byte, error) {
 	})
 
 	return w.FinishWithID(catalogRef, reader.OriginalID())
+}
+
+// copyPageForRewrite copies a page dictionary for a page whose content stream
+// is about to be replaced, leaving the original stream uncopied.
+//
+// Copying it would write it as an object of its own, unreferenced by the new
+// page but present in the file and holding every glyph the rewrite removed. A
+// redaction one xref entry away from the original is not a redaction.
+func copyPageForRewrite(ctx *copyContext, page Dict) Dict {
+	src := make(Dict, len(page))
+	for key, value := range page {
+		if key != "Contents" && key != "Parent" {
+			src[key] = value
+		}
+	}
+	return ctx.copyObject(src).(Dict)
 }
 
 // inlineResourceDicts ensures Resources and its Font / XObject / ExtGState

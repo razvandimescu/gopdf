@@ -609,7 +609,7 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 									formCTM = matMul6(fm, ctm)
 								}
 								formResources, _ := reader.ResolveDict(stream.Dict["Resources"])
-								outer := rec.enter(xobjRef, stream.Data)
+								outer := rec.enter(xobjRef, stream.Data, formCTM)
 								formSpans := extractTextWithResources(stream.Data, formFonts, reader, formResources, depth+1, rec)
 								rec.leave(outer)
 								// Transform form spans through the form's CTM.

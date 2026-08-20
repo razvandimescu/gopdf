@@ -438,3 +438,248 @@ func TestRemoveTextMapsCharactersBackToCodes(t *testing.T) {
 		t.Errorf("the code behind the characters survived: %q", text)
 	}
 }
+
+// formPDF builds a PDF whose pages all draw the same Form XObject, at the
+// given page-space offsets, one page per offset.
+func formPDF(t *testing.T, formContent string, offsets ...[2]float64) []byte {
+	t.Helper()
+	w := NewWriter()
+	pagesRef := w.AllocRef()
+	catalogRef := w.AllocRef()
+
+	fontRef := w.AllocRef()
+	w.WriteObject(fontRef, Dict{
+		"Type": Name("Font"), "Subtype": Name("Type1"), "BaseFont": Name("Helvetica"),
+	})
+	resources := Dict{"Font": Dict{Name("F1"): fontRef}}
+
+	formRef := w.AllocRef()
+	if err := w.WriteStream(formRef, Dict{
+		"Type": Name("XObject"), "Subtype": Name("Form"),
+		"BBox":      Array{0, 0, 300, 50},
+		"Resources": resources,
+	}, []byte(formContent)); err != nil {
+		t.Fatal(err)
+	}
+
+	kids := make(Array, 0, len(offsets))
+	for _, at := range offsets {
+		contentRef := w.AllocRef()
+		if err := w.WriteStream(contentRef, Dict{}, []byte(
+			"q 1 0 0 1 "+formatOperand(at[0])+" "+formatOperand(at[1])+" cm /Fm Do Q\n")); err != nil {
+			t.Fatal(err)
+		}
+		pageRef := w.AllocRef()
+		w.WriteObject(pageRef, Dict{
+			"Type": Name("Page"), "Parent": pagesRef,
+			"MediaBox": Array{0, 0, 612, 792},
+			"Resources": Dict{
+				"Font":    Dict{Name("F1"): fontRef},
+				"XObject": Dict{Name("Fm"): formRef},
+			},
+			"Contents": contentRef,
+		})
+		kids = append(kids, pageRef)
+	}
+
+	w.WriteObject(pagesRef, Dict{"Type": Name("Pages"), "Kids": kids, "Count": len(kids)})
+	w.WriteObject(catalogRef, Dict{"Type": Name("Catalog"), "Pages": pagesRef})
+	data, err := w.Finish(catalogRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+// The page the reader is handed must not carry the text anywhere. Repointing
+// it at a stripped content stream is not enough if the original is still in
+// the file, unreferenced but readable.
+func TestRemoveTextLeavesNoOriginalBehind(t *testing.T) {
+	const secret = "123-45-6789"
+	data := testPDF(t, "SSN "+secret+" (on file)")
+
+	ed := NewEditor(data)
+	ed.RemoveText(secret)
+	out, err := ed.Apply()
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	reader, err := Open(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for num := 1; num < 32; num++ {
+		stream, ok := reader.Resolve(Ref{Num: num}).(*Stream)
+		if ok && strings.Contains(string(stream.Data), secret) {
+			t.Fatalf("object %d still holds the removed text: %s", num, stream.Data)
+		}
+	}
+}
+
+// A form draws in its own coordinates. A rectangle aimed at the page only
+// lands on the right glyphs if they are carried out through the form's matrix
+// first — and if they are not, a rectangle over blank page hits them instead.
+func TestRemoveRegionReachesFormTextWherePageSpaceSaysItIs(t *testing.T) {
+	data := formPDF(t, "BT /F1 12 Tf 0 0 Td (inside the form) Tj ET", [2]float64{72, 700})
+
+	blank := func(t *testing.T) {
+		t.Helper()
+		ed := NewEditor(data)
+		ed.RemoveRegion(0, Rect{X: -5, Y: -5, Width: 200, Height: 30}) // form space, blank on the page
+		out, err := ed.Apply()
+		if err != nil {
+			t.Fatalf("Apply: %v", err)
+		}
+		doc, err := OpenBytes(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if text := docText(t, doc); !strings.Contains(text, "inside the form") {
+			t.Errorf("a rectangle over blank page removed text: %q", text)
+		}
+	}
+	blank(t)
+
+	ed := NewEditor(data)
+	ed.RemoveRegion(0, Rect{X: 70, Y: 695, Width: 200, Height: 30}) // where the reader sees it
+	out, err := ed.Apply()
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	doc, err := OpenBytes(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := docText(t, doc); strings.Contains(text, "inside the form") {
+		t.Errorf("the rectangle missed the form's text: %q", text)
+	}
+}
+
+// One form, two pages, a different word removed on each. The form is a single
+// object, so both removals have to reach the bytes before they are rewritten.
+func TestRemoveRegionMergesWhatEveryPageAsksOfAForm(t *testing.T) {
+	data := formPDF(t,
+		"BT /F1 12 Tf 0 0 Td (ALPHA) Tj 0 20 Td (BETA) Tj ET",
+		[2]float64{72, 700}, [2]float64{72, 700})
+
+	ed := NewEditor(data)
+	ed.RemoveRegion(0, Rect{X: 70, Y: 695, Width: 100, Height: 12}) // ALPHA
+	ed.RemoveRegion(1, Rect{X: 70, Y: 715, Width: 100, Height: 12}) // BETA
+	out, err := ed.Apply()
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	doc, err := OpenBytes(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	text := docText(t, doc)
+	if strings.Contains(text, "ALPHA") {
+		t.Errorf("page 0's removal was overwritten: %q", text)
+	}
+	if strings.Contains(text, "BETA") {
+		t.Errorf("page 1's removal was overwritten: %q", text)
+	}
+}
+
+// Generators emit text out of visual order — a column at a time, or a word in
+// pieces to kern it. Search reads the page as the reader does, so removal has
+// to as well, or it silently misses what search reports.
+func TestRemoveTextReadsThePageInTheReadersOrder(t *testing.T) {
+	const query = "Hello World"
+	data := contentPDF(t, "BT /F1 12 Tf 1 0 0 1 101.336 700 Tm (World) Tj 1 0 0 1 72 700 Tm (Hello) Tj ET")
+
+	original, err := OpenBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hits := original.Search(query); len(hits) == 0 {
+		t.Fatalf("search does not find %q; the fixture no longer tests anything", query)
+	}
+
+	doc := removeText(t, data, query)
+	if text := docText(t, doc); strings.Contains(text, "Hello") || strings.Contains(text, "World") {
+		t.Errorf("text drawn out of order survived: %q", text)
+	}
+}
+
+// The halves of a line can be drawn either side of a line below it, which is
+// what emitting a page column by column does. Reading order has to gather each
+// baseline back together before the words on it can be matched.
+func TestRemoveTextGathersInterleavedLines(t *testing.T) {
+	const query = "Hello World"
+	data := contentPDF(t, "BT /F1 12 Tf 1 0 0 1 72 700 Tm (Hello) Tj "+
+		"1 0 0 1 72 680 Tm (the line below) Tj "+
+		"1 0 0 1 101.336 700 Tm (World) Tj ET")
+
+	original, err := OpenBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hits := original.Search(query); len(hits) == 0 {
+		t.Fatalf("search does not find %q; the fixture no longer tests anything", query)
+	}
+
+	doc := removeText(t, data, query)
+	text := docText(t, doc)
+	if strings.Contains(text, "Hello") || strings.Contains(text, "World") {
+		t.Errorf("the interleaved line was not gathered: %q", text)
+	}
+	if !strings.Contains(text, "the line below") {
+		t.Errorf("the line between them was removed: %q", text)
+	}
+}
+
+// An operator that shows an empty string draws nothing and moves nowhere. It
+// must not read as a jump to the page origin, which would split the line.
+func TestRemoveTextIgnoresEmptyShowOperators(t *testing.T) {
+	data := contentPDF(t, "BT /F1 12 Tf 72 750 Td (Jane) Tj () Tj ( Doe) Tj ET")
+
+	doc := removeText(t, data, "Jane Doe")
+	if text := docText(t, doc); strings.Contains(text, "Jane") || strings.Contains(text, "Doe") {
+		t.Errorf("the empty operator broke the line in two: %q", text)
+	}
+}
+
+// Some fonts are read two bytes at a time while their text decodes one
+// character at a time. Marking half of a code would leave a byte of it in the
+// stream and write a truncated code back.
+func TestRemoveTextTakesWholeCodes(t *testing.T) {
+	data := buildRawPDF(t, func(w *Writer, pagesRef Ref) Dict {
+		toUnicodeRef := w.AllocRef()
+		w.WriteStream(toUnicodeRef, Dict{}, []byte(
+			"1 beginbfchar\n<4142> <0058>\nendbfchar\n"))
+
+		fontRef := w.AllocRef()
+		w.WriteObject(fontRef, Dict{
+			"Type": Name("Font"), "Subtype": Name("Type1"), "BaseFont": Name("Helvetica"),
+			"ToUnicode": toUnicodeRef,
+		})
+
+		contentRef := w.AllocRef()
+		w.WriteStream(contentRef, Dict{}, []byte("BT /F1 12 Tf 72 750 Td (AB) Tj ET"))
+
+		return Dict{
+			"Type": Name("Page"), "Parent": pagesRef,
+			"MediaBox":  Array{0, 0, 612, 792},
+			"Resources": Dict{"Font": Dict{Name("F1"): fontRef}},
+			"Contents":  contentRef,
+		}
+	})
+
+	original, err := OpenBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := docText(t, original); text != "X" {
+		t.Fatalf("the two-byte code did not decode to one character: %q", text)
+	}
+
+	doc := removeText(t, data, "X")
+	content := string(mustContent(t, doc.reader, doc.pages[0]))
+	if strings.Contains(content, "<41") || strings.Contains(content, "<42") || strings.Contains(content, "(A") {
+		t.Errorf("half the code was left in the stream:\n%s", content)
+	}
+}

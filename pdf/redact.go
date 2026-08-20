@@ -47,6 +47,20 @@ type showOp struct {
 	fontSize   float64
 	tc, tw, th float64
 	items      []showItem
+
+	// Which glyphs of which items are to go, resolved per page. A stream can
+	// be drawn by more than one page, and each has its own say before the one
+	// set of bytes behind it is rewritten.
+	dropped [][]bool
+}
+
+// showFrame is the stream being recorded and the transform from its own
+// coordinates to the page's. A Form XObject draws in its own space, so the
+// glyphs it shows have to be carried out to the page before a rectangle
+// aimed at the page can be compared with them.
+type showFrame struct {
+	stream int
+	ctm    [6]float64
 }
 
 // showRecorder collects the text-showing operations of a content stream as the
@@ -62,7 +76,7 @@ type showOp struct {
 type showRecorder struct {
 	streams map[int][]showOp
 	data    map[int][]byte
-	cur     int
+	cur     showFrame
 	pending []showItem
 	runs    []textRun
 	nglyphs int
@@ -72,6 +86,7 @@ func newShowRecorder(content []byte) *showRecorder {
 	return &showRecorder{
 		streams: make(map[int][]showOp),
 		data:    map[int][]byte{0: content},
+		cur:     showFrame{ctm: [6]float64{1, 0, 0, 1, 0, 0}},
 	}
 }
 
@@ -85,6 +100,8 @@ func (r *showRecorder) show(text string, fontSize float64, glyphs []glyph) {
 	run := textRun{text: text, first: r.nglyphs, n: len(glyphs), fontSize: fontSize}
 	for i := range glyphs {
 		glyphs[i].seq = r.nglyphs
+		glyphs[i].x0, glyphs[i].y0 = applyMatrix6(r.cur.ctm, glyphs[i].x0, glyphs[i].y0)
+		glyphs[i].x1, glyphs[i].y1 = applyMatrix6(r.cur.ctm, glyphs[i].x1, glyphs[i].y1)
 		r.nglyphs++
 	}
 	if len(glyphs) > 0 {
@@ -110,35 +127,36 @@ func (r *showRecorder) finish(op string, start, end int, fontSize, tc, tw, th fl
 	}
 	items := r.pending
 	r.pending = nil
-	if r.cur < 0 {
+	if r.cur.stream < 0 {
 		return
 	}
-	r.streams[r.cur] = append(r.streams[r.cur], showOp{
+	r.streams[r.cur.stream] = append(r.streams[r.cur.stream], showOp{
 		start: start, end: end, op: op,
 		fontSize: fontSize, tc: tc, tw: tw, th: th,
 		items: items,
 	})
 }
 
-// enter switches recording to a Form XObject's own stream and returns the
-// stream to restore afterwards. A form reached by anything but an indirect
+// enter switches recording to a Form XObject's own stream, composing the
+// transform that carries its coordinates out to the page, and returns the
+// frame to restore afterwards. A form reached by anything but an indirect
 // reference cannot be replaced on write, so its operations are dropped rather
 // than recorded and silently ignored.
-func (r *showRecorder) enter(ref any, data []byte) int {
+func (r *showRecorder) enter(ref any, data []byte, ctm [6]float64) showFrame {
 	if r == nil {
-		return 0
+		return showFrame{}
 	}
 	outer := r.cur
 	if n, ok := ref.(Ref); ok {
-		r.cur = n.Num
+		r.cur = showFrame{stream: n.Num, ctm: matMul6(ctm, outer.ctm)}
 		r.data[n.Num] = data
 	} else {
-		r.cur = -1
+		r.cur = showFrame{stream: -1}
 	}
 	return outer
 }
 
-func (r *showRecorder) leave(outer int) {
+func (r *showRecorder) leave(outer showFrame) {
 	if r == nil {
 		return
 	}
@@ -168,8 +186,8 @@ func (r *showRecorder) matchQueries(queries []string) map[int]bool {
 			}
 			i += at
 			for b := i; b < i+len(query); b++ {
-				if glyphAt[b] >= 0 {
-					dropped[glyphAt[b]] = true
+				for g := glyphAt[b].from; g < glyphAt[b].to; g++ {
+					dropped[g] = true
 				}
 			}
 			at = i + len(query)
@@ -178,44 +196,86 @@ func (r *showRecorder) matchQueries(queries []string) map[int]bool {
 	return dropped
 }
 
-// assembleText joins what the page draws into one string, alongside the glyph
-// each byte of it came from (-1 for the separators between runs). The spacing
-// rules are BuildLines': a query that Page.Search can find has to be findable
-// here too, or removal would quietly miss text that redaction covers.
-func (r *showRecorder) assembleText() (string, []int) {
-	var text strings.Builder
-	glyphAt := make([]int, 0, r.nglyphs)
+// glyphRange is the glyphs one character was drawn by — usually a single one.
+type glyphRange struct{ from, to int }
 
-	write := func(s string, seq int) {
+// assembleText joins what the page draws into one string, alongside the glyphs
+// each byte of it came from (an empty range for the separators between runs).
+// The reading order and the spacing rules are BuildLines': a query that
+// Page.Search can find has to be findable here too, or removal would quietly
+// miss text that redaction covers.
+func (r *showRecorder) assembleText() (string, []glyphRange) {
+	var text strings.Builder
+	glyphAt := make([]glyphRange, 0, r.nglyphs)
+
+	write := func(s string, glyphs glyphRange) {
 		text.WriteString(s)
 		for range len(s) {
-			glyphAt = append(glyphAt, seq)
+			glyphAt = append(glyphAt, glyphs)
 		}
 	}
 
-	var prev textRun
-	for i, run := range r.runs {
+	order := r.readingOrder()
+	for i, index := range order {
+		run := r.runs[index]
 		if i > 0 {
-			write(runSeparator(prev, run), -1)
+			write(runSeparator(r.runs[order[i-1]], run), glyphRange{})
 		}
 		runes := []rune(run.text)
-		for j, c := range runes {
-			write(string(c), run.glyphFor(j, len(runes)))
+		for j := range runes {
+			write(string(runes[j]), run.glyphsFor(j, len(runes)))
 		}
-		prev = run
 	}
 	return text.String(), glyphAt
 }
 
-// glyphFor maps the j-th of runeCount characters back to the glyph that drew
-// it. Codes and characters usually correspond one to one, which this gives
-// exactly; where they do not — a code standing for a ligature, say — spreading
-// the characters across the codes is the best answer available.
-func (r textRun) glyphFor(j, runeCount int) int {
-	if r.n == 0 {
-		return -1
+// readingOrder indexes the runs in the order BuildLines would read them: down
+// the page by baseline, then left to right within each line. Generators draw
+// out of that order often enough — a column at a time, or a word in pieces to
+// kern it — and Page.Search reports what BuildLines assembled, so removal has
+// to assemble the same thing. Runs that drew no glyphs are left out; they
+// carry no position, and would otherwise read as a jump to the page origin.
+func (r *showRecorder) readingOrder() []int {
+	order := make([]int, 0, len(r.runs))
+	for i, run := range r.runs {
+		if run.n > 0 {
+			order = append(order, i)
+		}
 	}
-	return r.first + j*r.n/runeCount
+	sort.SliceStable(order, func(a, b int) bool {
+		return r.runs[order[a]].startY > r.runs[order[b]].startY
+	})
+
+	// Same tolerance BuildLines groups by, and measured the same way: against
+	// the first run of the line rather than the previous one, so a drifting
+	// baseline does not walk a line apart one run at a time.
+	line := 0
+	for i := 1; i <= len(order); i++ {
+		if i < len(order) && math.Abs(r.runs[order[i]].startY-r.runs[order[line]].startY) <= 1.0 {
+			continue
+		}
+		within := order[line:i]
+		sort.SliceStable(within, func(a, b int) bool {
+			return r.runs[within[a]].startX < r.runs[within[b]].startX
+		})
+		line = i
+	}
+	return order
+}
+
+// glyphsFor maps the j-th of runeCount characters back to the glyphs that drew
+// it. Codes and characters usually correspond one to one, which this gives
+// exactly. Where they do not — one code standing for a ligature, or a font
+// whose codes are read two bytes at a time while its text decodes one — the
+// range covers every code the character could have come from, so a match takes
+// all of them rather than half.
+func (r textRun) glyphsFor(j, runeCount int) glyphRange {
+	from := r.first + j*r.n/runeCount
+	to := r.first + (j+1)*r.n/runeCount
+	if to <= from {
+		to = from + 1
+	}
+	return glyphRange{from: from, to: to}
 }
 
 // runSeparator is the whitespace BuildLines would put between two runs: a
@@ -235,33 +295,46 @@ func runSeparator(prev, cur textRun) string {
 	return ""
 }
 
-// rewrite removes every glyph drop selects, returning new bytes for each stream
-// that changed. Streams nothing was removed from are absent from the result.
-func (r *showRecorder) rewrite(drop func(glyph) bool) map[int][]byte {
-	var edited map[int][]byte
-	for key, ops := range r.streams {
-		content, changed := rewriteShowOps(r.data[key], ops, drop)
-		if !changed {
-			continue
+// mark resolves which glyphs are to go, recording the decision on the
+// operations themselves. Deciding and rewriting are separate steps because a
+// Form XObject can be drawn by several pages: each page marks it, and the one
+// set of bytes behind it is rewritten once, after all of them have.
+func (r *showRecorder) mark(drop func(glyph) bool) {
+	for _, ops := range r.streams {
+		for i := range ops {
+			ops[i].mark(drop)
 		}
-		if edited == nil {
-			edited = make(map[int][]byte)
-		}
-		edited[key] = content
 	}
-	return edited
 }
 
-func rewriteShowOps(content []byte, ops []showOp, drop func(glyph) bool) ([]byte, bool) {
+func (o *showOp) mark(drop func(glyph) bool) {
+	for i, item := range o.items {
+		for g := range item.glyphs {
+			if !drop(item.glyphs[g]) {
+				continue
+			}
+			if o.dropped == nil {
+				o.dropped = make([][]bool, len(o.items))
+			}
+			if o.dropped[i] == nil {
+				o.dropped[i] = make([]bool, len(item.glyphs))
+			}
+			o.dropped[i][g] = true
+		}
+	}
+}
+
+func rewriteShowOps(content []byte, ops []showOp) ([]byte, bool) {
 	sort.SliceStable(ops, func(i, j int) bool { return ops[i].start < ops[j].start })
 
 	var out []byte
 	copied, changed := 0, false
 	for i := 0; i < len(ops); {
-		// A Form XObject drawn more than once is walked once per invocation, so
-		// the same operation appears repeatedly, at the same offsets but at
-		// different places on the page. One set of bytes can only have one
-		// fate: a glyph goes if any invocation puts it under a rectangle.
+		// A stream drawn more than once is walked once per drawing, so the
+		// same operation appears repeatedly, at the same offsets but at
+		// different places on the page — or on a different page altogether.
+		// One set of bytes can only have one fate: a glyph goes if any of
+		// those drawings put it under a rectangle.
 		j := i
 		for j < len(ops) && ops[j].start == ops[i].start && ops[j].end == ops[i].end {
 			j++
@@ -275,7 +348,7 @@ func rewriteShowOps(content []byte, ops []showOp, drop func(glyph) bool) ([]byte
 		if group[0].start < copied {
 			continue
 		}
-		replacement, ok := rewriteShowOp(group, drop)
+		replacement, ok := rewriteShowOp(group)
 		if !ok {
 			continue
 		}
@@ -295,24 +368,25 @@ func rewriteShowOps(content []byte, ops []showOp, drop func(glyph) bool) ([]byte
 // original operator was, the replacement is a TJ: surviving glyphs keep their
 // positions because each removed run leaves behind a kerning number worth
 // exactly the advance it had.
-func rewriteShowOp(group []showOp, drop func(glyph) bool) (string, bool) {
+func rewriteShowOp(group []showOp) (string, bool) {
 	op := group[0]
 
 	dropped := make([][]bool, len(op.items))
 	any := false
 	for _, o := range group {
-		for i, item := range o.items {
-			if item.isKern || i >= len(dropped) {
-				continue
+		for i, item := range o.dropped {
+			if i >= len(dropped) {
+				break
 			}
-			if dropped[i] == nil {
-				dropped[i] = make([]bool, len(item.glyphs))
-			}
-			for g := range item.glyphs {
-				if g < len(dropped[i]) && drop(item.glyphs[g]) {
-					dropped[i][g] = true
-					any = true
+			for g, gone := range item {
+				if !gone {
+					continue
 				}
+				if dropped[i] == nil {
+					dropped[i] = make([]bool, len(item))
+				}
+				dropped[i][g] = true
+				any = true
 			}
 		}
 	}
@@ -440,6 +514,10 @@ func (e *Editor) RemoveRegion(page int, rect Rect) {
 // stripText deletes the requested text from every page that has any, and
 // returns the rewritten content: page indices for the pages' own streams,
 // object numbers for the Form XObjects they draw.
+//
+// Every page marks its own glyphs before anything is rewritten. A form drawn
+// by two pages is one object with one set of bytes, and rewriting it as each
+// page is visited would leave only the last page's removals in it.
 func (e *Editor) stripText(reader *Reader, pages []Dict) (map[int][]byte, map[int][]byte, error) {
 	if len(e.removeQueries) == 0 && len(e.removeRegions) == 0 {
 		return nil, nil, nil
@@ -451,31 +529,44 @@ func (e *Editor) stripText(reader *Reader, pages []Dict) (map[int][]byte, map[in
 	}
 
 	strippedPages := make(map[int][]byte)
-	strippedForms := make(map[int][]byte)
+	formOps := make(map[int][]showOp)
+	formData := make(map[int][]byte)
+
 	for i, page := range pages {
 		if len(e.removeQueries) == 0 && len(regions[i]) == 0 {
 			continue
 		}
-		stripped, err := removeFromPage(reader, page, e.removeQueries, regions[i])
+		rec, err := markPage(reader, page, e.removeQueries, regions[i])
 		if err != nil {
 			return nil, nil, fmt.Errorf("removing text from page %d: %w", i, err)
 		}
-		for obj, content := range stripped {
-			if obj == 0 {
-				strippedPages[i] = content
-			} else {
-				strippedForms[obj] = content
+		if rec == nil {
+			continue
+		}
+		for stream, ops := range rec.streams {
+			if stream == 0 {
+				if content, changed := rewriteShowOps(rec.data[0], ops); changed {
+					strippedPages[i] = content
+				}
+				continue
 			}
+			formOps[stream] = append(formOps[stream], ops...)
+			formData[stream] = rec.data[stream]
+		}
+	}
+
+	strippedForms := make(map[int][]byte)
+	for stream, ops := range formOps {
+		if content, changed := rewriteShowOps(formData[stream], ops); changed {
+			strippedForms[stream] = content
 		}
 	}
 	return strippedPages, strippedForms, nil
 }
 
-// removeFromPage rewrites the streams that draw page so that neither the
-// queries nor anything inside rects is left in them. The result is keyed as
-// the recorder keys streams: 0 for the page's own content, object numbers for
-// the Form XObjects it draws.
-func removeFromPage(r *Reader, page Dict, queries []string, rects []Rect) (map[int][]byte, error) {
+// markPage records everything page draws and marks the glyphs that neither the
+// queries nor rects leave standing.
+func markPage(r *Reader, page Dict, queries []string, rects []Rect) (*showRecorder, error) {
 	content, err := r.PageContent(page)
 	if err != nil || len(content) == 0 {
 		return nil, err
@@ -489,7 +580,7 @@ func removeFromPage(r *Reader, page Dict, queries []string, rects []Rect) (map[i
 	// Glyph positions are in unrotated user space, where content is drawn;
 	// the rectangles are in displayed space, where the reader saw the text.
 	rotM, rotated := pageRotationMatrix(page)
-	return rec.rewrite(func(g glyph) bool {
+	rec.mark(func(g glyph) bool {
 		if dropped[g.seq] {
 			return true
 		}
@@ -503,5 +594,6 @@ func removeFromPage(r *Reader, page Dict, queries []string, rects []Rect) (map[i
 			}
 		}
 		return false
-	}), nil
+	})
+	return rec, nil
 }

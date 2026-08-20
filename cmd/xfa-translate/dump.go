@@ -2,9 +2,10 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
-	"strings"
 
 	"github.com/razvandimescu/gopdf/pdf"
 )
@@ -21,28 +22,19 @@ func runDump(inPDF, outTSV string) error {
 	if err != nil {
 		return err
 	}
-	objNum, xml := r.FindXFATemplate()
+	objNum, xml := findXFATemplate(r)
 	if objNum == 0 {
 		return fmt.Errorf("no XFA template stream found — is this an XFA-dynamic PDF?")
 	}
 
 	labels := extractLabels(xml)
 
-	existing := map[string]string{} // ro → en (from a prior run, if any)
-	if f, err := os.Open(outTSV); err == nil {
-		scanner := bufio.NewScanner(f)
-		scanner.Buffer(make([]byte, 1<<20), 1<<20)
-		for scanner.Scan() {
-			line := scanner.Text()
-			if strings.HasPrefix(line, "#") || line == "" {
-				continue
-			}
-			parts := strings.Split(line, "\t")
-			if len(parts) >= 2 && parts[1] != "" {
-				existing[parts[0]] = parts[1]
-			}
-		}
-		f.Close()
+	// ro → en from a prior run, if any. Only a missing file is benign: os.Create
+	// below truncates outTSV, so treating a read error as "no translations" would
+	// silently destroy the accumulated work this function exists to preserve.
+	existing, err := loadTSV(outTSV)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("reading %s: %w (refusing to overwrite it)", outTSV, err)
 	}
 
 	out, err := os.Create(outTSV)

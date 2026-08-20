@@ -30,7 +30,7 @@ Pipeline: **Lexer** (bytes→tokens) → **Parser** (tokens→objects) → **Rea
 - `text.go` — Content stream interpretation: all text operators (BT/ET/Tf/Tm/Td/TJ/Tj/T\*/'/"), graphics state stack (q/Q), CTM tracking (cm), Form XObject recursion (Do), MarkedContent/ActualText (BMC/BDC/EMC), CIDFont 2-byte handling, page rotation
 - `writer.go` — PDF serializer: object writing, FlateDecode compression, xref table generation
 - `merge.go` — PDF merge: deep object graph copy with Ref remapping, page tree construction, `MergeFiles`/`MergeBytes`/`Merger` API
-- `rewrite.go` — Single-document rewrite: `Reader.Rewrite` replaces named stream objects in place (reusing `merge.go`'s copy machinery), plus XFA packet lookup. Drives `cmd/xfa-translate`
+- `rewrite.go` — Single-document rewrite: `Reader.Rewrite` replaces named stream objects in place (reusing `merge.go`'s copy machinery). Drives `cmd/xfa-translate`, which does its own XFA packet lookup in `cmd/xfa-translate/xfa.go`
 - `crypt.go` — Standard security handler: file-key derivation (RC4 40/128, AES-128, AES-256 R5/R6), user/owner password validation, per-object keys. Hooks into `readStreamData` (before the filter chain) and `parseObjectAt` (string walk)
 - `glyphlist.go` — Generated: 4200-entry Adobe Glyph List (glyph name→rune)
 - `stdfonts.go` — Width tables for standard 14 fonts (Courier, Helvetica, Times)

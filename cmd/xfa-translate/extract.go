@@ -82,10 +82,7 @@ func extractLabels(xml []byte) []label {
 			bytes.Contains(m[1], []byte("Calcul")) {
 			continue
 		}
-		flat := reInnerTag.ReplaceAll(m[1], nil)
-		flat = []byte(decodeEntities(string(flat)))
-		flat = reWhitespace.ReplaceAll(flat, []byte(" "))
-		s := strings.TrimSpace(string(flat))
+		s := flattenParagraph(m[1])
 		// Skip extremely long flattened paragraphs (likely concatenated cells).
 		// Legitimate footnote labels can exceed 400 chars; bump to 1500.
 		if len(s) > 1500 {
@@ -271,6 +268,17 @@ var countyNames = map[string]bool{
 	"Olt": true, "Prahova": true, "Satu Mare": true, "Salaj": true, "Sibiu": true,
 	"Suceava": true, "Teleorman": true, "Timis": true, "Tulcea": true,
 	"Valcea": true, "Vaslui": true, "Vrancea": true,
+}
+
+// flattenParagraph reduces a <p> body to the comparable form used as a mapping
+// key: inner markup stripped, entities decoded, whitespace collapsed. Both the
+// dump and apply sides must derive keys identically or the TSV round-trip stops
+// matching, so this lives in one place.
+func flattenParagraph(inner []byte) string {
+	flat := reInnerTag.ReplaceAll(inner, nil)
+	flat = []byte(decodeEntities(string(flat)))
+	flat = reWhitespace.ReplaceAll(flat, []byte(" "))
+	return strings.TrimSpace(string(flat))
 }
 
 func decodeEntities(s string) string {

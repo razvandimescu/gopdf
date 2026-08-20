@@ -42,19 +42,12 @@ func hideUnusedFormVariants(template, datasets []byte) []byte {
 	switch tipAS {
 	case "1": // anual
 		switch rbl {
-		case "1": // mari
-			topHide["F10S"] = true
-			topHide["F20S"] = true
-			f30Hide["Table71_an"] = true
-			f30Hide["Table7_an"] = true
-			f30Hide["Table5"] = true
-			f30Hide["Table6"] = true
-			f30Hide["Table8_an_micro"] = true
-			f30Hide["Table7_sem"] = true
-			f30Hide["Table8_sem_micro"] = true
-			f30Hide["Table7_MM_sem"] = true
-		case "2": // mici
-			topHide["F10L"] = true
+		case "1", "2": // mari/mici — differ only in which F10 variant is kept
+			if rbl == "1" {
+				topHide["F10S"] = true
+			} else {
+				topHide["F10L"] = true
+			}
 			topHide["F20S"] = true
 			f30Hide["Table71_an"] = true
 			f30Hide["Table7_an"] = true
@@ -261,13 +254,6 @@ func postProcessFixes(xml []byte) []byte {
 			replace: []byte("ATTENTION!\tPer pt. 1.11 para 4 of Annex 1 to OMFP no. 2206/2020, the archive will also contain the first page of the annual financial statements for the financial year"),
 		},
 	}
-	xml = applyOutsideScripts(xml, func(chunk []byte) []byte {
-		for _, f := range fixes {
-			chunk = bytes.ReplaceAll(chunk, f.find, f.replace)
-		}
-		return chunk
-	})
-
 	// Global normalisation of Romanian fiscal abbreviations that leak through
 	// in parenthetical chart-of-accounts / row references. Pattern is "ct."
 	// (cont = account), "rd." (rând = row), and "din ct." (from account).
@@ -290,21 +276,23 @@ func postProcessFixes(xml []byte) []byte {
 		{find: []byte(",ct."), replace: []byte(",acc.")},
 		{find: []byte("-ct."), replace: []byte("-acc.")},
 	}
-	xml = applyOutsideScripts(xml, func(chunk []byte) []byte {
-		for _, a := range abbrevs {
-			chunk = bytes.ReplaceAll(chunk, a.find, a.replace)
-		}
-		return chunk
-	})
-
 	// `row N la M` (Romanian "la" = "to") — only translate when both sides
 	// are digits so we don't accidentally rewrite English text containing
 	// the word "la".
 	reLa := regexp.MustCompile(`(row\s+[0-9a-z]+)\s+la\s+([0-9a-z]+)`)
-	xml = applyOutsideScripts(xml, func(chunk []byte) []byte {
+
+	// One pass over the non-script partition: structural fixes, then
+	// abbreviations, then "la". Order is preserved per chunk, and the script
+	// boundaries are located once instead of once per rule set.
+	return applyOutsideScripts(xml, func(chunk []byte) []byte {
+		for _, f := range fixes {
+			chunk = bytes.ReplaceAll(chunk, f.find, f.replace)
+		}
+		for _, a := range abbrevs {
+			chunk = bytes.ReplaceAll(chunk, a.find, a.replace)
+		}
 		return reLa.ReplaceAll(chunk, []byte("$1 to $2"))
 	})
-	return xml
 }
 
 // runApply rewrites the XFA template with EN translations from the TSV and
@@ -326,11 +314,11 @@ func runApply(inPDF, mapTSV, outPDF string) error {
 	if err != nil {
 		return err
 	}
-	objNum, xml := r.FindXFATemplate()
+	objNum, xml := findXFATemplate(r)
 	if objNum == 0 {
 		return fmt.Errorf("no XFA template stream found in %s", inPDF)
 	}
-	_, datasets := r.FindXFAStream("datasets")
+	_, datasets := findXFAStream(r, "datasets")
 
 	translated, hits := applyTranslations(xml, mapping)
 	translated = postProcessFixes(translated)
@@ -401,10 +389,7 @@ func applyTranslations(xml []byte, mapping map[string]string) ([]byte, map[strin
 	// can no longer match against the original RO key.
 	cur = rePara.ReplaceAllFunc(cur, func(m []byte) []byte {
 		groups := rePara.FindSubmatch(m)
-		flat := reInnerTag.ReplaceAll(groups[1], nil)
-		flat = []byte(decodeEntities(string(flat)))
-		flat = reWhitespace.ReplaceAll(flat, []byte(" "))
-		key := strings.TrimSpace(string(flat))
+		key := flattenParagraph(groups[1])
 		if key == "" {
 			return m
 		}

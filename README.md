@@ -37,7 +37,7 @@ Table extraction in pure Go, under a permissive licence. [unipdf](https://github
 | **Text overlay** | Yes | Yes | Watermark | No | No |
 | **Visual redaction** | Yes | Yes | No | No | No |
 | **PDF creation** | Yes | Yes | Yes | No | Yes |
-| **Encryption** | No | Yes | Yes | No | Yes |
+| **Reads encrypted PDFs** | Yes | Yes | Yes | No | Yes |
 | **Dependencies** | 0 | Many | 0 | 0 | System lib |
 
 ### When to use something else
@@ -58,6 +58,7 @@ Table extraction in pure Go, under a permissive licence. [unipdf](https://github
 - PDF merge with page selection and size constraints (fail/truncate/shrink with JPEG recompression)
 - Text overlay (Helvetica, configurable size and color)
 - Visual redaction (filled rectangles with configurable color)
+- Reads encrypted PDFs (RC4 40/128-bit, AES-128, AES-256; user or owner password)
 - Image overlay / watermark (PNG/JPEG, rotation, opacity, transparent SMask)
 - PDF creation with text, rectangles, lines, and multiple fonts
 - Pure Go — no CGo, no system dependencies
@@ -181,6 +182,35 @@ for _, r := range results {
 // Output:
 // Page 0 at (206, 691) size 70x12
 ```
+
+### Encrypted PDFs
+
+Files encrypted with an empty user password — the common case for emailed
+statements — open through the ordinary entry points with no extra work:
+
+```go
+doc, err := pdf.OpenFile("statement.pdf")
+```
+
+When a password is genuinely required, `OpenFile` reports `pdf.ErrEncrypted` so
+you can prompt for one rather than guessing at a parse failure:
+
+```go
+doc, err := pdf.OpenFile("statement.pdf")
+if errors.Is(err, pdf.ErrEncrypted) {
+    doc, err = pdf.OpenFile("statement.pdf", pdf.WithPassword(os.Getenv("PDF_PASSWORD")))
+}
+if errors.Is(err, pdf.ErrWrongPassword) {
+    log.Fatal("wrong password")
+}
+```
+
+Either the user or the owner password is accepted. Everything reached through
+the opened document — text extraction, tables, search — behaves exactly as it
+does for an unencrypted file.
+
+`Merger` and `Editor` take their own entry points and do not yet accept a
+password, so they handle encrypted input only when its user password is empty.
 
 ### Merge PDFs
 
@@ -381,12 +411,13 @@ type Rect struct {
 | **Content streams** | All text operators (BT/ET/Tf/Tm/Td/TD/T\*/TJ/Tj/'/"), graphics state stack (q/Q), CTM (cm) |
 | **XObjects** | Recursive text extraction from Form XObjects via Do operator |
 | **Marked content** | ActualText extraction (BMC/BDC/EMC) with UTF-16BE support |
+| **Encryption** | Standard security handler: RC4 40/128-bit (R2/R3), AES-128 (R4), AES-256 (R5/R6), crypt filters, /EncryptMetadata |
 | **Structure** | Linearized PDFs, incremental updates, indirect Length references |
 
 ## Limitations
 
 - **Redaction is visual only.** A rectangle is drawn over the text; the text stays in the content stream and remains recoverable by copy/paste or any PDF parser. Do not use it to remove sensitive data.
-- **No encryption/password support** (planned). Encrypted PDFs are not currently detected either — extraction on one will return garbage rather than an error.
+- **Reading encrypted PDFs is supported; writing them is not.** Output from merge, rewrite, and creation is always unencrypted, so an encrypted input is effectively decrypted by any operation that writes it back out. Public-key (certificate) security handlers are not supported.
 - No image extraction
 - PDF creation supports standard 14 fonts only (no font embedding)
 - Merge drops interactive features (forms, bookmarks, JS)

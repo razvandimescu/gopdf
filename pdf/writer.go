@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/zlib"
 	"crypto/md5"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"sort"
@@ -277,11 +278,7 @@ func escapeName(s string) string {
 
 // hexEncode returns the hex representation of data.
 func hexEncode(data []byte) string {
-	var b strings.Builder
-	for _, c := range data {
-		fmt.Fprintf(&b, "%02x", c)
-	}
-	return b.String()
+	return hex.EncodeToString(data)
 }
 
 func flateCompress(data []byte) ([]byte, error) {

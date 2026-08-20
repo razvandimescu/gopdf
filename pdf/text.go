@@ -4,6 +4,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // TextSpan is a piece of text with its position on the page.
@@ -305,45 +306,59 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 		return winansiDecode(s)
 	}
 
-	// transformPos applies CTM to a text-space position.
-	transformPos := func(tx, ty float64) (float64, float64) {
-		return ctm[0]*tx + ctm[2]*ty + ctm[4],
-			ctm[1]*tx + ctm[3]*ty + ctm[5]
+	// codeAdvance is the pen's travel over the character code at s[i], in text
+	// space, including character spacing, word spacing and horizontal scaling.
+	codeAdvance := func(s string, i, step int, hScale float64) float64 {
+		code := int(s[i])
+		if step == 2 {
+			code = code<<8 | int(s[i+1])
+		}
+		adv := (cidCharWidth(code)*fontSize + tc) * hScale
+		if step == 1 && s[i] == ' ' {
+			adv += tw * hScale
+		}
+		return adv
 	}
 
 	// advanceTextMatrix walks the pen across s, one character code at a time,
 	// and returns where each glyph sat while a recorder is attached. Redaction
 	// needs exactly that — which codes drew inside a rectangle — and getting it
 	// from the same walk that positions text keeps the two from disagreeing.
+	//
+	// Nobody is recording on the ordinary extraction path, and this runs for
+	// every string of every page, so it pays for the glyph positions and the
+	// byte slice they name only when something asked for them.
 	advanceTextMatrix := func(s string) []glyph {
-		raw := []byte(s)
 		hScale := th / 100.0
 		step := 1
-		if isComposite() && len(raw)%2 == 0 {
+		if isComposite() && len(s)%2 == 0 {
 			step = 2
 		}
-		var glyphs []glyph
-		x, y := transformPos(tm[4], tm[5])
+
+		if rec == nil {
+			var total float64
+			for i := 0; i+step <= len(s); i += step {
+				total += codeAdvance(s, i, step, hScale)
+			}
+			tm[4] += total * tm[0]
+			tm[5] += total * tm[1]
+			return nil
+		}
+
+		raw := []byte(s)
+		glyphs := make([]glyph, 0, len(raw)/step)
+		x, y := applyMatrix6(ctm, tm[4], tm[5])
 		for i := 0; i+step <= len(raw); i += step {
-			code := int(raw[i])
-			if step == 2 {
-				code = code<<8 | int(raw[i+1])
-			}
-			adv := (cidCharWidth(code)*fontSize + tc) * hScale
-			if step == 1 && raw[i] == ' ' {
-				adv += tw * hScale
-			}
+			adv := codeAdvance(s, i, step, hScale)
 			tm[4] += adv * tm[0]
 			tm[5] += adv * tm[1]
-			nx, ny := transformPos(tm[4], tm[5])
-			if rec != nil {
-				glyphs = append(glyphs, glyph{
-					code: raw[i : i+step],
-					x0:   x, y0: y,
-					x1: nx, y1: ny,
-					adv: adv,
-				})
-			}
+			nx, ny := applyMatrix6(ctm, tm[4], tm[5])
+			glyphs = append(glyphs, glyph{
+				code: raw[i : i+step],
+				x0:   x, y0: y,
+				x1: nx, y1: ny,
+				adv: adv,
+			})
 			x, y = nx, ny
 		}
 		return glyphs
@@ -364,7 +379,7 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 		// The pen advances over every code, whether or not the font gives it a
 		// Unicode meaning: a string that decodes to nothing still occupies its
 		// width, and still has glyphs redaction may need to remove.
-		x, y := transformPos(tm[4], tm[5])
+		x, y := applyMatrix6(ctm, tm[4], tm[5])
 		decoded := decodeString(s)
 		rec.show(decoded, fontSize, advanceTextMatrix(s))
 		if decoded == "" {
@@ -377,7 +392,7 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 				return
 			}
 		}
-		endX, _ := transformPos(tm[4], tm[5])
+		endX, _ := applyMatrix6(ctm, tm[4], tm[5])
 		spans = append(spans, TextSpan{
 			X:        x,
 			Y:        y,
@@ -388,18 +403,16 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 		})
 	}
 
-	// Byte offset of the first operand since the last operator, so a recorded
-	// show operation can name the whole range it occupies.
+	// Byte offset of the first operand since the last operator: an operator
+	// consumes everything from there, which is the range a recorded show
+	// operation has to replace. Only operand tokens skip the bottom of the
+	// loop, so the position left after one operator starts the next one.
 	operandStart := 0
 
 	for {
-		tokStart := lex.Pos()
 		tok, err := lex.NextToken()
 		if err != nil || tok.Type == TEOF {
 			break
-		}
-		if len(stack) == 0 && tok.Type != TKeyword {
-			operandStart = tokStart
 		}
 
 		// If it's an operand, push to stack.
@@ -614,10 +627,7 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 								rec.leave(outer)
 								// Transform form spans through the form's CTM.
 								for i := range formSpans {
-									x := formCTM[0]*formSpans[i].X + formCTM[2]*formSpans[i].Y + formCTM[4]
-									y := formCTM[1]*formSpans[i].X + formCTM[3]*formSpans[i].Y + formCTM[5]
-									formSpans[i].X = x
-									formSpans[i].Y = y
+									formSpans[i].X, formSpans[i].Y = applyMatrix6(formCTM, formSpans[i].X, formSpans[i].Y)
 								}
 								spans = append(spans, formSpans...)
 							}
@@ -652,7 +662,7 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 				top := markedStack[len(markedStack)-1]
 				markedStack = markedStack[:len(markedStack)-1]
 				if top.hasActual && top.actualText != "" {
-					x, y := transformPos(top.startX, top.startY)
+					x, y := applyMatrix6(ctm, top.startX, top.startY)
 					spans = append(spans, TextSpan{
 						X:        x,
 						Y:        y,
@@ -670,6 +680,7 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 
 		rec.finish(op, operandStart, lex.Pos(), fontSize, tc, tw, th)
 		stack = stack[:0] // clear stack after each operator
+		operandStart = lex.Pos()
 	}
 
 	return spans
@@ -767,6 +778,41 @@ func skipInlineImage(lex *Lexer) {
 	}
 }
 
+// lineYTolerance is how far two baselines may sit apart and still be read as
+// one line.
+const lineYTolerance = 1.0
+
+// spanGap is the whitespace that stands in for the horizontal distance between
+// two pieces of text on one line. PDF draws words where it wants them and says
+// nothing about the spaces between; the gap is all there is to go on.
+//
+// Both the reader's view of a page and redaction's view of it are assembled
+// with this rule. They have to agree: removal locates text by searching what
+// the page says, so a space one of them inserts and the other does not is a
+// query that Page.Search answers and RemoveText silently does not.
+func spanGap(gap, fontSize float64) string {
+	spaceWidth := math.Max(fontSize*0.25, 2)
+	if gap > spaceWidth {
+		// Proportional, so tabulated columns keep their shape, capped so a
+		// wide margin does not become a wall of spaces.
+		const spaces = "          "
+		return spaces[:min(int(gap/spaceWidth), len(spaces))]
+	}
+	if gap > 0.5 {
+		return " "
+	}
+	return ""
+}
+
+// spanEnd is where a piece of text leaves the pen, estimated from its width
+// when it did not record an end of its own.
+func spanEnd(startX, endX, fontSize float64, text string) float64 {
+	if endX > startX {
+		return endX
+	}
+	return startX + float64(utf8.RuneCountInString(text))*fontSize*0.5
+}
+
 // BuildLines groups text spans into lines and reconstructs text.
 func BuildLines(spans []TextSpan) []TextLine {
 	if len(spans) == 0 {
@@ -775,7 +821,6 @@ func BuildLines(spans []TextSpan) []TextLine {
 
 	// Group spans by Y coordinate (with tolerance).
 	// Keep tight to avoid merging overlapping text layers at similar Y positions.
-	const yTolerance = 1.0
 	sort.Slice(spans, func(i, j int) bool {
 		return spans[i].Y > spans[j].Y // top to bottom
 	})
@@ -784,7 +829,7 @@ func BuildLines(spans []TextSpan) []TextLine {
 	var currentLine *TextLine
 
 	for _, span := range spans {
-		if currentLine == nil || math.Abs(span.Y-currentLine.Y) > yTolerance {
+		if currentLine == nil || math.Abs(span.Y-currentLine.Y) > lineYTolerance {
 			lines = append(lines, TextLine{Y: span.Y})
 			currentLine = &lines[len(lines)-1]
 		}
@@ -799,32 +844,10 @@ func BuildLines(spans []TextSpan) []TextLine {
 		prevEnd := -1.0
 		for _, span := range lines[i].Spans {
 			if prevEnd >= 0 {
-				gap := span.X - prevEnd
-				spaceWidth := span.FontSize * 0.25
-				if spaceWidth < 2 {
-					spaceWidth = 2
-				}
-				if gap > spaceWidth {
-					// Insert proportional spaces.
-					nSpaces := int(gap / spaceWidth)
-					if nSpaces < 1 {
-						nSpaces = 1
-					}
-					if nSpaces > 10 {
-						nSpaces = 10 // cap at reasonable tab-like spacing
-					}
-					buf.WriteString(strings.Repeat(" ", nSpaces))
-				} else if gap > 0.5 {
-					buf.WriteByte(' ')
-				}
+				buf.WriteString(spanGap(span.X-prevEnd, span.FontSize))
 			}
 			buf.WriteString(span.Text)
-			// Estimate where this span ends.
-			if span.EndX > span.X {
-				prevEnd = span.EndX
-			} else {
-				prevEnd = span.X + float64(len([]rune(span.Text)))*span.FontSize*0.5
-			}
+			prevEnd = spanEnd(span.X, span.EndX, span.FontSize, span.Text)
 		}
 		lines[i].Text = buf.String()
 	}

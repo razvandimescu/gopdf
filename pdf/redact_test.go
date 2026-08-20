@@ -30,6 +30,34 @@ func contentPDF(t *testing.T, content string) []byte {
 	})
 }
 
+// cmapPDF builds a one-page PDF whose /F1 carries a ToUnicode CMap with the
+// given beginbfchar body, so a code can be made to stand for any text at all.
+func cmapPDF(t *testing.T, bfchar, content string) []byte {
+	t.Helper()
+	return buildRawPDF(t, func(w *Writer, pagesRef Ref) Dict {
+		toUnicodeRef := w.AllocRef()
+		if err := w.WriteStream(toUnicodeRef, Dict{}, []byte(
+			"1 beginbfchar\n"+bfchar+"\nendbfchar\n")); err != nil {
+			t.Fatal(err)
+		}
+		fontRef := w.AllocRef()
+		w.WriteObject(fontRef, Dict{
+			"Type": Name("Font"), "Subtype": Name("Type1"), "BaseFont": Name("Helvetica"),
+			"ToUnicode": toUnicodeRef,
+		})
+		contentRef := w.AllocRef()
+		if err := w.WriteStream(contentRef, Dict{}, []byte(content)); err != nil {
+			t.Fatal(err)
+		}
+		return Dict{
+			"Type": Name("Page"), "Parent": pagesRef,
+			"MediaBox":  Array{0, 0, 612, 792},
+			"Resources": Dict{"Font": Dict{Name("F1"): fontRef}},
+			"Contents":  contentRef,
+		}
+	})
+}
+
 // removeText applies query removal to data and returns the resulting document.
 func removeText(t *testing.T, data []byte, query string) *Document {
 	t.Helper()
@@ -402,28 +430,7 @@ func TestKernAdvancesThroughTheTextMatrix(t *testing.T) {
 // match is in characters and the deletion is in codes, so the two have to be
 // tied together even when they do not correspond one to one.
 func TestRemoveTextMapsCharactersBackToCodes(t *testing.T) {
-	data := buildRawPDF(t, func(w *Writer, pagesRef Ref) Dict {
-		toUnicodeRef := w.AllocRef()
-		w.WriteStream(toUnicodeRef, Dict{}, []byte(
-			"1 beginbfchar\n<01> <00660066>\nendbfchar\n"))
-
-		fontRef := w.AllocRef()
-		w.WriteObject(fontRef, Dict{
-			"Type": Name("Font"), "Subtype": Name("Type1"), "BaseFont": Name("Helvetica"),
-			"ToUnicode": toUnicodeRef,
-		})
-
-		contentRef := w.AllocRef()
-		w.WriteStream(contentRef, Dict{}, []byte(
-			"BT /F1 12 Tf 72 750 Td (o) Tj <01> Tj (ice) Tj ET"))
-
-		return Dict{
-			"Type": Name("Page"), "Parent": pagesRef,
-			"MediaBox":  Array{0, 0, 612, 792},
-			"Resources": Dict{"Font": Dict{Name("F1"): fontRef}},
-			"Contents":  contentRef,
-		}
-	})
+	data := cmapPDF(t, "<01> <00660066>", "BT /F1 12 Tf 72 750 Td (o) Tj <01> Tj (ice) Tj ET")
 
 	original, err := OpenBytes(data)
 	if err != nil {
@@ -647,27 +654,7 @@ func TestRemoveTextIgnoresEmptyShowOperators(t *testing.T) {
 // character at a time. Marking half of a code would leave a byte of it in the
 // stream and write a truncated code back.
 func TestRemoveTextTakesWholeCodes(t *testing.T) {
-	data := buildRawPDF(t, func(w *Writer, pagesRef Ref) Dict {
-		toUnicodeRef := w.AllocRef()
-		w.WriteStream(toUnicodeRef, Dict{}, []byte(
-			"1 beginbfchar\n<4142> <0058>\nendbfchar\n"))
-
-		fontRef := w.AllocRef()
-		w.WriteObject(fontRef, Dict{
-			"Type": Name("Font"), "Subtype": Name("Type1"), "BaseFont": Name("Helvetica"),
-			"ToUnicode": toUnicodeRef,
-		})
-
-		contentRef := w.AllocRef()
-		w.WriteStream(contentRef, Dict{}, []byte("BT /F1 12 Tf 72 750 Td (AB) Tj ET"))
-
-		return Dict{
-			"Type": Name("Page"), "Parent": pagesRef,
-			"MediaBox":  Array{0, 0, 612, 792},
-			"Resources": Dict{"Font": Dict{Name("F1"): fontRef}},
-			"Contents":  contentRef,
-		}
-	})
+	data := cmapPDF(t, "<4142> <0058>", "BT /F1 12 Tf 72 750 Td (AB) Tj ET")
 
 	original, err := OpenBytes(data)
 	if err != nil {

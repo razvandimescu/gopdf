@@ -2,6 +2,7 @@ package pdf
 
 import (
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"strings"
@@ -357,9 +358,7 @@ func (e *Editor) Apply() ([]byte, error) {
 		stripped, textRemoved := strippedPages[i]
 
 		if len(overlays) == 0 && len(redactions) == 0 && len(images) == 0 && !textRemoved {
-			copiedObj := ctx.copyObject(pageDict)
-			copiedPage := copiedObj.(Dict)
-			delete(copiedPage, "Parent")
+			copiedPage := ctx.copyObject(pageDict).(Dict)
 			copiedPage["Parent"] = pagesRef
 
 			pageRef := w.AllocRef()
@@ -454,12 +453,9 @@ func (e *Editor) Apply() ([]byte, error) {
 // page but present in the file and holding every glyph the rewrite removed. A
 // redaction one xref entry away from the original is not a redaction.
 func copyPageForRewrite(ctx *copyContext, page Dict) Dict {
-	src := make(Dict, len(page))
-	for key, value := range page {
-		if key != "Contents" && key != "Parent" {
-			src[key] = value
-		}
-	}
+	src := maps.Clone(page)
+	delete(src, "Contents")
+	delete(src, "Parent")
 	return ctx.copyObject(src).(Dict)
 }
 

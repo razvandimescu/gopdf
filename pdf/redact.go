@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // glyph is one character code as it was drawn: the pen positions either side of
@@ -15,7 +16,7 @@ type glyph struct {
 	x0, y0 float64 // pen before the glyph
 	x1, y1 float64 // pen after it
 	adv    float64 // text-space advance, including character/word spacing and Tz
-	seq    int     // position in the page's drawing order
+	drop   bool    // marked for removal
 }
 
 // showItem is one element of a text-showing operation: either the glyphs of a
@@ -26,12 +27,12 @@ type showItem struct {
 	isKern bool
 }
 
-// textRun is one shown string: what it says, and which glyphs said it. The
-// glyphs are r.seq numbered first..first+n-1, so a match in the assembled page
-// text names the codes to delete without going through a rectangle.
+// textRun is one shown string: what it says, and the glyphs that said it. The
+// glyphs are the operation's own — the same backing array, not a copy — so
+// marking one here is marking the code that will be rewritten.
 type textRun struct {
 	text           string
-	first, n       int
+	glyphs         []glyph
 	fontSize       float64
 	startX, startY float64
 	endX           float64
@@ -44,14 +45,9 @@ type textRun struct {
 type showOp struct {
 	start, end int
 	op         string
-	fontSize   float64
-	tc, tw, th float64
+	tc, tw     float64
+	scale      float64 // font size times horizontal scaling: TJ's unit
 	items      []showItem
-
-	// Which glyphs of which items are to go, resolved per page. A stream can
-	// be drawn by more than one page, and each has its own say before the one
-	// set of bytes behind it is rewritten.
-	dropped [][]bool
 }
 
 // showFrame is the stream being recorded and the transform from its own
@@ -59,8 +55,9 @@ type showOp struct {
 // glyphs it shows have to be carried out to the page before a rectangle
 // aimed at the page can be compared with them.
 type showFrame struct {
-	stream int
-	ctm    [6]float64
+	stream     int
+	ctm        [6]float64
+	recordable bool // false for a form no substitution can reach on write
 }
 
 // showRecorder collects the text-showing operations of a content stream as the
@@ -79,14 +76,13 @@ type showRecorder struct {
 	cur     showFrame
 	pending []showItem
 	runs    []textRun
-	nglyphs int
 }
 
 func newShowRecorder(content []byte) *showRecorder {
 	return &showRecorder{
 		streams: make(map[int][]showOp),
 		data:    map[int][]byte{0: content},
-		cur:     showFrame{ctm: [6]float64{1, 0, 0, 1, 0, 0}},
+		cur:     showFrame{ctm: [6]float64{1, 0, 0, 1, 0, 0}, recordable: true},
 	}
 }
 
@@ -97,18 +93,23 @@ func (r *showRecorder) show(text string, fontSize float64, glyphs []glyph) {
 	if r == nil {
 		return
 	}
-	run := textRun{text: text, first: r.nglyphs, n: len(glyphs), fontSize: fontSize}
 	for i := range glyphs {
-		glyphs[i].seq = r.nglyphs
 		glyphs[i].x0, glyphs[i].y0 = applyMatrix6(r.cur.ctm, glyphs[i].x0, glyphs[i].y0)
 		glyphs[i].x1, glyphs[i].y1 = applyMatrix6(r.cur.ctm, glyphs[i].x1, glyphs[i].y1)
-		r.nglyphs++
 	}
-	if len(glyphs) > 0 {
-		run.startX, run.startY = glyphs[0].x0, glyphs[0].y0
-		run.endX = glyphs[len(glyphs)-1].x1
+	// Only what the reader's view of the page contains takes part in
+	// assembling it. A run of no glyphs has no position to be read in; a run
+	// that decodes to nothing draws but contributes no text, and BuildLines
+	// never sees it — no decoder here produces one today, but the spec allows
+	// a code to stand for the empty string, and the two views must not drift
+	// apart if one ever starts to.
+	if text != "" && len(glyphs) > 0 {
+		r.runs = append(r.runs, textRun{
+			text: text, glyphs: glyphs, fontSize: fontSize,
+			startX: glyphs[0].x0, startY: glyphs[0].y0,
+			endX: glyphs[len(glyphs)-1].x1,
+		})
 	}
-	r.runs = append(r.runs, run)
 	r.pending = append(r.pending, showItem{glyphs: glyphs})
 }
 
@@ -127,12 +128,12 @@ func (r *showRecorder) finish(op string, start, end int, fontSize, tc, tw, th fl
 	}
 	items := r.pending
 	r.pending = nil
-	if r.cur.stream < 0 {
+	if !r.cur.recordable {
 		return
 	}
 	r.streams[r.cur.stream] = append(r.streams[r.cur.stream], showOp{
 		start: start, end: end, op: op,
-		fontSize: fontSize, tc: tc, tw: tw, th: th,
+		tc: tc, tw: tw, scale: fontSize * th / 100,
 		items: items,
 	})
 }
@@ -148,10 +149,10 @@ func (r *showRecorder) enter(ref any, data []byte, ctm [6]float64) showFrame {
 	}
 	outer := r.cur
 	if n, ok := ref.(Ref); ok {
-		r.cur = showFrame{stream: n.Num, ctm: matMul6(ctm, outer.ctm)}
+		r.cur = showFrame{stream: n.Num, ctm: matMul6(ctm, outer.ctm), recordable: true}
 		r.data[n.Num] = data
 	} else {
-		r.cur = showFrame{stream: -1}
+		r.cur = showFrame{}
 	}
 	return outer
 }
@@ -163,8 +164,8 @@ func (r *showRecorder) leave(outer showFrame) {
 	r.cur = outer
 }
 
-// matchQueries finds every occurrence of every query in the text the page
-// draws, and returns the glyphs that spelled them.
+// matchQueries marks the glyphs that spelled any occurrence of any query in
+// the text the page draws.
 //
 // Matching against the glyphs rather than against a rectangle is what makes
 // removal exact. Page.Search reports where text is by dividing a span's width
@@ -172,9 +173,11 @@ func (r *showRecorder) leave(outer showFrame) {
 // a rectangle built that way can be off by a character or more, and a
 // redaction that removes the wrong character while leaving the right one is
 // worse than none.
-func (r *showRecorder) matchQueries(queries []string) map[int]bool {
+func (r *showRecorder) matchQueries(queries []string) {
+	if len(queries) == 0 {
+		return
+	}
 	text, glyphAt := r.assembleText()
-	dropped := make(map[int]bool)
 	for _, query := range queries {
 		if query == "" {
 			continue
@@ -186,29 +189,25 @@ func (r *showRecorder) matchQueries(queries []string) map[int]bool {
 			}
 			i += at
 			for b := i; b < i+len(query); b++ {
-				for g := glyphAt[b].from; g < glyphAt[b].to; g++ {
-					dropped[g] = true
+				for g := range glyphAt[b] {
+					glyphAt[b][g].drop = true
 				}
 			}
 			at = i + len(query)
 		}
 	}
-	return dropped
 }
 
-// glyphRange is the glyphs one character was drawn by — usually a single one.
-type glyphRange struct{ from, to int }
-
 // assembleText joins what the page draws into one string, alongside the glyphs
-// each byte of it came from (an empty range for the separators between runs).
-// The reading order and the spacing rules are BuildLines': a query that
-// Page.Search can find has to be findable here too, or removal would quietly
-// miss text that redaction covers.
-func (r *showRecorder) assembleText() (string, []glyphRange) {
+// each byte of it came from (none, for the whitespace between runs). The
+// reading order and the spacing are the reader's, from BuildLines: a query
+// that Page.Search can find has to be findable here too, or removal would
+// quietly miss text that redaction covers.
+func (r *showRecorder) assembleText() (string, [][]glyph) {
 	var text strings.Builder
-	glyphAt := make([]glyphRange, 0, r.nglyphs)
+	glyphAt := make([][]glyph, 0, 64)
 
-	write := func(s string, glyphs glyphRange) {
+	spell := func(s string, glyphs []glyph) {
 		text.WriteString(s)
 		for range len(s) {
 			glyphAt = append(glyphAt, glyphs)
@@ -219,11 +218,13 @@ func (r *showRecorder) assembleText() (string, []glyphRange) {
 	for i, index := range order {
 		run := r.runs[index]
 		if i > 0 {
-			write(runSeparator(r.runs[order[i-1]], run), glyphRange{})
+			spell(runSeparator(r.runs[order[i-1]], run), nil)
 		}
-		runes := []rune(run.text)
-		for j := range runes {
-			write(string(runes[j]), run.glyphsFor(j, len(runes)))
+		runes := utf8.RuneCountInString(run.text)
+		for at, j := 0, 0; at < len(run.text); j++ {
+			_, size := utf8.DecodeRuneInString(run.text[at:])
+			spell(run.text[at:at+size], run.glyphsFor(j, runes))
+			at += size
 		}
 	}
 	return text.String(), glyphAt
@@ -233,25 +234,22 @@ func (r *showRecorder) assembleText() (string, []glyphRange) {
 // the page by baseline, then left to right within each line. Generators draw
 // out of that order often enough — a column at a time, or a word in pieces to
 // kern it — and Page.Search reports what BuildLines assembled, so removal has
-// to assemble the same thing. Runs that drew no glyphs are left out; they
-// carry no position, and would otherwise read as a jump to the page origin.
+// to assemble the same thing.
 func (r *showRecorder) readingOrder() []int {
-	order := make([]int, 0, len(r.runs))
-	for i, run := range r.runs {
-		if run.n > 0 {
-			order = append(order, i)
-		}
+	order := make([]int, len(r.runs))
+	for i := range order {
+		order[i] = i
 	}
 	sort.SliceStable(order, func(a, b int) bool {
 		return r.runs[order[a]].startY > r.runs[order[b]].startY
 	})
 
-	// Same tolerance BuildLines groups by, and measured the same way: against
-	// the first run of the line rather than the previous one, so a drifting
-	// baseline does not walk a line apart one run at a time.
+	// Grouped by the tolerance BuildLines groups by, and measured the same
+	// way: against the first run of the line rather than the previous one, so
+	// a drifting baseline does not walk a line apart one run at a time.
 	line := 0
 	for i := 1; i <= len(order); i++ {
-		if i < len(order) && math.Abs(r.runs[order[i]].startY-r.runs[order[line]].startY) <= 1.0 {
+		if i < len(order) && math.Abs(r.runs[order[i]].startY-r.runs[order[line]].startY) <= lineYTolerance {
 			continue
 		}
 		within := order[line:i]
@@ -269,63 +267,45 @@ func (r *showRecorder) readingOrder() []int {
 // whose codes are read two bytes at a time while its text decodes one — the
 // range covers every code the character could have come from, so a match takes
 // all of them rather than half.
-func (r textRun) glyphsFor(j, runeCount int) glyphRange {
-	from := r.first + j*r.n/runeCount
-	to := r.first + (j+1)*r.n/runeCount
+func (r textRun) glyphsFor(j, runeCount int) []glyph {
+	n := len(r.glyphs)
+	from, to := j*n/runeCount, (j+1)*n/runeCount
 	if to <= from {
 		to = from + 1
 	}
-	return glyphRange{from: from, to: to}
+	return r.glyphs[from:to]
 }
 
-// runSeparator is the whitespace BuildLines would put between two runs: a
-// newline across baselines, and spaces proportional to the gap along one.
+// runSeparator is the whitespace BuildLines puts between two runs: a newline
+// across baselines, and along one the same gap rule the reader's view uses.
 func runSeparator(prev, cur textRun) string {
-	if math.Abs(cur.startY-prev.startY) > 1.0 {
+	if math.Abs(cur.startY-prev.startY) > lineYTolerance {
 		return "\n"
 	}
-	gap := cur.startX - prev.endX
-	spaceWidth := math.Max(cur.fontSize*0.25, 2)
-	if gap > spaceWidth {
-		return strings.Repeat(" ", min(int(gap/spaceWidth), 10))
-	}
-	if gap > 0.5 {
-		return " "
-	}
-	return ""
+	end := spanEnd(prev.startX, prev.endX, prev.fontSize, prev.text)
+	return spanGap(cur.startX-end, cur.fontSize)
 }
 
-// mark resolves which glyphs are to go, recording the decision on the
-// operations themselves. Deciding and rewriting are separate steps because a
-// Form XObject can be drawn by several pages: each page marks it, and the one
-// set of bytes behind it is rewritten once, after all of them have.
+// mark marks the glyphs a rectangle takes. Marking and rewriting are separate
+// steps because a Form XObject can be drawn by several pages: each page marks
+// it, and the one set of bytes behind it is rewritten once, after all of them
+// have.
 func (r *showRecorder) mark(drop func(glyph) bool) {
 	for _, ops := range r.streams {
-		for i := range ops {
-			ops[i].mark(drop)
-		}
-	}
-}
-
-func (o *showOp) mark(drop func(glyph) bool) {
-	for i, item := range o.items {
-		for g := range item.glyphs {
-			if !drop(item.glyphs[g]) {
-				continue
+		for _, op := range ops {
+			for _, item := range op.items {
+				for i := range item.glyphs {
+					if drop(item.glyphs[i]) {
+						item.glyphs[i].drop = true
+					}
+				}
 			}
-			if o.dropped == nil {
-				o.dropped = make([][]bool, len(o.items))
-			}
-			if o.dropped[i] == nil {
-				o.dropped[i] = make([]bool, len(item.glyphs))
-			}
-			o.dropped[i][g] = true
 		}
 	}
 }
 
 func rewriteShowOps(content []byte, ops []showOp) ([]byte, bool) {
-	sort.SliceStable(ops, func(i, j int) bool { return ops[i].start < ops[j].start })
+	sort.Slice(ops, func(i, j int) bool { return ops[i].start < ops[j].start })
 
 	var out []byte
 	copied, changed := 0, false
@@ -342,15 +322,17 @@ func rewriteShowOps(content []byte, ops []showOp) ([]byte, bool) {
 		group := ops[i:j]
 		i = j
 
-		// Ranges are lexical and cannot overlap; the check is here so that a
-		// stream which somehow produced overlapping ones truncates a removal
-		// rather than slicing backwards.
+		// Ranges are lexical and cannot overlap; the check keeps a stream that
+		// somehow produced overlapping ones from slicing backwards.
 		if group[0].start < copied {
 			continue
 		}
 		replacement, ok := rewriteShowOp(group)
 		if !ok {
 			continue
+		}
+		if out == nil {
+			out = make([]byte, 0, len(content))
 		}
 		out = append(out, content[copied:group[0].start]...)
 		out = append(out, replacement...)
@@ -371,23 +353,25 @@ func rewriteShowOps(content []byte, ops []showOp) ([]byte, bool) {
 func rewriteShowOp(group []showOp) (string, bool) {
 	op := group[0]
 
-	dropped := make([][]bool, len(op.items))
-	any := false
-	for _, o := range group {
-		for i, item := range o.dropped {
-			if i >= len(dropped) {
+	// Every drawing of these bytes read the same codes, so the others' marks
+	// gather onto the first's glyphs.
+	for _, other := range group[1:] {
+		for i := range other.items {
+			if i >= len(op.items) {
 				break
 			}
-			for g, gone := range item {
-				if !gone {
-					continue
+			for g := range other.items[i].glyphs {
+				if other.items[i].glyphs[g].drop && g < len(op.items[i].glyphs) {
+					op.items[i].glyphs[g].drop = true
 				}
-				if dropped[i] == nil {
-					dropped[i] = make([]bool, len(item))
-				}
-				dropped[i][g] = true
-				any = true
 			}
+		}
+	}
+
+	any := false
+	for _, item := range op.items {
+		for _, g := range item.glyphs {
+			any = any || g.drop
 		}
 	}
 	if !any {
@@ -401,16 +385,20 @@ func rewriteShowOp(group []showOp) (string, bool) {
 		b.WriteString("T* ")
 	case "\"":
 		// The operands this replaces were the word and character spacing.
-		b.WriteString(formatOperand(op.tw) + " Tw " + formatOperand(op.tc) + " Tc T* ")
+		b.WriteString(formatOperand(op.tw))
+		b.WriteString(" Tw ")
+		b.WriteString(formatOperand(op.tc))
+		b.WriteString(" Tc T* ")
 	}
 
 	b.WriteString("[")
-	for i, item := range op.items {
+	for _, item := range op.items {
 		if item.isKern {
-			b.WriteString(formatOperand(item.kern) + " ")
+			b.WriteString(formatOperand(item.kern))
+			b.WriteByte(' ')
 			continue
 		}
-		writeSurvivingGlyphs(&b, item.glyphs, dropped[i], op.fontSize*op.th/100)
+		writeSurvivingGlyphs(&b, item.glyphs, op.scale)
 	}
 	b.WriteString("] TJ")
 	return b.String(), true
@@ -422,34 +410,39 @@ func rewriteShowOp(group []showOp) (string, bool) {
 // scaling are applied — the same conversion the extractor's kern handling
 // inverts. A zero scale leaves no way to express the gap, so the glyphs are
 // dropped without compensation and the rest of the operation closes up.
-func writeSurvivingGlyphs(b *strings.Builder, glyphs []glyph, dropped []bool, scale float64) {
+func writeSurvivingGlyphs(b *strings.Builder, glyphs []glyph, scale float64) {
 	var gap float64
-	run := make([]byte, 0, len(glyphs))
+	open := false
 
-	flushRun := func() {
-		if len(run) > 0 {
-			b.WriteString("<" + hexEncode(run) + "> ")
-			run = run[:0]
+	closeRun := func() {
+		if open {
+			b.WriteString("> ")
+			open = false
 		}
 	}
-	flushGap := func() {
+	closeGap := func() {
 		if gap != 0 && scale != 0 {
-			b.WriteString(formatOperand(-gap*1000/scale) + " ")
+			b.WriteString(formatOperand(-gap * 1000 / scale))
+			b.WriteByte(' ')
 		}
 		gap = 0
 	}
 
-	for i, g := range glyphs {
-		if i < len(dropped) && dropped[i] {
-			flushRun()
+	for _, g := range glyphs {
+		if g.drop {
+			closeRun()
 			gap += g.adv
 			continue
 		}
-		flushGap()
-		run = append(run, g.code...)
+		closeGap()
+		if !open {
+			b.WriteByte('<')
+			open = true
+		}
+		b.WriteString(hexEncode(g.code))
 	}
-	flushRun()
-	flushGap()
+	closeRun()
+	closeGap()
 }
 
 // formatOperand renders a number for a content stream. Exponent notation is not
@@ -575,15 +568,15 @@ func markPage(r *Reader, page Dict, queries []string, rects []Rect) (*showRecord
 	rec := newShowRecorder(content)
 	extractTextWithResources(content, r.PageFonts(page), r, r.PageResources(page), 0, rec)
 
-	dropped := rec.matchQueries(queries)
+	rec.matchQueries(queries)
+	if len(rects) == 0 {
+		return rec, nil
+	}
 
 	// Glyph positions are in unrotated user space, where content is drawn;
 	// the rectangles are in displayed space, where the reader saw the text.
 	rotM, rotated := pageRotationMatrix(page)
 	rec.mark(func(g glyph) bool {
-		if dropped[g.seq] {
-			return true
-		}
 		x, y := (g.x0+g.x1)/2, (g.y0+g.y1)/2
 		if rotated {
 			x, y = applyMatrix6(rotM, x, y)

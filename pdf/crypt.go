@@ -16,7 +16,7 @@ import (
 // password-free entry points return it only when the empty user password fails,
 // so files encrypted with no user password (common for emailed statements) open
 // through OpenFile and OpenBytes as usual.
-var ErrEncrypted = errors.New("pdf: file is encrypted, use OpenFileWithPassword")
+var ErrEncrypted = errors.New("pdf: file is encrypted, supply a password with pdf.WithPassword")
 
 // ErrWrongPassword reports that the supplied password matched neither the user
 // nor the owner password.
@@ -106,12 +106,18 @@ func (r *Reader) setupEncryption(password string) error {
 	case 4, 5:
 		stmF, _ := enc.Name("StmF")
 		strF, _ := enc.Name("StrF")
-		var n int
-		info.streams, n = r.cryptFilter(enc, stmF)
-		if n > 0 {
-			keyLen = n
+		var stmLen, strLen int
+		info.streams, stmLen = r.cryptFilter(enc, stmF)
+		info.strings, strLen = r.cryptFilter(enc, strF)
+		// Both filters share one file key, so its length is the longer of the
+		// two. Taking only the stream filter's would give a file that encrypts
+		// just its strings — /StmF /Identity — the 40-bit default instead.
+		if strLen > stmLen {
+			stmLen = strLen
 		}
-		info.strings, _ = r.cryptFilter(enc, strF)
+		if stmLen > 0 {
+			keyLen = stmLen
+		}
 	default:
 		return fmt.Errorf("%w: /V %d", ErrUnsupportedEncryption, v)
 	}
@@ -166,11 +172,11 @@ func (r *Reader) cryptFilter(enc Dict, name Name) (cryptMethod, int) {
 // deriveKey validates the password and returns the file encryption key, trying
 // the user password first and then the owner password.
 func (r *Reader) deriveKey(enc Dict, rev int, encryptMetadata bool, password string, keyLen int) ([]byte, error) {
-	o := []byte(dictString(enc, "O"))
-	u := []byte(dictString(enc, "U"))
+	o := []byte(r.dictString(enc, "O"))
+	u := []byte(r.dictString(enc, "U"))
 
 	if rev >= 5 {
-		return deriveKeyR5R6(enc, rev, password, o, u)
+		return r.deriveKeyR5R6(enc, rev, password, o, u)
 	}
 
 	perm, _ := enc.Int("P")
@@ -278,7 +284,7 @@ func recoverUserPassword(password string, o []byte, rev, keyLen int) []byte {
 }
 
 // deriveKeyR5R6 implements Algorithm 2.A for AES-256 (revisions 5 and 6).
-func deriveKeyR5R6(enc Dict, rev int, password string, o, u []byte) ([]byte, error) {
+func (r *Reader) deriveKeyR5R6(enc Dict, rev int, password string, o, u []byte) ([]byte, error) {
 	if len(u) < 48 || len(o) < 48 {
 		return nil, fmt.Errorf("pdf: /U or /O too short for R%d", rev)
 	}
@@ -290,12 +296,12 @@ func deriveKeyR5R6(enc Dict, rev int, password string, o, u []byte) ([]byte, err
 	// User password: validation salt is U[32:40], key salt U[40:48].
 	if bytes.Equal(hash2B(pw, u[32:40], nil, rev), u[:32]) {
 		ikey := hash2B(pw, u[40:48], nil, rev)
-		return unwrapFileKey(ikey, []byte(dictString(enc, "UE")))
+		return unwrapFileKey(ikey, []byte(r.dictString(enc, "UE")))
 	}
 	// Owner password: salts are in /O, and the full 48-byte /U is mixed in.
 	if bytes.Equal(hash2B(pw, o[32:40], u[:48], rev), o[:32]) {
 		ikey := hash2B(pw, o[40:48], u[:48], rev)
-		return unwrapFileKey(ikey, []byte(dictString(enc, "OE")))
+		return unwrapFileKey(ikey, []byte(r.dictString(enc, "OE")))
 	}
 	return nil, ErrWrongPassword
 }
@@ -469,8 +475,13 @@ func xorKey(key []byte, b byte) []byte {
 }
 
 // dictString reads a direct string value, tolerating its absence.
-func dictString(d Dict, key Name) string {
-	s, _ := d.String(key)
+// dictString returns a string entry, following an indirect reference. Producers
+// occasionally write /O, /U, /UE or /OE indirectly, and reading those as a bare
+// type assertion yields "" — which fails every password rather than saying why.
+// Resolving is safe here for the same reason setupEncryption relies on: r.crypt
+// is still nil, so nothing decrypts the value on the way back.
+func (r *Reader) dictString(d Dict, key Name) string {
+	s, _ := r.Resolve(d[key]).(string)
 	return s
 }
 
@@ -484,6 +495,13 @@ func (r *Reader) decryptStrings(obj any, num, gen int) any {
 	if r.crypt == nil || r.crypt.strings == cryptNone {
 		return obj
 	}
+	// Cross-reference streams are exempt whole, dictionary included — the same
+	// exemption streamIsEncrypted makes for their bodies.
+	if s, ok := obj.(*Stream); ok {
+		if t, _ := s.Dict.Name("Type"); t == "XRef" {
+			return obj
+		}
+	}
 	return r.crypt.walkStrings(obj, r.crypt.objectKey(num, gen, r.crypt.strings))
 }
 
@@ -495,7 +513,14 @@ func (e *encryptInfo) walkStrings(obj any, key []byte) any {
 		}
 		return string(e.apply(key, []byte(v), e.strings))
 	case Dict:
+		// A signature's /Contents is the blob signing the surrounding bytes, so
+		// the spec exempts it from encryption; decrypting it would corrupt the
+		// signature that merge and Rewrite then copy verbatim into their output.
+		_, signature := v["ByteRange"]
 		for k, item := range v {
+			if signature && k == "Contents" {
+				continue
+			}
 			v[k] = e.walkStrings(item, key)
 		}
 	case Array:
@@ -521,5 +546,35 @@ func (r *Reader) streamIsEncrypted(d Dict) bool {
 	case "Metadata":
 		return r.crypt.encryptMetadata
 	}
-	return true
+	return !r.identityCrypted(d)
+}
+
+// identityCrypted reports whether a stream opts out of encryption through an
+// explicit /Crypt filter naming /Identity — the spec-sanctioned way to leave one
+// stream in the clear. Without this the plaintext bytes are run through the
+// cipher into garbage, and nothing downstream notices: applyFilter treats /Crypt
+// as an unknown filter and passes it through.
+func (r *Reader) identityCrypted(d Dict) bool {
+	filters := filterNames(d)
+	i := 0
+	for ; i < len(filters); i++ {
+		if filters[i] == "Crypt" {
+			break
+		}
+	}
+	if i == len(filters) {
+		return false
+	}
+	var parms Dict
+	if arr, ok := r.ResolveArray(d["DecodeParms"]); ok {
+		if i < len(arr) {
+			parms, _ = r.ResolveDict(arr[i])
+		}
+	} else if i == 0 {
+		// A bare dictionary describes the first filter only.
+		parms, _ = r.ResolveDict(d["DecodeParms"])
+	}
+	// An absent /Name defaults to /Identity, so a bare /Crypt is an opt-out too.
+	name, ok := parms.Name("Name")
+	return !ok || name == "Identity"
 }

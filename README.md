@@ -205,9 +205,12 @@ if errors.Is(err, pdf.ErrWrongPassword) {
 }
 ```
 
-Either the user or the owner password is accepted. Everything downstream — text
-extraction, tables, search, merge — behaves exactly as it does for an
-unencrypted file.
+Either the user or the owner password is accepted. Everything reached through
+the opened document — text extraction, tables, search — behaves exactly as it
+does for an unencrypted file.
+
+`Merger` and `Editor` take their own entry points and do not yet accept a
+password, so they handle encrypted input only when its user password is empty.
 
 ### Merge PDFs
 

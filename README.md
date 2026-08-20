@@ -330,6 +330,12 @@ Text is deleted from the page content stream. That is a narrower claim than
 "secure redaction", and deliberately so: a document can carry the same string
 in half a dozen other places, and which of them matter is yours to judge.
 
+The claim is checked against real documents, not only ones this library wrote:
+the test suite redacts a corpus of PDFs from assorted producers and reads the
+output back with [MuPDF](https://mupdf.com) and [Poppler](https://poppler.freedesktop.org),
+which share no code with gopdf or with each other. Reading it back with gopdf
+alone would only show that its writer and its reader agree.
+
 Combine redaction and overlay to replace text:
 
 ```go

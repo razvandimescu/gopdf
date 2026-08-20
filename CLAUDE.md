@@ -15,6 +15,8 @@ go vet ./...                # static analysis
 
 Tests require PDF files in `example_out/` (git-ignored). Tests skip gracefully if PDFs are missing.
 
+The redaction integration tests additionally re-read their output with `mutool` and `pdftotext` when those are installed (`brew install mupdf-tools poppler`), and skip when they are not. That check is the only one in the suite that is not circular — every other test reads output back with the same code that wrote it.
+
 To regenerate the Adobe Glyph List: download `glyphlist.txt` to `/tmp/`, then `go run cmd/genglyphlist/main.go`.
 
 ## Architecture

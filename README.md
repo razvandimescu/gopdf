@@ -36,6 +36,7 @@ Table extraction in pure Go, under a permissive licence. [unipdf](https://github
 | **PDF merge** | Yes (size-constrained) | Yes | Yes | No | No |
 | **Text overlay** | Yes | Yes | Watermark | No | No |
 | **Visual redaction** | Yes | Yes | No | No | No |
+| **Text removal (true redaction)** | Yes | Yes | No | No | No |
 | **PDF creation** | Yes | Yes | Yes | No | Yes |
 | **Reads encrypted PDFs** | Yes | Yes | Yes | No | Yes |
 | **Dependencies** | 0 | Many | 0 | 0 | System lib |
@@ -58,6 +59,7 @@ Table extraction in pure Go, under a permissive licence. [unipdf](https://github
 - PDF merge with page selection and size constraints (fail/truncate/shrink with JPEG recompression)
 - Text overlay (Helvetica, configurable size and color)
 - Visual redaction (filled rectangles with configurable color)
+- Text removal: glyphs deleted from the content stream, not covered over
 - Reads encrypted PDFs (RC4 40/128-bit, AES-128, AES-256; user or owner password)
 - Image overlay / watermark (PNG/JPEG, rotation, opacity, transparent SMask)
 - PDF creation with text, rectangles, lines, and multiple fonts
@@ -295,11 +297,44 @@ result, err := ed.Apply()
 
 ### Redaction
 
+Two separate operations, because they answer different needs. `RedactText`
+draws a box over the text and leaves it in the file. `RemoveText` deletes the
+glyphs from the content stream, so extraction, search and copy/paste have
+nothing left to find:
+
 ```go
 ed := pdf.NewEditor(data)
-ed.RedactText("Confidential", 0, 0, 0) // black box over all matches
+ed.RemoveText("Confidential")          // the glyphs are gone from the output
+ed.RedactText("Confidential", 0, 0, 0) // and a black box marks where they were
 result, err := ed.Apply()
 ```
+
+Surviving text does not reflow: each removed run leaves behind a kerning number
+worth exactly the advance it had. `RemoveRegion(page, rect)` does the same for
+an area rather than a string.
+
+What removal reaches, and what it leaves alone:
+
+| Location | Removed |
+|---|---|
+| Page content stream glyphs | Yes |
+| Text inside Form XObjects | Yes |
+| Image XObjects | No |
+| Annotation text and appearance streams | No |
+| AcroForm / XFA field values | No |
+| Document information dictionary | No |
+| XMP metadata | No |
+| Embedded files | No |
+
+Text is deleted from the page content stream. That is a narrower claim than
+"secure redaction", and deliberately so: a document can carry the same string
+in half a dozen other places, and which of them matter is yours to judge.
+
+The claim is checked against real documents, not only ones this library wrote:
+the test suite redacts a corpus of PDFs from assorted producers and reads the
+output back with [MuPDF](https://mupdf.com) and [Poppler](https://poppler.freedesktop.org),
+which share no code with gopdf or with each other. Reading it back with gopdf
+alone would only show that its writer and its reader agree.
 
 Combine redaction and overlay to replace text:
 
@@ -416,7 +451,7 @@ type Rect struct {
 
 ## Limitations
 
-- **Redaction is visual only.** A rectangle is drawn over the text; the text stays in the content stream and remains recoverable by copy/paste or any PDF parser. Do not use it to remove sensitive data.
+- **Redaction covers two operations with different guarantees.** `RemoveText` / `RemoveRegion` delete the glyphs from the page content streams and the Form XObjects those pages draw — and nothing else in the file (see the table above). `RedactText` / `Redact` only draw a rectangle: the text stays in the content stream and remains recoverable by copy/paste or any PDF parser.
 - **Reading encrypted PDFs is supported; writing them is not.** Output from merge, rewrite, and creation is always unencrypted, so an encrypted input is effectively decrypted by any operation that writes it back out. Public-key (certificate) security handlers are not supported.
 - No image extraction
 - PDF creation supports standard 14 fonts only (no font embedding)
@@ -434,6 +469,7 @@ pdf/
   writer.go     PDF object serializer, xref generation, FlateDecode compression
   merge.go      PDF merge: size constraints (fail/truncate/shrink), stream dedup, JPEG recompression
   edit.go       Text search, text overlay, image overlay, visual redaction
+  redact.go     Text removal: glyph-level content stream rewriting
   image.go      Image decoding (PNG/JPEG) → RGB + grayscale SMask streams
   creator.go    PDF creation from scratch (text, shapes, fonts)
   lexer.go      PDF byte stream tokenizer

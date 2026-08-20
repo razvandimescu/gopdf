@@ -375,6 +375,27 @@ func TestBuildLines_Spacing(t *testing.T) {
 	}
 }
 
+// A span that recorded no end of its own is measured by its width instead, or
+// every span after it on the line reads as one long gap. Redaction shares this
+// estimate, so both views of a page have to agree on where text ends.
+func TestSpanEndFallsBackToWidth(t *testing.T) {
+	if got := spanEnd(10, 50, 12, "Hello"); got != 50 {
+		t.Errorf("with an end of its own: got %v, want 50", got)
+	}
+	// Five characters at half an em of 12pt: 10 + 5*6.
+	if got := spanEnd(10, 0, 12, "Hello"); got != 40 {
+		t.Errorf("without one: got %v, want 40", got)
+	}
+
+	spans := []TextSpan{
+		{X: 10, Y: 100, FontSize: 12, Text: "Hello"},
+		{X: 42, Y: 100, EndX: 80, FontSize: 12, Text: "World"},
+	}
+	if text := BuildLines(spans)[0].Text; text != "Hello World" {
+		t.Errorf("line = %q, want a single space between the words", text)
+	}
+}
+
 func TestFindTable_AutoDetectPath(t *testing.T) {
 	spans := []TextSpan{
 		{X: 50, Y: 700, EndX: 80, FontSize: 12, Text: "A"},

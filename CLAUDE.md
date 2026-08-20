@@ -15,6 +15,8 @@ go vet ./...                # static analysis
 
 Tests require PDF files in `example_out/` (git-ignored). Tests skip gracefully if PDFs are missing.
 
+The redaction integration tests additionally re-read their output with `mutool` and `pdftotext` when those are installed (`brew install mupdf-tools poppler`), and skip when they are not. That check is the only one in the suite that is not circular — every other test reads output back with the same code that wrote it.
+
 To regenerate the Adobe Glyph List: download `glyphlist.txt` to `/tmp/`, then `go run cmd/genglyphlist/main.go`.
 
 ## Architecture
@@ -31,6 +33,7 @@ Pipeline: **Lexer** (bytes→tokens) → **Parser** (tokens→objects) → **Rea
 - `writer.go` — PDF serializer: object writing, FlateDecode compression, xref table generation
 - `merge.go` — PDF merge: deep object graph copy with Ref remapping, page tree construction, `MergeFiles`/`MergeBytes`/`Merger` API
 - `rewrite.go` — Single-document rewrite: `Reader.Rewrite` replaces named stream objects in place (reusing `merge.go`'s copy machinery). Its consumer is [gopdf-xfa](https://github.com/razvandimescu/gopdf-xfa), an external module — keep it working against the public API only
+- `redact.go` — Text removal: rides along with `text.go`'s walk to record every show operation with its glyphs, then rewrites those operations so the matched codes are gone. Removed runs are paid for with a compensating `TJ` kern, so surviving text does not reflow. Form XObjects are replaced through `merge.go`'s `streamSubs`
 - `crypt.go` — Standard security handler: file-key derivation (RC4 40/128, AES-128, AES-256 R5/R6), user/owner password validation, per-object keys. Hooks into `readStreamData` (before the filter chain) and `parseObjectAt` (string walk)
 - `glyphlist.go` — Generated: 4200-entry Adobe Glyph List (glyph name→rune)
 - `stdfonts.go` — Width tables for standard 14 fonts (Courier, Helvetica, Times)
@@ -48,3 +51,4 @@ Key design decisions:
 - PDF files are git-ignored; test PDFs live in `example_out/`
 - Do not reference customer/client names in commit messages or public-facing text
 - Reading encrypted PDFs is supported (`crypt.go`); writing encrypted output is not
+- Removal (`redact.go`) deletes glyphs from page content streams and Form XObjects only — never claim more than that; the README table is the contract

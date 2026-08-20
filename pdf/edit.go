@@ -2,6 +2,7 @@ package pdf
 
 import (
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"strings"
@@ -210,6 +211,9 @@ type Editor struct {
 	overlays   []TextOverlay
 	redactions []RedactRegion
 	images     []ImageOverlay
+
+	removeQueries []string
+	removeRegions []removeRegion
 }
 
 // NewEditor creates an Editor from PDF bytes.
@@ -242,7 +246,7 @@ func (e *Editor) AddText(overlay TextOverlay) {
 //
 // This is visual redaction only. The underlying text remains in the content
 // stream and is still recoverable by copy/paste, text extraction, or any PDF
-// parser. Do not use it to remove sensitive data.
+// parser. To delete it instead, see [Editor.RemoveRegion].
 func (e *Editor) Redact(region RedactRegion) {
 	e.redactions = append(e.redactions, region)
 }
@@ -272,7 +276,8 @@ func (e *Editor) Document() (*Document, error) {
 // RedactText searches for text and covers all occurrences.
 //
 // This is visual redaction only — see [Editor.Redact]. The matched text is not
-// removed from the content stream and remains extractable.
+// removed from the content stream and remains extractable; [Editor.RemoveText]
+// deletes it, and the two are meant to be used together.
 func (e *Editor) RedactText(query string, r, g, b float64) error {
 	doc, err := e.Document()
 	if err != nil {
@@ -309,7 +314,6 @@ func (e *Editor) Apply() ([]byte, error) {
 	for _, im := range e.images {
 		pageImages[im.Page] = append(pageImages[im.Page], im)
 	}
-
 	w := NewWriter()
 	pagesRef := w.AllocRef()
 	catalogRef := w.AllocRef()
@@ -319,6 +323,16 @@ func (e *Editor) Apply() ([]byte, error) {
 		writer:   w,
 		refCache: make(map[int]Ref),
 	}
+
+	// Glyph removal runs before any object is copied: a Form XObject the text
+	// lived in is replaced on the way out, through the same substitution
+	// Reader.Rewrite uses, and copyObject caches each object the first time it
+	// sees it.
+	strippedPages, strippedForms, err := e.stripText(reader, pages)
+	if err != nil {
+		return nil, err
+	}
+	ctx.streamSubs = strippedForms
 
 	imageEntries := make(map[*Image]imageEntry)
 	for _, ov := range e.images {
@@ -341,11 +355,10 @@ func (e *Editor) Apply() ([]byte, error) {
 		overlays := pageOverlays[i]
 		redactions := pageRedactions[i]
 		images := pageImages[i]
+		stripped, textRemoved := strippedPages[i]
 
-		if len(overlays) == 0 && len(redactions) == 0 && len(images) == 0 {
-			copiedObj := ctx.copyObject(pageDict)
-			copiedPage := copiedObj.(Dict)
-			delete(copiedPage, "Parent")
+		if len(overlays) == 0 && len(redactions) == 0 && len(images) == 0 && !textRemoved {
+			copiedPage := ctx.copyObject(pageDict).(Dict)
 			copiedPage["Parent"] = pagesRef
 
 			pageRef := w.AllocRef()
@@ -354,9 +367,7 @@ func (e *Editor) Apply() ([]byte, error) {
 			continue
 		}
 
-		copiedObj := ctx.copyObject(pageDict)
-		copiedPage := copiedObj.(Dict)
-		delete(copiedPage, "Parent")
+		copiedPage := copyPageForRewrite(ctx, pageDict)
 		copiedPage["Parent"] = pagesRef
 
 		// ensureOverlayFont and the image-XObject / ExtGState registrations
@@ -365,7 +376,10 @@ func (e *Editor) Apply() ([]byte, error) {
 			inlineResourceDicts(ctx, copiedPage, pageDict)
 		}
 
-		existingContent, _ := reader.PageContent(pageDict)
+		existingContent := stripped
+		if !textRemoved {
+			existingContent, _ = reader.PageContent(pageDict)
+		}
 
 		var extra strings.Builder
 
@@ -430,6 +444,19 @@ func (e *Editor) Apply() ([]byte, error) {
 	})
 
 	return w.FinishWithID(catalogRef, reader.OriginalID())
+}
+
+// copyPageForRewrite copies a page dictionary for a page whose content stream
+// is about to be replaced, leaving the original stream uncopied.
+//
+// Copying it would write it as an object of its own, unreferenced by the new
+// page but present in the file and holding every glyph the rewrite removed. A
+// redaction one xref entry away from the original is not a redaction.
+func copyPageForRewrite(ctx *copyContext, page Dict) Dict {
+	src := maps.Clone(page)
+	delete(src, "Contents")
+	delete(src, "Parent")
+	return ctx.copyObject(src).(Dict)
 }
 
 // inlineResourceDicts ensures Resources and its Font / XObject / ExtGState

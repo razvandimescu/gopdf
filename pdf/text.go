@@ -4,6 +4,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // TextSpan is a piece of text with its position on the page.
@@ -30,7 +31,7 @@ func ExtractText(content []byte, fonts map[Name]Dict, reader *Reader) []TextSpan
 // ExtractTextWithResources extracts text with access to full page resources
 // (needed for Form XObject extraction via the Do operator).
 func ExtractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reader, resources Dict) []TextSpan {
-	return extractTextWithResources(content, fonts, reader, resources, 0)
+	return extractTextWithResources(content, fonts, reader, resources, 0, nil)
 }
 
 // ExtractPageText extracts text from a page, handling rotation and resources automatically.
@@ -41,18 +42,40 @@ func ExtractPageText(page Dict, reader *Reader) []TextSpan {
 	}
 	fonts := reader.PageFonts(page)
 	resources := reader.PageResources(page)
-	spans := extractTextWithResources(content, fonts, reader, resources, 0)
+	spans := extractTextWithResources(content, fonts, reader, resources, 0, nil)
 
-	// Apply page rotation to all span positions.
-	rotate, _ := page.Int("Rotate")
-	if rotate == 0 {
+	rotM, rotated := pageRotationMatrix(page)
+	if !rotated {
 		return spans
 	}
+	for i := range spans {
+		x, y := applyMatrix6(rotM, spans[i].X, spans[i].Y)
+		if spans[i].EndX != 0 {
+			spans[i].EndX, _ = applyMatrix6(rotM, spans[i].EndX, spans[i].Y)
+		}
+		spans[i].X = x
+		spans[i].Y = y
+	}
 
-	// Get page origin and dimensions from MediaBox [llx lly urx ury]. The
-	// origin (x0, y0) is carried through so rotated span positions stay in the
-	// page's displayed space about its true origin — the inverse of the map
-	// rotateOverlaySpace applies to overlays, so the two round-trip exactly.
+	return spans
+}
+
+// pageRotationMatrix returns the map from unrotated user space — the space page
+// content is drawn in — to the page's displayed space, which is what a viewer
+// shows and what Page.Search reports matches in. The second result is false
+// when /Rotate leaves the two spaces identical, so callers can skip the walk.
+//
+// The origin (x0, y0) is carried through so rotated positions stay about the
+// page's true origin — the inverse of the map rotateOverlaySpace applies to
+// overlays, so the two round-trip exactly.
+func pageRotationMatrix(page Dict) ([6]float64, bool) {
+	rotate, _ := page.Int("Rotate")
+	rotate = ((rotate % 360) + 360) % 360
+	if rotate == 0 {
+		return [6]float64{1, 0, 0, 1, 0, 0}, false
+	}
+
+	// MediaBox is [llx lly urx ury].
 	var x0, y0, width, height float64
 	if mb, ok := page.Array("MediaBox"); ok && len(mb) >= 4 {
 		x0 = asFloat(mb[0])
@@ -61,33 +84,23 @@ func ExtractPageText(page Dict, reader *Reader) []TextSpan {
 		height = asFloat(mb[3]) - y0
 	}
 
-	var rotM [6]float64
-	switch rotate % 360 {
+	switch rotate {
 	case 90:
-		rotM = [6]float64{0, -1, 1, 0, x0 - y0, width + x0 + y0}
+		return [6]float64{0, -1, 1, 0, x0 - y0, width + x0 + y0}, true
 	case 180:
-		rotM = [6]float64{-1, 0, 0, -1, width + 2*x0, height + 2*y0}
+		return [6]float64{-1, 0, 0, -1, width + 2*x0, height + 2*y0}, true
 	case 270:
-		rotM = [6]float64{0, 1, -1, 0, height + x0 + y0, y0 - x0}
-	default:
-		return spans
+		return [6]float64{0, 1, -1, 0, height + x0 + y0, y0 - x0}, true
 	}
-
-	for i := range spans {
-		x := rotM[0]*spans[i].X + rotM[2]*spans[i].Y + rotM[4]
-		y := rotM[1]*spans[i].X + rotM[3]*spans[i].Y + rotM[5]
-		spans[i].X = x
-		spans[i].Y = y
-		if spans[i].EndX != 0 {
-			ex := rotM[0]*spans[i].EndX + rotM[2]*spans[i].Y + rotM[4]
-			spans[i].EndX = ex
-		}
-	}
-
-	return spans
+	return [6]float64{1, 0, 0, 1, 0, 0}, false
 }
 
-func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reader, resources Dict, depth int) []TextSpan {
+// applyMatrix6 maps a point through an affine transform.
+func applyMatrix6(m [6]float64, x, y float64) (float64, float64) {
+	return m[0]*x + m[2]*y + m[4], m[1]*x + m[3]*y + m[5]
+}
+
+func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reader, resources Dict, depth int, rec *showRecorder) []TextSpan {
 	const maxDepth = 10
 	if depth > maxDepth {
 		return nil
@@ -293,42 +306,85 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 		return winansiDecode(s)
 	}
 
-	advanceTextMatrix := func(s string) {
-		raw := []byte(s)
-		hScale := th / 100.0
-		var totalWidth float64
-		if isComposite() && len(raw)%2 == 0 {
-			for i := 0; i+1 < len(raw); i += 2 {
-				code := int(raw[i])<<8 | int(raw[i+1])
-				w := cidCharWidth(code)
-				totalWidth += (w*fontSize + tc) * hScale
-			}
-		} else {
-			for _, b := range raw {
-				w := cidCharWidth(int(b))
-				totalWidth += (w*fontSize + tc) * hScale
-				if b == ' ' {
-					totalWidth += tw * hScale
-				}
-			}
+	// codeAdvance is the pen's travel over the character code at s[i], in text
+	// space, including character spacing, word spacing and horizontal scaling.
+	codeAdvance := func(s string, i, step int, hScale float64) float64 {
+		code := int(s[i])
+		if step == 2 {
+			code = code<<8 | int(s[i+1])
 		}
-		tm[4] += totalWidth * tm[0]
-		tm[5] += totalWidth * tm[1]
+		adv := (cidCharWidth(code)*fontSize + tc) * hScale
+		if step == 1 && s[i] == ' ' {
+			adv += tw * hScale
+		}
+		return adv
 	}
 
-	// transformPos applies CTM to a text-space position.
-	transformPos := func(tx, ty float64) (float64, float64) {
-		return ctm[0]*tx + ctm[2]*ty + ctm[4],
-			ctm[1]*tx + ctm[3]*ty + ctm[5]
+	// advanceTextMatrix walks the pen across s, one character code at a time,
+	// and returns where each glyph sat while a recorder is attached. Redaction
+	// needs exactly that — which codes drew inside a rectangle — and getting it
+	// from the same walk that positions text keeps the two from disagreeing.
+	//
+	// Nobody is recording on the ordinary extraction path, and this runs for
+	// every string of every page, so it pays for the glyph positions and the
+	// byte slice they name only when something asked for them.
+	advanceTextMatrix := func(s string) []glyph {
+		hScale := th / 100.0
+		step := 1
+		if isComposite() && len(s)%2 == 0 {
+			step = 2
+		}
+
+		if rec == nil {
+			var total float64
+			for i := 0; i+step <= len(s); i += step {
+				total += codeAdvance(s, i, step, hScale)
+			}
+			tm[4] += total * tm[0]
+			tm[5] += total * tm[1]
+			return nil
+		}
+
+		raw := []byte(s)
+		glyphs := make([]glyph, 0, len(raw)/step)
+		x, y := applyMatrix6(ctm, tm[4], tm[5])
+		for i := 0; i+step <= len(raw); i += step {
+			adv := codeAdvance(s, i, step, hScale)
+			tm[4] += adv * tm[0]
+			tm[5] += adv * tm[1]
+			nx, ny := applyMatrix6(ctm, tm[4], tm[5])
+			glyphs = append(glyphs, glyph{
+				code: raw[i : i+step],
+				x0:   x, y0: y,
+				x1: nx, y1: ny,
+				adv: adv,
+			})
+			x, y = nx, ny
+		}
+		return glyphs
+	}
+
+	// kernTextMatrix applies a TJ displacement, given in thousandths of a unit
+	// of text space. Like a glyph advance it is a text-space distance, so it
+	// travels through the text matrix: under a Tm carrying a scale or rotation
+	// the pen moves by the transformed amount, not the raw one.
+	kernTextMatrix := func(v float64) {
+		rec.kern(v)
+		d := -v / 1000.0 * fontSize * (th / 100.0)
+		tm[4] += d * tm[0]
+		tm[5] += d * tm[1]
 	}
 
 	showString := func(s string) {
+		// The pen advances over every code, whether or not the font gives it a
+		// Unicode meaning: a string that decodes to nothing still occupies its
+		// width, and still has glyphs redaction may need to remove.
+		x, y := applyMatrix6(ctm, tm[4], tm[5])
 		decoded := decodeString(s)
+		rec.show(decoded, fontSize, advanceTextMatrix(s))
 		if decoded == "" {
 			return
 		}
-		x, y := transformPos(tm[4], tm[5])
-		advanceTextMatrix(s)
 		// Suppress glyph output when ActualText is active — the EMC handler
 		// will emit the ActualText string instead.
 		for _, m := range markedStack {
@@ -336,7 +392,7 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 				return
 			}
 		}
-		endX, _ := transformPos(tm[4], tm[5])
+		endX, _ := applyMatrix6(ctm, tm[4], tm[5])
 		spans = append(spans, TextSpan{
 			X:        x,
 			Y:        y,
@@ -346,6 +402,12 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 			Text:     decoded,
 		})
 	}
+
+	// Byte offset of the first operand since the last operator: an operator
+	// consumes everything from there, which is the range a recorded show
+	// operation has to replace. Only operand tokens skip the bottom of the
+	// loop, so the position left after one operator starts the next one.
+	operandStart := 0
 
 	for {
 		tok, err := lex.NextToken()
@@ -496,10 +558,9 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 						case string:
 							showString(v)
 						case int:
-							// Displacement in thousandths of a unit of text space.
-							tm[4] -= float64(v) / 1000.0 * fontSize * (th / 100.0)
+							kernTextMatrix(float64(v))
 						case float64:
-							tm[4] -= v / 1000.0 * fontSize * (th / 100.0)
+							kernTextMatrix(v)
 						}
 					}
 				}
@@ -561,13 +622,12 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 									formCTM = matMul6(fm, ctm)
 								}
 								formResources, _ := reader.ResolveDict(stream.Dict["Resources"])
-								formSpans := extractTextWithResources(stream.Data, formFonts, reader, formResources, depth+1)
+								outer := rec.enter(xobjRef, stream.Data, formCTM)
+								formSpans := extractTextWithResources(stream.Data, formFonts, reader, formResources, depth+1, rec)
+								rec.leave(outer)
 								// Transform form spans through the form's CTM.
 								for i := range formSpans {
-									x := formCTM[0]*formSpans[i].X + formCTM[2]*formSpans[i].Y + formCTM[4]
-									y := formCTM[1]*formSpans[i].X + formCTM[3]*formSpans[i].Y + formCTM[5]
-									formSpans[i].X = x
-									formSpans[i].Y = y
+									formSpans[i].X, formSpans[i].Y = applyMatrix6(formCTM, formSpans[i].X, formSpans[i].Y)
 								}
 								spans = append(spans, formSpans...)
 							}
@@ -602,7 +662,7 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 				top := markedStack[len(markedStack)-1]
 				markedStack = markedStack[:len(markedStack)-1]
 				if top.hasActual && top.actualText != "" {
-					x, y := transformPos(top.startX, top.startY)
+					x, y := applyMatrix6(ctm, top.startX, top.startY)
 					spans = append(spans, TextSpan{
 						X:        x,
 						Y:        y,
@@ -618,7 +678,9 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 			skipInlineImage(lex)
 		}
 
+		rec.finish(op, operandStart, lex.Pos(), fontSize, tc, tw, th)
 		stack = stack[:0] // clear stack after each operator
+		operandStart = lex.Pos()
 	}
 
 	return spans
@@ -716,6 +778,41 @@ func skipInlineImage(lex *Lexer) {
 	}
 }
 
+// lineYTolerance is how far two baselines may sit apart and still be read as
+// one line.
+const lineYTolerance = 1.0
+
+// spanGap is the whitespace that stands in for the horizontal distance between
+// two pieces of text on one line. PDF draws words where it wants them and says
+// nothing about the spaces between; the gap is all there is to go on.
+//
+// Both the reader's view of a page and redaction's view of it are assembled
+// with this rule. They have to agree: removal locates text by searching what
+// the page says, so a space one of them inserts and the other does not is a
+// query that Page.Search answers and RemoveText silently does not.
+func spanGap(gap, fontSize float64) string {
+	spaceWidth := math.Max(fontSize*0.25, 2)
+	if gap > spaceWidth {
+		// Proportional, so tabulated columns keep their shape, capped so a
+		// wide margin does not become a wall of spaces.
+		const spaces = "          "
+		return spaces[:min(int(gap/spaceWidth), len(spaces))]
+	}
+	if gap > 0.5 {
+		return " "
+	}
+	return ""
+}
+
+// spanEnd is where a piece of text leaves the pen, estimated from its width
+// when it did not record an end of its own.
+func spanEnd(startX, endX, fontSize float64, text string) float64 {
+	if endX > startX {
+		return endX
+	}
+	return startX + float64(utf8.RuneCountInString(text))*fontSize*0.5
+}
+
 // BuildLines groups text spans into lines and reconstructs text.
 func BuildLines(spans []TextSpan) []TextLine {
 	if len(spans) == 0 {
@@ -724,7 +821,6 @@ func BuildLines(spans []TextSpan) []TextLine {
 
 	// Group spans by Y coordinate (with tolerance).
 	// Keep tight to avoid merging overlapping text layers at similar Y positions.
-	const yTolerance = 1.0
 	sort.Slice(spans, func(i, j int) bool {
 		return spans[i].Y > spans[j].Y // top to bottom
 	})
@@ -733,7 +829,7 @@ func BuildLines(spans []TextSpan) []TextLine {
 	var currentLine *TextLine
 
 	for _, span := range spans {
-		if currentLine == nil || math.Abs(span.Y-currentLine.Y) > yTolerance {
+		if currentLine == nil || math.Abs(span.Y-currentLine.Y) > lineYTolerance {
 			lines = append(lines, TextLine{Y: span.Y})
 			currentLine = &lines[len(lines)-1]
 		}
@@ -748,32 +844,10 @@ func BuildLines(spans []TextSpan) []TextLine {
 		prevEnd := -1.0
 		for _, span := range lines[i].Spans {
 			if prevEnd >= 0 {
-				gap := span.X - prevEnd
-				spaceWidth := span.FontSize * 0.25
-				if spaceWidth < 2 {
-					spaceWidth = 2
-				}
-				if gap > spaceWidth {
-					// Insert proportional spaces.
-					nSpaces := int(gap / spaceWidth)
-					if nSpaces < 1 {
-						nSpaces = 1
-					}
-					if nSpaces > 10 {
-						nSpaces = 10 // cap at reasonable tab-like spacing
-					}
-					buf.WriteString(strings.Repeat(" ", nSpaces))
-				} else if gap > 0.5 {
-					buf.WriteByte(' ')
-				}
+				buf.WriteString(spanGap(span.X-prevEnd, span.FontSize))
 			}
 			buf.WriteString(span.Text)
-			// Estimate where this span ends.
-			if span.EndX > span.X {
-				prevEnd = span.EndX
-			} else {
-				prevEnd = span.X + float64(len([]rune(span.Text)))*span.FontSize*0.5
-			}
+			prevEnd = spanEnd(span.X, span.EndX, span.FontSize, span.Text)
 		}
 		lines[i].Text = buf.String()
 	}

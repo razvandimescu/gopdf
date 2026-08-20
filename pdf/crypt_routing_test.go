@@ -97,15 +97,11 @@ func TestIdentityCryptFilterExemptsStream(t *testing.T) {
 // assertion that a string is unchanged passes just as well when nothing is being
 // decrypted at all.
 
-func newStringDecrypter() *Reader {
-	return &Reader{crypt: &encryptInfo{key: bytes.Repeat([]byte{1}, 16), strings: cryptRC4}}
-}
-
 // A cross-reference stream is exempt whole. Its body is skipped by
 // streamIsEncrypted; this covers the dictionary, whose /ID would otherwise be
 // transformed and cached in that state.
 func TestXRefStreamDictIsNotStringDecrypted(t *testing.T) {
-	r := newStringDecrypter()
+	r := &Reader{crypt: &encryptInfo{key: bytes.Repeat([]byte{1}, 16), strings: cryptRC4}}
 
 	xref := &Stream{Dict: Dict{"Type": Name("XRef"), "ID": "plaintext-id"}}
 	if got := r.decryptStrings(xref, 3, 0).(*Stream); got.Dict["ID"] != "plaintext-id" {
@@ -121,7 +117,7 @@ func TestXRefStreamDictIsNotStringDecrypted(t *testing.T) {
 // A signature's /Contents signs the surrounding bytes, so the spec exempts it.
 // Decrypting it corrupts a blob that Rewrite then copies verbatim.
 func TestSignatureContentsIsNotDecrypted(t *testing.T) {
-	r := newStringDecrypter()
+	r := &Reader{crypt: &encryptInfo{key: bytes.Repeat([]byte{1}, 16), strings: cryptRC4}}
 
 	// Only the presence of /ByteRange marks the dictionary as a signature.
 	sig := Dict{"ByteRange": Array{}, "Contents": "signature-blob", "Name": "signer name"}

@@ -5,8 +5,9 @@ import "fmt"
 // Rewrite produces a copy of the source PDF with the given stream objects'
 // decoded data replaced. streamSubs maps source object numbers to new decoded
 // bytes; each replacement is FlateDecode-compressed on write. Non-stream
-// objects in the map are ignored. The original /ID is preserved so Adobe
-// Acrobat doesn't flag the output as modified.
+// objects in the map are ignored. The original creation /ID is preserved so
+// Acrobat does not treat the output as a different document; the modification
+// half is regenerated, since it did change.
 func (r *Reader) Rewrite(streamSubs map[int][]byte) ([]byte, error) {
 	rootRef, ok := r.trailer.Ref("Root")
 	if !ok {

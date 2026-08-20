@@ -347,14 +347,21 @@ func filterNames(d Dict) []Name {
 
 // copyContext tracks object remapping for a single source document.
 type copyContext struct {
-	reader         *Reader
-	writer         *Writer
-	refCache       map[int]Ref      // source obj num → new ref
-	streamHash     map[[32]byte]Ref // content hash → ref; shared across sources; nil = no dedup
-	stripMeta      bool
-	imageQuality   int            // JPEG recompression quality; 0 = passthrough
-	streamSubs     map[int][]byte // source obj num → replacement decoded bytes (re-flated on write)
-	preserveParent bool           // keep /Parent links during dict copy (needed for single-doc rewrite)
+	reader       *Reader
+	writer       *Writer
+	refCache     map[int]Ref      // source obj num → new ref
+	streamHash   map[[32]byte]Ref // content hash → ref; shared across sources; nil = no dedup
+	stripMeta    bool
+	imageQuality int            // JPEG recompression quality; 0 = passthrough
+	streamSubs   map[int][]byte // source obj num → replacement decoded bytes (re-flated on write)
+
+	// fullClone selects the traversal mode. Merge (false) copies a bounded
+	// subgraph reachable from the selected pages and prunes /Parent, so
+	// following a leaf page upward doesn't drag in the source's whole page
+	// tree; buildMergedPDF reattaches the correct /Parent afterwards. Rewrite
+	// (true) clones the entire document, where pruning /Parent anywhere would
+	// break the page and structure-tree parent chains.
+	fullClone bool
 }
 
 var metadataKeys = map[Name]bool{
@@ -494,7 +501,7 @@ func isDCTDecode(d Dict) bool {
 func (ctx *copyContext) copyDict(d Dict) Dict {
 	newDict := make(Dict, len(d))
 	for k, v := range d {
-		if k == "Parent" && !ctx.preserveParent {
+		if k == "Parent" && !ctx.fullClone {
 			continue
 		}
 		if ctx.stripMeta && metadataKeys[k] {

@@ -423,10 +423,7 @@ func keyCellText(r Row, col int) string {
 }
 
 func startsWithDigit(s string) bool {
-	for _, r := range s {
-		return r >= '0' && r <= '9'
-	}
-	return false
+	return len(s) > 0 && isDigit(s[0])
 }
 
 // scoreTable ranks a table extraction result. Higher = better.

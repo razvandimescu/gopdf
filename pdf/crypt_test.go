@@ -1,291 +1,161 @@
 package pdf
 
 import (
-	"bytes"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/md5"
-	"crypto/rc4"
-	"crypto/sha256"
-	"crypto/sha512"
 	"errors"
-	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// The encryption side below is written independently of crypt.go so the reader's
-// decryption path is exercised against a separate implementation rather than
-// against itself.
+// The fixtures in testdata/ are produced by MuPDF, an independent implementation
+// of the standard security handler. An encryptor of our own could only prove
+// that our two halves agree with each other, which any invertible transform
+// satisfies — including a wrong one. A foreign producer is the only thing that
+// can testify to conformance. See testdata/README.md to regenerate them.
 
 const (
 	testUserPassword  = "user-secret"
 	testOwnerPassword = "owner-secret"
-	testDocID         = "0123456789abcdef"
 	testPageText      = "Encrypted Hello"
 	testTitle         = "confidential title"
-	// A fixed IV keeps generated fixtures byte-stable across runs.
-	testIV = "0123456789abcdef"
 )
 
-type encScheme struct {
-	name   string
-	v, r   int
-	keyLen int // bytes
-}
+// Every fixture is the same document as testdata/base.pdf, so an unencrypted
+// control and each encrypted variant are directly comparable.
+var encSchemes = []string{"rc4-40", "rc4-128", "aes-128", "aes-256"}
 
-var encSchemes = []encScheme{
-	{name: "RC4-40", v: 1, r: 2, keyLen: 5},
-	{name: "RC4-128", v: 2, r: 3, keyLen: 16},
-	{name: "AES-128", v: 4, r: 4, keyLen: 16},
-	{name: "AES-256-R6", v: 5, r: 6, keyLen: 32},
-}
-
-// The cipher and its crypt-filter name follow from /V, so they are derived
-// rather than stored: a table row cannot declare an inconsistent pair.
-func (s encScheme) aes() bool    { return s.v >= 4 }
-func (s encScheme) aes256() bool { return s.v == 5 }
-
-// --- independent encryption primitives -------------------------------------
-
-func encRC4(key, data []byte) []byte {
-	c, err := rc4.NewCipher(key)
+func fixture(t *testing.T, name string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", name+".pdf"))
 	if err != nil {
-		panic(err)
+		t.Fatalf("read fixture: %v", err)
 	}
-	out := make([]byte, len(data))
-	c.XORKeyStream(out, data)
-	return out
+	return data
 }
 
-func encAES(key, data []byte) []byte {
-	block, err := aes.NewCipher(key)
+// assertPageText checks that the document's only page decrypted to readable text.
+func assertPageText(t *testing.T, doc *Document) {
+	t.Helper()
+	got, err := doc.Page(0).Text()
 	if err != nil {
-		panic(err)
+		t.Fatalf("extract text: %v", err)
 	}
-	pad := aes.BlockSize - len(data)%aes.BlockSize
-	padded := append(append([]byte{}, data...), bytes.Repeat([]byte{byte(pad)}, pad)...)
-	out := make([]byte, len(padded))
-	cipher.NewCBCEncrypter(block, []byte(testIV)).CryptBlocks(out, padded)
-	return append([]byte(testIV), out...)
+	if !strings.Contains(got, testPageText) {
+		t.Errorf("page text = %q, want it to contain %q", got, testPageText)
+	}
 }
 
-// encFileKey implements Algorithm 2 for R2-R4.
-func encFileKey(userPw string, o []byte, perm int, id []byte, r, keyLen int) []byte {
-	h := md5.New()
-	h.Write(padPassword(userPw))
-	h.Write(o)
-	p := uint32(int32(perm))
-	h.Write([]byte{byte(p), byte(p >> 8), byte(p >> 16), byte(p >> 24)})
-	h.Write(id)
-	key := h.Sum(nil)
-	if r >= 3 {
-		for i := 0; i < 50; i++ {
-			s := md5.Sum(key[:keyLen])
-			key = s[:]
-		}
+func TestOpenEncryptedWithUserPassword(t *testing.T) {
+	for _, s := range encSchemes {
+		t.Run(s, func(t *testing.T) {
+			doc, err := OpenBytes(fixture(t, s), WithPassword(testUserPassword))
+			if err != nil {
+				t.Fatalf("open: %v", err)
+			}
+			if !doc.IsEncrypted() {
+				t.Error("IsEncrypted() = false, want true")
+			}
+			if got := doc.NumPages(); got != 1 {
+				t.Fatalf("NumPages() = %d, want 1", got)
+			}
+			assertPageText(t, doc)
+		})
 	}
-	return key[:keyLen]
 }
 
-// encOwnerValue implements Algorithm 3.
-func encOwnerValue(ownerPw, userPw string, r, keyLen int) []byte {
-	s := md5.Sum(padPassword(ownerPw))
-	key := s[:]
-	if r >= 3 {
-		for i := 0; i < 50; i++ {
-			ss := md5.Sum(key)
-			key = ss[:]
-		}
+func TestOpenEncryptedWithOwnerPassword(t *testing.T) {
+	for _, s := range encSchemes {
+		t.Run(s, func(t *testing.T) {
+			doc, err := OpenBytes(fixture(t, s), WithPassword(testOwnerPassword))
+			if err != nil {
+				t.Fatalf("open with owner password: %v", err)
+			}
+			assertPageText(t, doc)
+		})
 	}
-	key = key[:keyLen]
-	out := encRC4(key, padPassword(userPw))
-	if r >= 3 {
-		for i := 1; i <= 19; i++ {
-			out = encRC4(xorKey(key, byte(i)), out)
-		}
-	}
-	return out
 }
 
-// encUserValue implements Algorithms 4 and 5.
-func encUserValue(fileKey, id []byte, r int) []byte {
-	if r == 2 {
-		return encRC4(fileKey, passwordPad)
+// Strings live outside content streams and take a different code path, so they
+// are checked separately.
+func TestEncryptedStringsAreDecrypted(t *testing.T) {
+	for _, s := range encSchemes {
+		t.Run(s, func(t *testing.T) {
+			r, err := Open(fixture(t, s), WithPassword(testUserPassword))
+			if err != nil {
+				t.Fatalf("open: %v", err)
+			}
+			info, ok := r.ResolveDict(r.Trailer()["Info"])
+			if !ok {
+				t.Fatal("no /Info dictionary")
+			}
+			if got, _ := info.String("Title"); got != testTitle {
+				t.Errorf("/Title = %q, want %q", got, testTitle)
+			}
+		})
 	}
-	h := md5.New()
-	h.Write(passwordPad)
-	h.Write(id)
-	x := encRC4(fileKey, h.Sum(nil))
-	for i := 1; i <= 19; i++ {
-		x = encRC4(xorKey(fileKey, byte(i)), x)
-	}
-	// Pad to 32 bytes; the trailing 16 are arbitrary per the spec.
-	return append(x, bytes.Repeat([]byte{0x00}, 16)...)
 }
 
-// encHash2B implements Algorithm 2.B independently of crypt.go's version.
-func encHash2B(pw, salt, udata []byte) []byte {
-	h := sha256.New()
-	h.Write(pw)
-	h.Write(salt)
-	h.Write(udata)
-	k := h.Sum(nil)
-	for rounds := 1; ; rounds++ {
-		var k1 []byte
-		for j := 0; j < 64; j++ {
-			k1 = append(k1, pw...)
-			k1 = append(k1, k...)
-			k1 = append(k1, udata...)
-		}
-		block, _ := aes.NewCipher(k[:16])
-		e := make([]byte, len(k1))
-		cipher.NewCBCEncrypter(block, k[16:32]).CryptBlocks(e, k1)
-		sum := 0
-		for _, b := range e[:16] {
-			sum += int(b)
-		}
-		switch sum % 3 {
-		case 0:
-			s := sha256.Sum256(e)
-			k = s[:]
-		case 1:
-			s := sha512.Sum384(e)
-			k = s[:]
-		case 2:
-			s := sha512.Sum512(e)
-			k = s[:]
-		}
-		if rounds >= 64 && int(e[len(e)-1]) <= rounds-32 {
-			break
-		}
+func TestWrongPassword(t *testing.T) {
+	for _, s := range encSchemes {
+		t.Run(s, func(t *testing.T) {
+			_, err := OpenBytes(fixture(t, s), WithPassword("not-the-password"))
+			if !errors.Is(err, ErrWrongPassword) {
+				t.Errorf("err = %v, want ErrWrongPassword", err)
+			}
+		})
 	}
-	return k[:32]
 }
 
-// encWrap encrypts the file key into /UE or /OE: AES-256-CBC, zero IV, no padding.
-func encWrap(ikey, fileKey []byte) []byte {
-	block, _ := aes.NewCipher(ikey)
-	out := make([]byte, 32)
-	cipher.NewCBCEncrypter(block, make([]byte, 16)).CryptBlocks(out, fileKey)
-	return out
+// A password-protected file opened through the password-free entry point must
+// report ErrEncrypted rather than failing as a malformed file.
+func TestPasswordRequiredReportsErrEncrypted(t *testing.T) {
+	for _, s := range encSchemes {
+		t.Run(s, func(t *testing.T) {
+			if _, err := OpenBytes(fixture(t, s)); !errors.Is(err, ErrEncrypted) {
+				t.Errorf("err = %v, want ErrEncrypted", err)
+			}
+		})
+	}
 }
 
-// --- fixture construction ---------------------------------------------------
-
-// buildEncryptedPDF assembles a single-page PDF encrypted under the given
-// scheme, with an encrypted content stream and an encrypted /Title string.
-func buildEncryptedPDF(s encScheme) []byte {
-	return buildEncryptedPDFWith(s, testUserPassword)
+// The common case for emailed statements: encrypted, but with no user password.
+// These must open through the ordinary entry points.
+func TestEmptyUserPasswordOpensWithoutPassword(t *testing.T) {
+	for _, s := range encSchemes {
+		t.Run(s, func(t *testing.T) {
+			doc, err := OpenBytes(fixture(t, s+"-nouser"))
+			if err != nil {
+				t.Fatalf("open: %v", err)
+			}
+			if !doc.IsEncrypted() {
+				t.Error("IsEncrypted() = false, want true")
+			}
+			assertPageText(t, doc)
+		})
+	}
 }
 
-func buildEncryptedPDFWith(s encScheme, userPw string) []byte {
-	const perm = -3904 // typical: print/copy denied, everything else allowed
-	id := []byte(testDocID)
-
-	var fileKey, oVal, uVal, ueVal, oeVal []byte
-	if s.aes256() {
-		// Deterministic 32-byte file key; real producers use a CSPRNG.
-		fileKey = []byte("0123456789abcdef0123456789abcdef")
-		uvs, uks := []byte("uvalsalt"), []byte("ukeysalt")
-		uVal = append(append(encHash2B([]byte(userPw), uvs, nil), uvs...), uks...)
-		ueVal = encWrap(encHash2B([]byte(userPw), uks, nil), fileKey)
-
-		ovs, oks := []byte("ovalsalt"), []byte("okeysalt")
-		oVal = append(append(encHash2B([]byte(testOwnerPassword), ovs, uVal[:48]), ovs...), oks...)
-		oeVal = encWrap(encHash2B([]byte(testOwnerPassword), oks, uVal[:48]), fileKey)
-	} else {
-		oVal = encOwnerValue(testOwnerPassword, userPw, s.r, s.keyLen)
-		fileKey = encFileKey(userPw, oVal, perm, id, s.r, s.keyLen)
-		uVal = encUserValue(fileKey, id, s.r)
+// base.pdf is the plaintext original every fixture was encrypted from, so this
+// proves the hooks stay inert on the exact document they otherwise transform.
+func TestUnencryptedFileIsUnaffected(t *testing.T) {
+	doc, err := OpenBytes(fixture(t, "base"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
 	}
-
-	// encryptFor returns the ciphertext for one object's string or stream body.
-	encryptFor := func(data []byte, num, gen int) []byte {
-		if s.aes256() {
-			return encAES(fileKey, data)
-		}
-		h := md5.New()
-		h.Write(fileKey)
-		h.Write([]byte{byte(num), byte(num >> 8), byte(num >> 16), byte(gen), byte(gen >> 8)})
-		if s.aes() {
-			h.Write([]byte{0x73, 0x41, 0x6C, 0x54})
-		}
-		sum := h.Sum(nil)
-		n := len(fileKey) + 5
-		if n > 16 {
-			n = 16
-		}
-		key := sum[:n]
-		if s.aes() {
-			return encAES(key, data)
-		}
-		return encRC4(key, data)
+	if doc.IsEncrypted() {
+		t.Error("IsEncrypted() = true for an unencrypted file")
 	}
-
-	content := fmt.Sprintf("BT /F1 24 Tf 72 700 Td (%s) Tj ET", testPageText)
-	encContent := encryptFor([]byte(content), 4, 0)
-	encTitle := encryptFor([]byte(testTitle), 6, 0)
-
-	objs := []string{
-		"<< /Type /Catalog /Pages 2 0 R >>",
-		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] " +
-			"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
-		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(encContent), encContent),
-		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-		fmt.Sprintf("<< /Title <%x> >>", encTitle),
-		encryptDict(s, oVal, uVal, ueVal, oeVal, perm),
-	}
-
-	trailer := fmt.Sprintf("/Size %d /Root 1 0 R /Info 6 0 R /Encrypt 7 0 R /ID [<%x> <%x>]",
-		len(objs)+1, id, id)
-	return assemblePDF(objs, trailer)
+	assertPageText(t, doc)
 }
-
-// assemblePDF writes objects 1..N with a traditional xref table and trailer.
-func assemblePDF(objs []string, trailerExtra string) []byte {
-	var buf bytes.Buffer
-	buf.WriteString("%PDF-1.7\n")
-	offsets := make([]int, len(objs)+1)
-	for i, body := range objs {
-		offsets[i+1] = buf.Len()
-		fmt.Fprintf(&buf, "%d 0 obj\n%s\nendobj\n", i+1, body)
-	}
-	xrefPos := buf.Len()
-	fmt.Fprintf(&buf, "xref\n0 %d\n", len(objs)+1)
-	buf.WriteString("0000000000 65535 f \n")
-	for i := 1; i <= len(objs); i++ {
-		fmt.Fprintf(&buf, "%010d 00000 n \n", offsets[i])
-	}
-	fmt.Fprintf(&buf, "trailer\n<< %s >>\nstartxref\n%d\n%%%%EOF\n", trailerExtra, xrefPos)
-	return buf.Bytes()
-}
-
-func encryptDict(s encScheme, o, u, ue, oe []byte, perm int) string {
-	d := fmt.Sprintf("/Filter /Standard /V %d /R %d /P %d /O <%x> /U <%x> /Length %d",
-		s.v, s.r, perm, o, u, s.keyLen*8)
-	if !s.aes() {
-		return "<< " + d + " >>"
-	}
-	cfm := "AESV2"
-	if s.aes256() {
-		cfm = "AESV3"
-		d += fmt.Sprintf(" /UE <%x> /OE <%x>", ue, oe)
-	}
-	return fmt.Sprintf("<< %s /CF << /StdCF << /CFM /%s /Length %d >> >> /StmF /StdCF /StrF /StdCF >>",
-		d, cfm, s.keyLen)
-}
-
-// --- tests ------------------------------------------------------------------
 
 // TestHash2BTermination pins Algorithm 2.B step (e) against explicit cases.
 //
-// The round-trip tests above cannot catch an error here: crypt_test.go's
-// encHash2B would have to make the same mistake to still agree, which is exactly
-// what happened when both were written from one reading of the spec. These cases
-// are taken from the rule itself — stop when the last byte of E is no longer
-// greater than the number of completed rounds minus 32.
+// The aes-256 fixture exercises this rule, but only along the path its own
+// password happens to take: termination is data-dependent, so a file that stops
+// at round 64 says nothing about the boundary at higher rounds. These cases are
+// taken from the rule itself — stop when the last byte of E is no longer greater
+// than the number of completed rounds minus 32.
 func TestHash2BTermination(t *testing.T) {
 	cases := []struct {
 		rounds int
@@ -306,129 +176,4 @@ func TestHash2BTermination(t *testing.T) {
 			t.Errorf("hash2BDone(%d, %d) = %v, want %v", c.rounds, c.lastE, got, c.want)
 		}
 	}
-}
-
-// assertPageText checks that the document's only page decrypted to readable text.
-func assertPageText(t *testing.T, doc *Document) {
-	t.Helper()
-	got, err := doc.Page(0).Text()
-	if err != nil {
-		t.Fatalf("extract text: %v", err)
-	}
-	if !strings.Contains(got, testPageText) {
-		t.Errorf("page text = %q, want it to contain %q", got, testPageText)
-	}
-}
-
-func TestOpenEncryptedWithUserPassword(t *testing.T) {
-	for _, s := range encSchemes {
-		t.Run(s.name, func(t *testing.T) {
-			data := buildEncryptedPDF(s)
-
-			doc, err := OpenBytes(data, WithPassword(testUserPassword))
-			if err != nil {
-				t.Fatalf("open: %v", err)
-			}
-			if !doc.IsEncrypted() {
-				t.Error("IsEncrypted() = false, want true")
-			}
-			if got := doc.NumPages(); got != 1 {
-				t.Fatalf("NumPages() = %d, want 1", got)
-			}
-			assertPageText(t, doc)
-		})
-	}
-}
-
-func TestOpenEncryptedWithOwnerPassword(t *testing.T) {
-	for _, s := range encSchemes {
-		t.Run(s.name, func(t *testing.T) {
-			data := buildEncryptedPDF(s)
-
-			doc, err := OpenBytes(data, WithPassword(testOwnerPassword))
-			if err != nil {
-				t.Fatalf("open with owner password: %v", err)
-			}
-			assertPageText(t, doc)
-		})
-	}
-}
-
-// Strings live outside content streams and take a different code path, so they
-// are checked separately.
-func TestEncryptedStringsAreDecrypted(t *testing.T) {
-	for _, s := range encSchemes {
-		t.Run(s.name, func(t *testing.T) {
-			data := buildEncryptedPDF(s)
-
-			r, err := Open(data, WithPassword(testUserPassword))
-			if err != nil {
-				t.Fatalf("open: %v", err)
-			}
-			info, ok := r.ResolveDict(r.Trailer()["Info"])
-			if !ok {
-				t.Fatal("no /Info dictionary")
-			}
-			if got, _ := info.String("Title"); got != testTitle {
-				t.Errorf("/Title = %q, want %q", got, testTitle)
-			}
-		})
-	}
-}
-
-func TestWrongPassword(t *testing.T) {
-	for _, s := range encSchemes {
-		t.Run(s.name, func(t *testing.T) {
-			data := buildEncryptedPDF(s)
-
-			_, err := OpenBytes(data, WithPassword("not-the-password"))
-			if !errors.Is(err, ErrWrongPassword) {
-				t.Errorf("err = %v, want ErrWrongPassword", err)
-			}
-		})
-	}
-}
-
-// A password-protected file opened through the password-free entry point must
-// report ErrEncrypted rather than failing as a malformed file.
-func TestPasswordRequiredReportsErrEncrypted(t *testing.T) {
-	for _, s := range encSchemes {
-		t.Run(s.name, func(t *testing.T) {
-			data := buildEncryptedPDF(s)
-
-			if _, err := OpenBytes(data); !errors.Is(err, ErrEncrypted) {
-				t.Errorf("err = %v, want ErrEncrypted", err)
-			}
-		})
-	}
-}
-
-// The common case for emailed statements: encrypted, but with no user password.
-// These must open through the ordinary entry points.
-func TestEmptyUserPasswordOpensWithoutPassword(t *testing.T) {
-	for _, s := range encSchemes {
-		t.Run(s.name, func(t *testing.T) {
-			data := buildEncryptedPDFWith(s, "")
-
-			doc, err := OpenBytes(data)
-			if err != nil {
-				t.Fatalf("open: %v", err)
-			}
-			if !doc.IsEncrypted() {
-				t.Error("IsEncrypted() = false, want true")
-			}
-			assertPageText(t, doc)
-		})
-	}
-}
-
-func TestUnencryptedFileIsUnaffected(t *testing.T) {
-	doc, err := OpenBytes(testPDF(t, testPageText))
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	if doc.IsEncrypted() {
-		t.Error("IsEncrypted() = true for an unencrypted file")
-	}
-	assertPageText(t, doc)
 }

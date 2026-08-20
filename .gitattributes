@@ -1,0 +1,3 @@
+# Encryption fixtures are ciphertext: any line-ending or encoding conversion
+# would corrupt them into files that no longer decrypt.
+pdf/testdata/*.pdf binary

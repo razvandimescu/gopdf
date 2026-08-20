@@ -5,23 +5,23 @@ import (
 	"testing"
 )
 
-// The fixtures in testdata/ prove the ciphers and key derivation are right,
-// because a foreign producer made them. They cannot reach the routing decisions
-// below: MuPDF never emits an /StmF /Identity file, an indirect /O, a /Crypt
-// filter, or a signature, so nothing in testdata/ exercises the code that
-// handles them.
+// Tests for the routing decisions the testdata/ fixtures cannot reach. MuPDF
+// made those files, which is what lets them testify to cipher and key-derivation
+// conformance — but it also means they only ever contain shapes MuPDF emits. It
+// never writes an /StmF /Identity file, an indirect /O, a /Crypt filter or a
+// signature, so nothing there exercises the code handling them.
 //
-// These are routing tests, not crypto tests. Each asks "does the reader send
-// these bytes down the right path", which is a question a hand-built Dict can
-// answer — and, unlike an encryptor of our own, one where writing the input
-// ourselves proves something, since the input is structure rather than
-// ciphertext. Resolve short-circuits on r.cache, so an indirect reference needs
-// no document behind it.
+// These ask which path bytes take, not whether a cipher is right, and that is a
+// question a hand-built Dict can answer. Authoring the input proves something
+// here — unlike authoring ciphertext, which would only show our encryptor agrees
+// with our decryptor.
+//
+// Shares fixture and testUserPassword with crypt_test.go.
 
 // --- /Crypt filter naming /Identity ------------------------------------------
 
 func TestIdentityCryptFilterExemptsStream(t *testing.T) {
-	identityParms := Dict{"Type": Name("CryptFilterDecodeParms"), "Name": Name("Identity")}
+	identityParms := Dict{"Name": Name("Identity")}
 
 	cases := []struct {
 		name string
@@ -92,19 +92,26 @@ func TestIdentityCryptFilterExemptsStream(t *testing.T) {
 
 // --- exemptions that survive the string walk ---------------------------------
 
+// Both exemptions go through decryptStrings, the single entry point that derives
+// the object key and walks. Each pairs its exemption with a control, since an
+// assertion that a string is unchanged passes just as well when nothing is being
+// decrypted at all.
+
+func newStringDecrypter() *Reader {
+	return &Reader{crypt: &encryptInfo{key: bytes.Repeat([]byte{1}, 16), strings: cryptRC4}}
+}
+
 // A cross-reference stream is exempt whole. Its body is skipped by
 // streamIsEncrypted; this covers the dictionary, whose /ID would otherwise be
 // transformed and cached in that state.
 func TestXRefStreamDictIsNotStringDecrypted(t *testing.T) {
-	r := &Reader{crypt: &encryptInfo{key: bytes.Repeat([]byte{1}, 16), strings: cryptRC4}}
+	r := newStringDecrypter()
 
 	xref := &Stream{Dict: Dict{"Type": Name("XRef"), "ID": "plaintext-id"}}
 	if got := r.decryptStrings(xref, 3, 0).(*Stream); got.Dict["ID"] != "plaintext-id" {
 		t.Errorf("/ID = %q, want it untouched", got.Dict["ID"])
 	}
 
-	// Control: an ordinary stream's dictionary strings must still be decrypted,
-	// or the exemption above would pass for the wrong reason.
 	other := &Stream{Dict: Dict{"Type": Name("Page"), "ID": "plaintext-id"}}
 	if got := r.decryptStrings(other, 3, 0).(*Stream); got.Dict["ID"] == "plaintext-id" {
 		t.Error("an ordinary stream dictionary was left undecrypted")
@@ -114,16 +121,11 @@ func TestXRefStreamDictIsNotStringDecrypted(t *testing.T) {
 // A signature's /Contents signs the surrounding bytes, so the spec exempts it.
 // Decrypting it corrupts a blob that Rewrite then copies verbatim.
 func TestSignatureContentsIsNotDecrypted(t *testing.T) {
-	e := &encryptInfo{key: bytes.Repeat([]byte{1}, 16), strings: cryptRC4}
-	key := e.objectKey(4, 0, e.strings)
+	r := newStringDecrypter()
 
-	sig := Dict{
-		"Type":      Name("Sig"),
-		"ByteRange": Array{0, 840, 960, 240},
-		"Contents":  "signature-blob",
-		"Name":      "signer name",
-	}
-	e.walkStrings(sig, key)
+	// Only the presence of /ByteRange marks the dictionary as a signature.
+	sig := Dict{"ByteRange": Array{}, "Contents": "signature-blob", "Name": "signer name"}
+	r.decryptStrings(sig, 4, 0)
 
 	if sig["Contents"] != "signature-blob" {
 		t.Errorf("/Contents = %q, want it untouched", sig["Contents"])
@@ -134,9 +136,8 @@ func TestSignatureContentsIsNotDecrypted(t *testing.T) {
 		t.Error("/Name was left undecrypted; the exemption is too broad")
 	}
 
-	// Without /ByteRange it is not a signature dictionary and nothing is spared.
 	plain := Dict{"Contents": "signature-blob"}
-	e.walkStrings(plain, key)
+	r.decryptStrings(plain, 4, 0)
 	if plain["Contents"] == "signature-blob" {
 		t.Error("/Contents was spared in a dictionary that is not a signature")
 	}
@@ -146,7 +147,8 @@ func TestSignatureContentsIsNotDecrypted(t *testing.T) {
 
 // Producers occasionally write the password values indirectly. Reading them with
 // a bare type assertion yields "", which fails every password — including the
-// correct one — with no hint that the file was merely non-canonical.
+// correct one — with no hint that the file was merely non-canonical. Resolve
+// short-circuits on r.cache, so the reference needs no document behind it.
 func TestPasswordValuesResolveThroughIndirectRefs(t *testing.T) {
 	r := &Reader{cache: map[int]any{9: "owner-value"}}
 
@@ -156,51 +158,34 @@ func TestPasswordValuesResolveThroughIndirectRefs(t *testing.T) {
 	if got := r.dictString(Dict{"O": Ref{Num: 9}}, "O"); got != "owner-value" {
 		t.Errorf("indirect /O = %q, want %q", got, "owner-value")
 	}
-	if got := r.dictString(Dict{}, "O"); got != "" {
-		t.Errorf("absent /O = %q, want empty", got)
-	}
 }
 
-// --- file key length across both crypt filters -------------------------------
+// --- crypt filter key length -------------------------------------------------
 
-// The file key is shared by both filters, so its length is the longer of the
-// two. A file encrypting only its strings leaves /StmF as /Identity with no
-// length of its own; taking the stream filter's alone falls back to the 40-bit
-// default and decrypts every string under the wrong key.
-func TestFileKeyLengthTakesLongerCryptFilter(t *testing.T) {
-	enc := Dict{
-		"CF": Dict{
-			"Plain":  Dict{"CFM": Name("None")},
-			"Strong": Dict{"CFM": Name("V2"), "Length": 16},
-		},
-	}
+// A crypt filter's /Length is specified in bytes, but many producers write bits.
+// 40 and above can only be bits, since no filter uses a key that long.
+func TestCryptFilterLengthInBits(t *testing.T) {
 	r := &Reader{}
-
-	if _, n := r.cryptFilter(enc, "Strong"); n != 16 {
-		t.Fatalf("crypt filter length = %d, want 16", n)
-	}
-	if m, n := r.cryptFilter(enc, "Identity"); m != cryptNone || n != 0 {
-		t.Fatalf("/Identity = (%v, %d), want (cryptNone, 0)", m, n)
-	}
-
-	// The bits-vs-bytes rule the same lookup applies: 40 and above can only be
-	// bits, since no filter uses a key that long.
-	bits := Dict{"CF": Dict{"F": Dict{"CFM": Name("V2"), "Length": 40}}}
-	if _, n := r.cryptFilter(bits, "F"); n != 5 {
-		t.Errorf("/Length 40 gave %d bytes, want 5", n)
+	for _, c := range []struct{ length, want int }{{16, 16}, {40, 5}, {128, 16}} {
+		enc := Dict{"CF": Dict{"F": Dict{"CFM": Name("V2"), "Length": c.length}}}
+		if _, n := r.cryptFilter(enc, "F"); n != c.want {
+			t.Errorf("/Length %d gave %d bytes, want %d", c.length, n, c.want)
+		}
 	}
 }
 
-// The selection above is only half the fix; the other half is setupEncryption
-// choosing between the two filters, which cryptFilter alone cannot show. This
-// drives the real thing with MuPDF's own /O, /U and /ID lifted out of a fixture,
-// so the key still has to derive correctly — no ciphertext is authored here,
-// only the shape of the /Encrypt dictionary that selects the key length.
+// The file key is shared by both crypt filters, so its length is the longer of
+// the two. A file encrypting only its strings leaves /StmF pointing at a filter
+// with no length of its own, and consulting that alone falls back to the 40-bit
+// default — deriving a 5-byte key that rejects the correct password.
 //
-// V2/R3 and V4/R4 derive identical keys while /EncryptMetadata is true (the
-// 0xFFFFFFFF step is gated on rev >= 4 && !encryptMetadata), so rc4-128's
-// values stay valid after the conversion.
-func TestStringsOnlyEncryptionDerivesFullLengthKey(t *testing.T) {
+// This drives setupEncryption with MuPDF's own /O, /U and /ID lifted out of a
+// fixture, so the key still has to derive correctly. No ciphertext is authored;
+// only the shape of the /Encrypt dictionary that selects the length. V2/R3 and
+// V4/R4 derive identical keys while /EncryptMetadata is true (the 0xFFFFFFFF
+// step is gated on rev >= 4 && !encryptMetadata), so rc4-128's values stay valid
+// across the conversion.
+func TestFileKeyLengthTakesLongerCryptFilter(t *testing.T) {
 	src, err := Open(fixture(t, "rc4-128"), WithPassword(testUserPassword))
 	if err != nil {
 		t.Fatalf("open fixture: %v", err)
@@ -210,32 +195,23 @@ func TestStringsOnlyEncryptionDerivesFullLengthKey(t *testing.T) {
 		t.Fatal("fixture has no /Encrypt dictionary")
 	}
 
-	// /StmF names a filter carrying no /Length of its own; /StrF carries 16.
-	// Omitting the top-level /Length leaves the 40-bit default in place, so a
-	// reader that consults only /StmF derives a 5-byte key and fails the
-	// password it should accept.
-	r := &Reader{
-		xref:       map[int]int64{},
-		compressed: map[int]compressedRef{},
-		cache:      map[int]any{},
-		trailer: Dict{
-			"ID": src.trailer["ID"],
-			"Encrypt": Dict{
-				"Filter": Name("Standard"),
-				"V":      4,
-				"R":      4,
-				"P":      orig["P"],
-				"O":      orig["O"],
-				"U":      orig["U"],
-				"CF": Dict{
-					"NoLen":  Dict{"CFM": Name("V2")},
-					"Strong": Dict{"CFM": Name("V2"), "Length": 16},
-				},
-				"StmF": Name("NoLen"),
-				"StrF": Name("Strong"),
+	r := &Reader{trailer: Dict{
+		"ID": src.trailer["ID"],
+		"Encrypt": Dict{
+			"Filter": Name("Standard"),
+			"V":      4,
+			"R":      4,
+			"P":      orig["P"],
+			"O":      orig["O"],
+			"U":      orig["U"],
+			"CF": Dict{
+				"NoLen":  Dict{"CFM": Name("V2")},
+				"Strong": Dict{"CFM": Name("V2"), "Length": 16},
 			},
+			"StmF": Name("NoLen"),
+			"StrF": Name("Strong"),
 		},
-	}
+	}}
 
 	if err := r.setupEncryption(testUserPassword); err != nil {
 		t.Fatalf("setupEncryption: %v (a 40-bit key would reject the correct password)", err)

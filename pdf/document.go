@@ -58,10 +58,6 @@ func OpenBytes(data []byte, opts ...Option) (*Document, error) {
 	return &Document{reader: r, pages: pages}, nil
 }
 
-// IsEncrypted reports whether the source file was encrypted. It stays true after
-// a successful decrypt, since it describes the input rather than the document.
-func (d *Document) IsEncrypted() bool { return d.reader.crypt != nil }
-
 // NumPages returns the number of pages in the document.
 func (d *Document) NumPages() int {
 	return len(d.pages)

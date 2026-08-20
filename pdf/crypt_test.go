@@ -53,8 +53,8 @@ func TestOpenEncryptedWithUserPassword(t *testing.T) {
 			if err != nil {
 				t.Fatalf("open: %v", err)
 			}
-			if !doc.IsEncrypted() {
-				t.Error("IsEncrypted() = false, want true")
+			if doc.reader.crypt == nil {
+				t.Error("reader.crypt = nil, want the file recognised as encrypted")
 			}
 			if got := doc.NumPages(); got != 1 {
 				t.Fatalf("NumPages() = %d, want 1", got)
@@ -128,8 +128,8 @@ func TestEmptyUserPasswordOpensWithoutPassword(t *testing.T) {
 			if err != nil {
 				t.Fatalf("open: %v", err)
 			}
-			if !doc.IsEncrypted() {
-				t.Error("IsEncrypted() = false, want true")
+			if doc.reader.crypt == nil {
+				t.Error("reader.crypt = nil, want the file recognised as encrypted")
 			}
 			assertPageText(t, doc)
 		})
@@ -143,8 +143,8 @@ func TestUnencryptedFileIsUnaffected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if doc.IsEncrypted() {
-		t.Error("IsEncrypted() = true for an unencrypted file")
+	if doc.reader.crypt != nil {
+		t.Error("reader.crypt is set for an unencrypted file")
 	}
 	assertPageText(t, doc)
 }

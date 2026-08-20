@@ -36,6 +36,7 @@ type OversizeError struct {
 	MaxSize int64
 }
 
+// Error implements the error interface.
 func (e *OversizeError) Error() string {
 	return fmt.Sprintf("merged PDF size %d bytes exceeds limit of %d bytes",
 		e.Size, e.MaxSize)
@@ -351,7 +352,16 @@ type copyContext struct {
 	refCache     map[int]Ref      // source obj num → new ref
 	streamHash   map[[32]byte]Ref // content hash → ref; shared across sources; nil = no dedup
 	stripMeta    bool
-	imageQuality int // JPEG recompression quality; 0 = passthrough
+	imageQuality int            // JPEG recompression quality; 0 = passthrough
+	streamSubs   map[int][]byte // source obj num → replacement decoded bytes (re-flated on write)
+
+	// fullClone selects the traversal mode. Merge (false) copies a bounded
+	// subgraph reachable from the selected pages and prunes /Parent, so
+	// following a leaf page upward doesn't drag in the source's whole page
+	// tree; buildMergedPDF reattaches the correct /Parent afterwards. Rewrite
+	// (true) clones the entire document, where pruning /Parent anywhere would
+	// break the page and structure-tree parent chains.
+	fullClone bool
 }
 
 var metadataKeys = map[Name]bool{
@@ -377,6 +387,19 @@ func (ctx *copyContext) copyObject(obj any) any {
 			ctx.refCache[v.Num] = newRef
 			ctx.writer.WriteObject(newRef, nil)
 			return newRef
+		}
+
+		// Stream substitution: replace decoded data wholesale (re-flated on write).
+		if subs, ok := ctx.streamSubs[v.Num]; ok {
+			if srcStream, isStream := resolved.(*Stream); isStream {
+				newRef := ctx.writer.AllocRef()
+				ctx.refCache[v.Num] = newRef
+				copiedDict := ctx.copyDict(srcStream.Dict)
+				delete(copiedDict, "Filter")
+				delete(copiedDict, "DecodeParms")
+				ctx.writer.WriteStream(newRef, copiedDict, subs)
+				return newRef
+			}
 		}
 
 		// Stream dedup: reuse byte-identical streams across sources.
@@ -478,7 +501,7 @@ func isDCTDecode(d Dict) bool {
 func (ctx *copyContext) copyDict(d Dict) Dict {
 	newDict := make(Dict, len(d))
 	for k, v := range d {
-		if k == "Parent" {
+		if k == "Parent" && !ctx.fullClone {
 			continue
 		}
 		if ctx.stripMeta && metadataKeys[k] {

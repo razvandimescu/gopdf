@@ -9,10 +9,12 @@ type Parser struct {
 	lex *Lexer
 }
 
+// NewParser returns a Parser reading objects from data.
 func NewParser(data []byte) *Parser {
 	return &Parser{lex: NewLexer(data)}
 }
 
+// Lexer returns the underlying Lexer, for callers that need byte offsets.
 func (p *Parser) Lexer() *Lexer { return p.lex }
 
 // ParseObject reads the next complete PDF object (value) from the stream.

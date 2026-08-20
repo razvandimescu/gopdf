@@ -8,18 +8,46 @@ type Document struct {
 	pages  []Dict
 }
 
+// Option configures how a PDF is opened.
+type Option func(*openConfig)
+
+type openConfig struct {
+	password string
+}
+
+// WithPassword supplies the password for an encrypted PDF. Either the user or
+// the owner password is accepted, and it is ignored for unencrypted files.
+func WithPassword(password string) Option {
+	return func(c *openConfig) { c.password = password }
+}
+
+func newOpenConfig(opts []Option) openConfig {
+	var c openConfig
+	for _, opt := range opts {
+		opt(&c)
+	}
+	return c
+}
+
 // OpenFile opens a PDF from a file path.
-func OpenFile(path string) (*Document, error) {
+//
+// Encrypted files open as-is when the user password is empty; otherwise
+// OpenFile returns ErrEncrypted, and [WithPassword] supplies the password.
+func OpenFile(path string, opts ...Option) (*Document, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	return OpenBytes(data)
+	return OpenBytes(data, opts...)
 }
 
 // OpenBytes opens a PDF from raw bytes.
-func OpenBytes(data []byte) (*Document, error) {
-	r, err := Open(data)
+//
+// Encrypted files open as-is when the user password is empty; otherwise
+// OpenBytes returns ErrEncrypted, and [WithPassword] supplies the password.
+// A wrong password gives ErrWrongPassword.
+func OpenBytes(data []byte, opts ...Option) (*Document, error) {
+	r, err := Open(data, opts...)
 	if err != nil {
 		return nil, err
 	}

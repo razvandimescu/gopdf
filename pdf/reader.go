@@ -25,10 +25,15 @@ type Reader struct {
 	compressed map[int]compressedRef // object number → ObjStm ref (type 2)
 	trailer    Dict
 	cache      map[int]any
+	crypt      *encryptInfo // nil when the document is not encrypted
 }
 
 // Open parses a PDF from raw bytes.
-func Open(data []byte) (*Reader, error) {
+//
+// Encrypted files open as-is when the user password is empty; otherwise Open
+// returns ErrEncrypted, and [WithPassword] supplies the password.
+func Open(data []byte, opts ...Option) (*Reader, error) {
+	cfg := newOpenConfig(opts)
 	r := &Reader{
 		data:       data[headerOffset(data):],
 		xref:       make(map[int]int64),
@@ -37,6 +42,16 @@ func Open(data []byte) (*Reader, error) {
 	}
 	if err := r.parseXRef(); err != nil {
 		return nil, fmt.Errorf("parsing xref: %w", err)
+	}
+	// Encryption is set up after the xref is read, since the /Encrypt dictionary
+	// is reached through the trailer, and before any content object is resolved.
+	// Objects touched during xref parsing are cross-reference streams, which the
+	// spec exempts from encryption.
+	if err := r.setupEncryption(cfg.password); err != nil {
+		if errors.Is(err, ErrWrongPassword) && cfg.password == "" {
+			return nil, ErrEncrypted
+		}
+		return nil, err
 	}
 	return r, nil
 }
@@ -237,8 +252,9 @@ func (r *Reader) readXRefStream(pos int) error {
 		return fmt.Errorf("xref stream object is not a dict")
 	}
 
-	// Read the stream data.
-	streamData, _, err := r.readStreamData(lex, d)
+	// Read the stream data. Cross-reference streams are never encrypted, and
+	// this runs before the encryption key exists in any case.
+	streamData, _, err := r.readStreamData(lex, d, 0, 0)
 	if err != nil {
 		return fmt.Errorf("reading xref stream data: %w", err)
 	}
@@ -317,7 +333,7 @@ func (r *Reader) readXRefStream(pos int) error {
 // readStreamData reads raw stream bytes after a dict, handling FlateDecode.
 // readStreamData returns the decoded stream bytes and the original
 // pre-filter raw bytes (a slice into the underlying PDF data).
-func (r *Reader) readStreamData(lex *Lexer, d Dict) ([]byte, []byte, error) {
+func (r *Reader) readStreamData(lex *Lexer, d Dict, num, gen int) ([]byte, []byte, error) {
 	// Expect "stream" keyword.
 	lex.skipWhitespaceAndComments()
 	pos := lex.Pos()
@@ -362,6 +378,14 @@ func (r *Reader) readStreamData(lex *Lexer, d Dict) ([]byte, []byte, error) {
 	}
 
 	raw := r.data[dataStart : dataStart+length]
+
+	// Decrypt before decoding: encryption is applied to the filtered bytes, so
+	// it is the outermost layer. Raw keeps the decrypted-but-still-filtered
+	// bytes, which is what merge and rewrite re-emit verbatim into output that
+	// is not itself encrypted.
+	if r.streamIsEncrypted(d) {
+		raw = r.crypt.decrypt(raw, num, gen, r.crypt.streams)
+	}
 
 	filters := filterNames(d)
 
@@ -656,6 +680,11 @@ func (r *Reader) Resolve(obj any) any {
 }
 
 // resolveFromObjStm extracts an object from a compressed object stream.
+//
+// Objects here are parsed straight out of the containing ObjStm's already
+// decrypted body, so their strings are plaintext. They must never pass through
+// decryptStrings — routing this via parseObjectAt would decrypt them a second
+// time and silently corrupt every string in the document.
 func (r *Reader) resolveFromObjStm(cref compressedRef) any {
 	// First, resolve the ObjStm itself (it must be a regular stream).
 	stmObj := r.Resolve(Ref{Num: cref.StreamObj})
@@ -741,9 +770,9 @@ func (r *Reader) parseObjectAt(pos int) (any, error) {
 	lex.SetPos(pos)
 	parser := &Parser{lex: lex}
 
-	// Read "N G obj".
-	parser.lex.NextToken() // N
-	parser.lex.NextToken() // G
+	// Read "N G obj". The number and generation feed the per-object crypt key.
+	numTok, _ := parser.lex.NextToken()
+	genTok, _ := parser.lex.NextToken()
 	tok, err := parser.lex.NextToken()
 	if err != nil {
 		return nil, err
@@ -751,6 +780,7 @@ func (r *Reader) parseObjectAt(pos int) (any, error) {
 	if tok.Type != TKeyword || tok.Str != "obj" {
 		return nil, fmt.Errorf("expected 'obj', got %q", tok.Str)
 	}
+	num, gen := numTok.Int, genTok.Int
 
 	obj, err := parser.ParseObject()
 	if err != nil {
@@ -763,15 +793,17 @@ func (r *Reader) parseObjectAt(pos int) (any, error) {
 		savedPos := lex.Pos()
 		// Check for "stream" keyword.
 		if savedPos+6 <= len(r.data) && string(r.data[savedPos:savedPos+6]) == "stream" {
-			data, raw, err := r.readStreamData(lex, d)
+			data, raw, err := r.readStreamData(lex, d, num, gen)
 			if err != nil {
 				return nil, err
 			}
-			return &Stream{Dict: d, Data: data, Raw: raw}, nil
+			obj = &Stream{Dict: d, Data: data, Raw: raw}
 		}
 	}
 
-	return obj, nil
+	// This is the only place strings are decrypted, which is what keeps objects
+	// unpacked from an ObjStm correct — see resolveFromObjStm.
+	return r.decryptStrings(obj, num, gen), nil
 }
 
 // Trailer returns the trailer dictionary.

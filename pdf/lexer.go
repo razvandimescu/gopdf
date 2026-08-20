@@ -39,13 +39,19 @@ type Lexer struct {
 	pos  int
 }
 
+// NewLexer returns a Lexer reading from data.
 func NewLexer(data []byte) *Lexer {
 	return &Lexer{data: data}
 }
 
-func (l *Lexer) Pos() int     { return l.pos }
+// Pos returns the current byte offset.
+func (l *Lexer) Pos() int { return l.pos }
+
+// SetPos seeks to byte offset p.
 func (l *Lexer) SetPos(p int) { l.pos = p }
-func (l *Lexer) AtEnd() bool  { return l.pos >= len(l.data) }
+
+// AtEnd reports whether the whole input has been consumed.
+func (l *Lexer) AtEnd() bool { return l.pos >= len(l.data) }
 
 func (l *Lexer) peek() byte {
 	if l.pos >= len(l.data) {

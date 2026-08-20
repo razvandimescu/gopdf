@@ -1,4 +1,6 @@
 *.pdf
+# Encryption fixtures are the test, not test input, so they are tracked.
+!pdf/testdata/*.pdf
 example_out
 .DS_Store
 docs/
@@ -12,4 +14,3 @@ BUGS.md
 /quote
 /sample
 /watermark
-/xfa-translate

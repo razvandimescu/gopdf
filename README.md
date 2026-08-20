@@ -22,24 +22,22 @@ tables, _ := doc.Page(0).Tables()
 fmt.Println(tables[0].CellByName(0, "Amount")) // "1,204.50"
 ```
 
-The same package also covers positioned text extraction (X/Y, font, size), search with bounding rectangles, PDF creation, merge with size constraints, and text/image overlay — all MIT-licensed with zero external dependencies.
-
 ## Why gopdf?
 
-Structure-aware table extraction in pure Go doesn't otherwise exist. That's the reason to reach for this library; the rest of the feature set is there so you don't need a second one for the surrounding work.
+Table extraction in pure Go, under a permissive licence. [unipdf](https://github.com/unidoc/unipdf) extracts tables too, but is AGPL or commercial. [ledongthuc/pdf](https://github.com/ledongthuc/pdf) gives you positioned text and groups it into rows and columns, but has no header anchoring, multi-line cell merging, or multi-page continuation.
 
 | | gopdf | unipdf | pdfcpu | ledongthuc/pdf | MuPDF bindings |
 |---|---|---|---|---|---|
 | **License** | MIT | AGPL / Commercial | Apache-2.0 | BSD-3 | AGPL |
 | **CGo required** | No | No | No | No | Yes |
-| **Text extraction** | Positioned (X/Y) | Positioned | Raw streams | Basic | Positioned |
-| **Table detection** | Yes | No | No | No | No |
+| **Text extraction** | Positioned (X/Y) | Positioned | Raw streams | Positioned (X/Y) | Positioned |
+| **Table detection** | Yes | Yes | No | Row/column grouping | No |
 | **Text search** | With rects | Yes | No | No | Yes |
 | **PDF merge** | Yes (size-constrained) | Yes | Yes | No | No |
 | **Text overlay** | Yes | Yes | Watermark | No | No |
 | **Visual redaction** | Yes | Yes | No | No | No |
 | **PDF creation** | Yes | Yes | Yes | No | Yes |
-| **Encryption** | No | Yes | Yes | No | Yes |
+| **Reads encrypted PDFs** | Yes | Yes | Yes | No | Yes |
 | **Dependencies** | 0 | Many | 0 | 0 | System lib |
 
 ### When to use something else
@@ -49,19 +47,18 @@ Structure-aware table extraction in pure Go doesn't otherwise exist. That's the 
 - **[go-pdf/fpdf](https://github.com/go-pdf/fpdf)** — for generating documents with embedded fonts and rich layout. gopdf's creator covers the standard 14 fonts only.
 - **MuPDF bindings** — for rendering fidelity, if CGo and AGPL are acceptable.
 
-Reach for gopdf when you need tabular data out of PDFs in pure Go, or when CGo and AGPL are both off the table.
-
 ## Features
 
 - Table detection with column/row extraction (explicit headers or auto-detection)
 - Multi-line cell merging for tables with wrapped content (bank statements, invoices)
 - Multi-page table support with automatic header re-detection
 - Text extraction with X/Y coordinates, font name, and font size
-- Line reconstruction with intelligent spacing
+- Line reconstruction with gap-derived word spacing
 - Text search returning bounding rectangles
 - PDF merge with page selection and size constraints (fail/truncate/shrink with JPEG recompression)
 - Text overlay (Helvetica, configurable size and color)
 - Visual redaction (filled rectangles with configurable color)
+- Reads encrypted PDFs (RC4 40/128-bit, AES-128, AES-256; user or owner password)
 - Image overlay / watermark (PNG/JPEG, rotation, opacity, transparent SMask)
 - PDF creation with text, rectangles, lines, and multiple fonts
 - Pure Go — no CGo, no system dependencies
@@ -185,6 +182,35 @@ for _, r := range results {
 // Output:
 // Page 0 at (206, 691) size 70x12
 ```
+
+### Encrypted PDFs
+
+Files encrypted with an empty user password — the common case for emailed
+statements — open through the ordinary entry points with no extra work:
+
+```go
+doc, err := pdf.OpenFile("statement.pdf")
+```
+
+When a password is genuinely required, `OpenFile` reports `pdf.ErrEncrypted` so
+you can prompt for one rather than guessing at a parse failure:
+
+```go
+doc, err := pdf.OpenFile("statement.pdf")
+if errors.Is(err, pdf.ErrEncrypted) {
+    doc, err = pdf.OpenFile("statement.pdf", pdf.WithPassword(os.Getenv("PDF_PASSWORD")))
+}
+if errors.Is(err, pdf.ErrWrongPassword) {
+    log.Fatal("wrong password")
+}
+```
+
+Either the user or the owner password is accepted. Everything reached through
+the opened document — text extraction, tables, search — behaves exactly as it
+does for an unencrypted file.
+
+`Merger` and `Editor` take their own entry points and do not yet accept a
+password, so they handle encrypted input only when its user password is empty.
 
 ### Merge PDFs
 
@@ -321,88 +347,7 @@ go run ./cmd/watermark -i in.pdf -img logo.png -o out.pdf \
 
 ## API Reference
 
-### Document
-
-| Method | Returns | Description |
-|---|---|---|
-| `pdf.OpenFile(path)` | `*Document, error` | Open PDF from file |
-| `pdf.OpenBytes(data)` | `*Document, error` | Open PDF from bytes |
-| `doc.NumPages()` | `int` | Page count |
-| `doc.Page(n)` | `*Page` | Page by 0-based index |
-| `doc.Text()` | `string, error` | All text, pages joined by newline |
-| `doc.Search(query)` | `[]SearchResult` | Find text across all pages |
-
-### Page
-
-| Method | Returns | Description |
-|---|---|---|
-| `page.Text()` | `string, error` | Full page text |
-| `page.TextLines()` | `[]TextLine, error` | Lines grouped by Y, sorted top-to-bottom |
-| `page.TextSpans()` | `[]TextSpan, error` | Raw positioned spans |
-| `page.Tables()` | `[]Table, error` | Auto-detect all tables |
-| `page.FindTable(opts)` | `*Table, error` | Detect table with options |
-| `page.Search(query)` | `[]SearchResult` | Find text on this page |
-| `page.Rotation()` | `int` | Rotation in degrees (0/90/180/270) |
-| `page.MediaBox()` | `[4]float64` | Page bounds [llx, lly, urx, ury] |
-
-### Creator
-
-| Method | Returns | Description |
-|---|---|---|
-| `pdf.NewCreator()` | `*Creator` | Create empty PDF builder |
-| `c.NewPage(w, h)` | `*PageBuilder` | Add blank page (points) |
-| `c.Build()` | `[]byte, error` | Produce PDF bytes |
-| `page.SetFont(name, size)` | | Set font (Helvetica, Times, Courier + variants) |
-| `page.SetColor(r, g, b)` | | Set fill color (0-1) |
-| `page.DrawText(x, y, text)` | | Draw text at position |
-| `page.DrawRect(x, y, w, h)` | | Stroked rectangle |
-| `page.FillRect(x, y, w, h, r, g, b)` | | Filled rectangle |
-| `page.DrawLine(x1, y1, x2, y2, w)` | | Line with width |
-| `page.TextWidth(text)` | `float64` | Measure text width in current font |
-
-### Merger
-
-| Method | Returns | Description |
-|---|---|---|
-| `pdf.MergeFiles(paths...)` | `[]byte, error` | Merge PDF files by path |
-| `pdf.MergeBytes(pdfs...)` | `[]byte, error` | Merge in-memory PDFs |
-| `pdf.NewMerger()` | `*Merger` | Create merger for page selection |
-| `m.AddFile(path, pages...)` | `error` | Add file (0-indexed pages; empty = all) |
-| `m.Add(data, pages...)` | `error` | Add bytes (0-indexed pages; empty = all) |
-| `m.Merge()` | `[]byte, error` | Produce combined PDF |
-| `m.MergeWithOptions(opts)` | `*MergeResult, error` | Merge with size constraints |
-
-`MergeOptions` fields: `MaxSize` (bytes, 0 = unlimited), `OversizeBehavior` (`OversizeFail` / `OversizeTruncate` / `OversizeShrink`).
-
-`MergeResult` fields: `Data` (PDF bytes), `TotalPages`, `IncludedPages`.
-
-### Table Detection
-
-| Method | Returns | Description |
-|---|---|---|
-| `pdf.FindTable(spans, opts)` | `*Table` | Detect single table from spans |
-| `pdf.FindTables(spans, opts)` | `[]Table` | Detect all tables (auto-detect) |
-| `pdf.FindTableAcrossPages(pages, opts)` | `*Table` | Detect table spanning multiple pages |
-| `tbl.CellText(row, col)` | `string` | Cell text by row/col index |
-| `tbl.ColumnByName(name)` | `int` | Column index by name (case-insensitive) |
-| `tbl.CellByName(row, name)` | `string` | Cell text by row index and column name |
-
-`TableOpts` fields: `Headers` (anchor strings), `YTolerance`, `MinColumns`, `RowFilter`, `WrapTolerance`, `MinGap`, `MergeGap` (multi-line cell merging), `MaxRowGap` (table boundary detection).
-
-### Editor
-
-| Method | Returns | Description |
-|---|---|---|
-| `pdf.NewEditor(data)` | `*Editor` | Create editor from PDF bytes |
-| `pdf.NewEditorFromFile(path)` | `*Editor, error` | Create editor from file |
-| `ed.AddText(overlay)` | | Draw text (Helvetica, any size/color) |
-| `ed.Redact(region)` | | Cover area with filled rectangle |
-| `ed.RedactText(query, r, g, b)` | `error` | Search and redact all matches |
-| `ed.AddImage(overlay)` | | Place an image (rotation, opacity, alpha) |
-| `ed.Apply()` | `[]byte, error` | Produce modified PDF |
-| `pdf.LoadImage(path)` | `*Image, error` | Decode PNG/JPEG for use with `AddImage` |
-| `pdf.LoadImageBytes(data)` | `*Image, error` | Decode PNG/JPEG from memory |
-| `img.FitRotated(pageW, pageH, rotation, scale)` | `width, height float64` | Size a watermark so its rotated bbox fits the page |
+Full reference on [pkg.go.dev](https://pkg.go.dev/github.com/razvandimescu/gopdf/pdf) — every exported symbol is documented there.
 
 ### Types
 
@@ -466,12 +411,13 @@ type Rect struct {
 | **Content streams** | All text operators (BT/ET/Tf/Tm/Td/TD/T\*/TJ/Tj/'/"), graphics state stack (q/Q), CTM (cm) |
 | **XObjects** | Recursive text extraction from Form XObjects via Do operator |
 | **Marked content** | ActualText extraction (BMC/BDC/EMC) with UTF-16BE support |
+| **Encryption** | Standard security handler: RC4 40/128-bit (R2/R3), AES-128 (R4), AES-256 (R5/R6), crypt filters, /EncryptMetadata |
 | **Structure** | Linearized PDFs, incremental updates, indirect Length references |
 
 ## Limitations
 
 - **Redaction is visual only.** A rectangle is drawn over the text; the text stays in the content stream and remains recoverable by copy/paste or any PDF parser. Do not use it to remove sensitive data.
-- **No encryption/password support** (planned). Encrypted PDFs are not currently detected either — extraction on one will return garbage rather than an error.
+- **Reading encrypted PDFs is supported; writing them is not.** Output from merge, rewrite, and creation is always unencrypted, so an encrypted input is effectively decrypted by any operation that writes it back out. Public-key (certificate) security handlers are not supported.
 - No image extraction
 - PDF creation supports standard 14 fonts only (no font embedding)
 - Merge drops interactive features (forms, bookmarks, JS)

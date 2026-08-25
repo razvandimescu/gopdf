@@ -765,6 +765,26 @@ func (r *Reader) ResolveArray(obj any) (Array, bool) {
 	return a, ok
 }
 
+// ResolveInt resolves obj (following an indirect reference if present) and
+// coerces it to an int. ok is false only when obj is absent (nil) — a
+// resolved non-numeric value coerces to 0 via asInt, same as Dict.Int does
+// for a direct value.
+func (r *Reader) ResolveInt(obj any) (int, bool) {
+	if obj == nil {
+		return 0, false
+	}
+	return asInt(r.Resolve(obj)), true
+}
+
+// ResolveFloat resolves obj (following an indirect reference if present) and
+// coerces it to a float64. ok is false only when obj is absent (nil).
+func (r *Reader) ResolveFloat(obj any) (float64, bool) {
+	if obj == nil {
+		return 0, false
+	}
+	return asFloat(r.Resolve(obj)), true
+}
+
 func (r *Reader) parseObjectAt(pos int) (any, error) {
 	lex := NewLexer(r.data)
 	lex.SetPos(pos)

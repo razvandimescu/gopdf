@@ -363,8 +363,6 @@ gopdf merge report.pdf scan.png -o out.pdf  # combine PDFs and images
 gopdf watermark -img logo.png in.pdf -o out.pdf
 ```
 
-Install it with `go install github.com/razvandimescu/gopdf/cmd/gopdf@latest`.
-
 #### gopdf tables
 
 Detects a table and prints its rows as aligned text or CSV. Columns come from
@@ -441,6 +439,30 @@ gopdf merge: IMG_6407.HEIC: HEIC is not supported (PNG and JPEG only)
 `sips` ships with macOS; elsewhere the hint names ImageMagick. Library callers
 can match `*pdf.UnsupportedFormatError` with `errors.As` to react to the format
 themselves.
+
+#### gopdf watermark
+
+Stamps an image diagonally across every page, centred and scaled to the page it
+lands on — including pages rotated 90° or 270°, which are measured as the reader
+sees them rather than as they are stored.
+
+```bash
+gopdf watermark -img logo.png in.pdf -o out.pdf
+gopdf watermark -img draft.png in.pdf -o out.pdf -angle 30 -opacity 0.12 -skip-first
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `-img` | — | watermark image, PNG or JPEG (required) |
+| `-o` | stdout | output PDF path |
+| `-angle` | `45` | rotation in degrees, counter-clockwise |
+| `-opacity` | `0.15` | opacity, in [0, 1] |
+| `-scale` | `0.85` | size as a fraction of the page |
+| `-skip-first` | off | leave the first page un-watermarked |
+| `-skip-last` | off | leave the last page un-watermarked |
+
+The image is written to the file once and shared by every page that references
+it, so a hundred-page watermark costs one copy.
 
 ### Text overlay
 
@@ -532,12 +554,7 @@ result, err := ed.Apply()
 ```
 
 The same image is written once and shared by every page that references it.
-The CLI wraps this for one-shot usage:
-
-```bash
-gopdf watermark -img logo.png in.pdf -o out.pdf \
-  -angle 30 -opacity 0.12 -scale 0.9 -skip-first
-```
+[`gopdf watermark`](#gopdf-watermark) wraps this for one-shot usage.
 
 ## API Reference
 

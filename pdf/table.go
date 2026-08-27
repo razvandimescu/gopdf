@@ -16,6 +16,7 @@ const (
 	anchorClusterTol     = 5.0  // X-distance for clustering span start positions
 	anchorMinRowFrac     = 0.15 // fraction of rows an anchor must appear in
 	anchorMaxHeaderLen   = 30   // max text length for header-like spans
+	minMeanHeaderRunes   = 4    // mean column-name length below this reads as word fragments, not headings
 	anchorMinColSpacing  = 20.0 // min X-distance between anchor columns (filters char-level spans)
 	anchorMaxColumns     = 10   // reject anchor detection with more columns than this
 	headerDedupXTol      = 1.0  // X-distance for deduplicating header spans
@@ -472,7 +473,7 @@ func discoverAnchorsAcrossPages(pages [][]TextSpan, opts *TableOpts) []Column {
 		allRows = append(allRows, rows...)
 		for _, row := range rows {
 			cols := scoreHeaderRow(row, anchorMinColSpacing)
-			if len(cols) < minCols {
+			if len(cols) < minCols || mostlyFragments(cols) {
 				continue
 			}
 			totalLen := 0
@@ -516,13 +517,18 @@ func discoverAnchorsAcrossPages(pages [][]TextSpan, opts *TableOpts) []Column {
 		})
 	}
 
-	// Step 3: map header names to data anchors by positional zone.
+	// Step 3: map header names to data anchors by positional zone,
+	// falling back to the header X positions directly.
+	cols := bestHeaderCols
 	if len(dataAnchors) >= minCols {
-		return mapHeadersToAnchors(bestHeaderCols, dataAnchors)
+		cols = mapHeadersToAnchors(bestHeaderCols, dataAnchors)
 	}
-
-	// Fallback: use header X positions directly.
-	return bestHeaderCols
+	// Mapping can drop or merge columns, so hold the result to the same
+	// standard as the candidate: enough columns, and named like headings.
+	if len(cols) < minCols || mostlyFragments(cols) {
+		return nil
+	}
+	return cols
 }
 
 // mapHeadersToAnchors assigns header names to data X clusters using
@@ -1065,6 +1071,10 @@ func findTableByAnchors(spans []TextSpan, opts *TableOpts) *Table {
 		}
 	}
 
+	if mostlyFragments(columns) {
+		return nil
+	}
+
 	dataStart := hi + 1
 	for dataStart < len(rows) && rows[dataStart].y >= lowestY-yTol {
 		dataStart++
@@ -1154,6 +1164,19 @@ func buildAnchorColumns(row tableRow, anchors []xCluster) []Column {
 		}
 	}
 	return cols
+}
+
+// mostlyFragments reports whether column names are, on average, too short to
+// be headings. Gap analysis slices flowing prose into "columns" wherever
+// inter-word spaces happen to line up, and names each one after whatever
+// fragment falls in it ("w", "hi", "ec"). Real headings are words, so a mean
+// name length of a few characters means the rows below are prose, not data.
+func mostlyFragments(cols []Column) bool {
+	total := 0
+	for _, c := range cols {
+		total += len([]rune(c.Name))
+	}
+	return float64(total) < float64(len(cols))*minMeanHeaderRunes
 }
 
 func isHeaderText(s string) bool {

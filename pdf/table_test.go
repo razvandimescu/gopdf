@@ -1102,3 +1102,85 @@ func TestIntegration_AllQuotationPDFs(t *testing.T) {
 		t.Error("no quotation PDFs were detected — expected at least one")
 	}
 }
+
+// =====================================================================
+// Prose rejection
+// =====================================================================
+
+// prosePage lays out letter-spaced prose: short fragments that recur at the
+// same X positions on every line, which is what a gap- or anchor-based
+// detector mistakes for columns.
+func prosePage(rows int) []TextSpan {
+	fragments := []string{"w", "hi", "ee", "om", "at", "ec", "i", "nds", "ion"}
+	var spans []TextSpan
+	for r := 0; r < rows; r++ {
+		// Prose lines hold different numbers of words at different offsets,
+		// so no gap structure repeats down the page.
+		x := 50.0 + float64((r*13)%25)
+		for i := 0; i < 4+(r%3); i++ {
+			frag := fragments[(r*6+i)%len(fragments)]
+			spans = append(spans, makeSpan(x, 700-float64(r)*20, frag))
+			x += 55 + float64((r*7+i*3)%20)
+		}
+	}
+	return spans
+}
+
+// tablePage uses the same geometry as prosePage but with real headings and
+// cell values, so the two differ only in whether the text reads as a table.
+func tablePage(rows int) []TextSpan {
+	headings := []string{"Quantity", "Product Code", "Suppliers Code", "Unit Price", "Total Price", "Delivery"}
+	var spans []TextSpan
+	for i, h := range headings {
+		spans = append(spans, makeSpan(50+float64(i)*60, 700, h))
+	}
+	for r := 1; r <= rows; r++ {
+		for i := range headings {
+			spans = append(spans, makeSpan(50+float64(i)*60, 700-float64(r)*20, "12.00"))
+		}
+	}
+	return spans
+}
+
+func TestFindTable_RejectsProse(t *testing.T) {
+	// Auto-detection names each column after the text that falls in it, so
+	// prose yields headings like "w" or "ec". Rejecting those is what stops
+	// the extractors reporting a table where there is only running text.
+	spans := prosePage(15)
+
+	if tbl := FindTableAcrossPages([][]TextSpan{spans}, &TableOpts{AutoTune: true}); tbl != nil {
+		names := make([]string, len(tbl.Columns))
+		for i, c := range tbl.Columns {
+			names[i] = c.Name
+		}
+		t.Errorf("found a table in prose: %d rows, columns %v", len(tbl.Rows), names)
+	}
+	if tbl := findTableByAnchors(spans, nil); tbl != nil {
+		t.Errorf("anchor detection found a table in prose: %d rows", len(tbl.Rows))
+	}
+}
+
+func TestFindTable_KeepsTableWithProseGeometry(t *testing.T) {
+	// The guard rejects prose by column-name length, so a real table laid
+	// out identically must still be found.
+	tbl := FindTableAcrossPages([][]TextSpan{tablePage(15)}, &TableOpts{AutoTune: true})
+	if tbl == nil {
+		t.Fatal("real table rejected")
+	}
+	if got := tbl.Columns[0].Name; got != "Quantity" {
+		t.Errorf("first column = %q, want %q", got, "Quantity")
+	}
+}
+
+func TestFindTableAcrossPages_ProseDoesNotHideTable(t *testing.T) {
+	// A prose page offers more apparent columns than the real header row,
+	// so header selection must not let it win and suppress the table.
+	pages := [][]TextSpan{prosePage(15), tablePage(15)}
+	tbl := FindTableAcrossPages(pages, &TableOpts{AutoTune: true})
+	if tbl == nil {
+		t.Fatal("table on page 2 lost to prose on page 1")
+	}
+	if got := tbl.Columns[0].Name; got != "Quantity" {
+		t.Errorf("first column = %q, want %q", got, "Quantity")
+	}
+}

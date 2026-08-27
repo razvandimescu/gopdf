@@ -372,11 +372,13 @@ their headers when `-headers` is given, and from column geometry otherwise.
 gopdf tables statement.pdf -format csv -o rows.csv
 gopdf tables invoice.pdf -headers "Quantity,Product Code,Description"
 gopdf tables statement.pdf -anchor Date -filter "Page ,Continued"
+gopdf tables statement.pdf -format csv -delimiter ';'   # comma-decimal locales
 ```
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `-format` | `text` | `text` or `csv` |
+| `-delimiter` | `,` | field delimiter for `-format csv`; `\t` gives TSV |
 | `-o` | stdout | output path |
 | `-headers` | — | comma-separated header anchors |
 | `-anchor` | — | column that signals a new row; rows where it is empty merge upwards |
@@ -385,6 +387,10 @@ gopdf tables statement.pdf -anchor Date -filter "Page ,Continued"
 | `-merge-gap`, `-max-row-gap` | auto | row grouping distances; auto-tuned when unset |
 | `-col-width` | `30` | maximum column width, for `-format text` |
 | `-password` | — | password for an encrypted PDF |
+
+Where the decimal separator is a comma, `-delimiter ';'` is the difference
+between a file a spreadsheet opens correctly and one it does not: every
+`1.000,00` in the default output has to be quoted to survive the comma.
 
 #### gopdf merge
 

@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/razvandimescu/gopdf/pdf"
 )
@@ -15,6 +16,7 @@ import (
 func runTables(args []string) error {
 	fs := flag.NewFlagSet("tables", flag.ExitOnError)
 	format := fs.String("format", "text", "output format: text or csv")
+	delimiter := fs.String("delimiter", ",", `field delimiter for -format csv; \t gives TSV`)
 	out := fs.String("o", "", "output path (default: stdout)")
 	headers := fs.String("headers", "", `comma-separated header anchors (e.g. "Date,Description,Amount")`)
 	mergeGap := fs.Float64("merge-gap", 0, "merge rows within this Y-distance into one logical row")
@@ -40,6 +42,10 @@ func runTables(args []string) error {
 	}
 	if *format != "text" && *format != "csv" {
 		return fmt.Errorf("unknown -format %q; want text or csv", *format)
+	}
+	comma, err := parseDelimiter(*delimiter)
+	if err != nil {
+		return err
 	}
 
 	var opts []pdf.Option
@@ -75,7 +81,7 @@ func runTables(args []string) error {
 		w = f
 	}
 	if *format == "csv" {
-		return writeCSV(w, table)
+		return writeCSV(w, table, comma)
 	}
 	writeText(w, table, *colWidth)
 	return nil
@@ -123,8 +129,27 @@ func splitList(value string) []string {
 	return out
 }
 
-func writeCSV(w io.Writer, table *pdf.Table) error {
+// parseDelimiter accepts one character, or the two-character escape \t that a
+// shell would otherwise swallow. The rejected runes are the ones csv.Writer
+// itself refuses, since they cannot be told apart from a field's own content.
+func parseDelimiter(value string) (rune, error) {
+	if value == `\t` {
+		return '\t', nil
+	}
+	runes := []rune(value)
+	if len(runes) != 1 {
+		return 0, fmt.Errorf("-delimiter must be one character, got %q", value)
+	}
+	switch runes[0] {
+	case '"', '\r', '\n', utf8.RuneError:
+		return 0, fmt.Errorf("-delimiter %q would be indistinguishable from a field's contents", value)
+	}
+	return runes[0], nil
+}
+
+func writeCSV(w io.Writer, table *pdf.Table, comma rune) error {
 	out := csv.NewWriter(w)
+	out.Comma = comma
 	header := make([]string, len(table.Columns))
 	for i, col := range table.Columns {
 		header[i] = col.Name

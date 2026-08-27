@@ -80,7 +80,7 @@ func testTable() *pdf.Table {
 
 func TestWriteCSV(t *testing.T) {
 	var buf bytes.Buffer
-	if err := writeCSV(&buf, testTable()); err != nil {
+	if err := writeCSV(&buf, testTable(), ','); err != nil {
 		t.Fatalf("writeCSV: %v", err)
 	}
 	got := buf.String()
@@ -145,5 +145,68 @@ func TestTruncate(t *testing.T) {
 		if got := truncate(tt.s, tt.n); got != tt.want {
 			t.Errorf("truncate(%q, %d) = %q, want %q", tt.s, tt.n, got, tt.want)
 		}
+	}
+}
+
+func TestParseDelimiter(t *testing.T) {
+	tests := []struct {
+		in      string
+		want    rune
+		wantErr bool
+	}{
+		{",", ',', false},
+		{";", ';', false},
+		{"|", '|', false},
+		{`\t`, '\t', false}, // the escape a shell would otherwise swallow
+		{"\t", '\t', false}, // a literal tab, if the shell passed one through
+		{"", 0, true},
+		{";;", 0, true},
+		{`"`, 0, true},
+		{"\n", 0, true},
+		{"\r", 0, true},
+	}
+	for _, tt := range tests {
+		got, err := parseDelimiter(tt.in)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("parseDelimiter(%q) error = %v, wantErr %v", tt.in, err, tt.wantErr)
+			continue
+		}
+		if err == nil && got != tt.want {
+			t.Errorf("parseDelimiter(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+// TestWriteCSVDelimiterAvoidsQuoting is the point of the flag: where the
+// decimal separator is a comma, a comma-delimited file quotes every amount
+// and opens wrongly in a spreadsheet set to that locale.
+func TestWriteCSVDelimiterAvoidsQuoting(t *testing.T) {
+	table := &pdf.Table{
+		Columns: []pdf.Column{{Name: "Detail"}, {Name: "Amount"}},
+		Rows:    []pdf.Row{{Cells: []pdf.Cell{{Text: "Transfer"}, {Text: "1.000,00"}}}},
+	}
+
+	var comma bytes.Buffer
+	if err := writeCSV(&comma, table, ','); err != nil {
+		t.Fatalf("writeCSV: %v", err)
+	}
+	if !strings.Contains(comma.String(), `"1.000,00"`) {
+		t.Errorf("a decimal comma should force quoting under -delimiter , :\n%s", comma.String())
+	}
+
+	var semicolon bytes.Buffer
+	if err := writeCSV(&semicolon, table, ';'); err != nil {
+		t.Fatalf("writeCSV: %v", err)
+	}
+	if got := semicolon.String(); !strings.Contains(got, "Transfer;1.000,00") {
+		t.Errorf("semicolon output should leave the amount unquoted:\n%s", got)
+	}
+
+	var tab bytes.Buffer
+	if err := writeCSV(&tab, table, '\t'); err != nil {
+		t.Fatalf("writeCSV: %v", err)
+	}
+	if got := tab.String(); !strings.Contains(got, "Transfer\t1.000,00") {
+		t.Errorf("tab output should be plain TSV:\n%s", got)
 	}
 }

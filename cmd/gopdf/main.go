@@ -20,7 +20,7 @@ type command struct {
 }
 
 var commands = []command{
-	{"merge", "combine PDFs and images (PNG/JPEG) into one PDF", runMerge},
+	{"merge", "combine PDFs and images (PNG/JPEG/GIF) into one PDF", runMerge},
 	{"tables", "extract a table from a PDF as text or CSV", runTables},
 	{"watermark", "stamp an image across every page of a PDF", runWatermark},
 }

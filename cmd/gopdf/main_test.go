@@ -105,7 +105,7 @@ func TestImageToPDFPageSizing(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parseLayout: %v", err)
 			}
-			out, _, err := l.imageToPDF(data)
+			out, err := l.imageToPDF(data)
 			if err != nil {
 				t.Fatalf("imageToPDF: %v", err)
 			}
@@ -145,7 +145,7 @@ func TestImageToPDFPageSizing(t *testing.T) {
 
 func TestImageToPDFRejectsNonImage(t *testing.T) {
 	l, _ := parseLayout("a4", 72, 18)
-	_, _, err := l.imageToPDF([]byte("this is not an image"))
+	_, err := l.imageToPDF([]byte("this is not an image"))
 	if err == nil || !strings.Contains(err.Error(), "not a PDF") {
 		t.Errorf("error = %v, want one explaining the input is neither PDF nor image", err)
 	}
@@ -154,11 +154,11 @@ func TestImageToPDFRejectsNonImage(t *testing.T) {
 func TestConversionHint(t *testing.T) {
 	heic := append([]byte{0, 0, 0, 0x18}, "ftypheic"...)
 	l, _ := parseLayout("a4", 72, 18)
-	_, _, err := l.imageToPDF(heic)
+	_, err := l.imageToPDF(heic)
 	if err == nil {
 		t.Fatal("HEIC decoded without error")
 	}
-	if got := err.Error(); got != "HEIC is not supported (PNG and JPEG only)" {
+	if got := err.Error(); got != "HEIC is not supported (PNG, JPEG and GIF only)" {
 		t.Errorf("error = %q; an unsupported format should not also be called a non-PDF", got)
 	}
 
@@ -213,18 +213,15 @@ func TestPageFollowsDeclaredResolution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseLayout: %v", err)
 	}
-	out, natural, err := l.imageToPDF(pngAt300DPI(t))
+	out, err := l.imageToPDF(pngAt300DPI(t))
 	if err != nil {
 		t.Fatalf("imageToPDF: %v", err)
-	}
-	// 600 pixels at 300 dpi is two inches, which is 144 points.
-	if math.Abs(natural.width-144) > 0.01 || math.Abs(natural.height-144) > 0.01 {
-		t.Errorf("natural page = %.2f×%.2f pt, want 144×144", natural.width, natural.height)
 	}
 	doc, err := pdf.OpenBytes(out)
 	if err != nil {
 		t.Fatalf("opening result: %v", err)
 	}
+	// 600 pixels at 300 dpi is two inches, which is 144 points.
 	box := doc.Page(0).MediaBox()
 	if math.Abs(box[2]-144) > 0.01 || math.Abs(box[3]-144) > 0.01 {
 		t.Errorf("MediaBox = %v, want [0 0 144 144]", box)
@@ -268,16 +265,16 @@ func TestReportNamesThePageSizeAndTheWayOut(t *testing.T) {
 	// A page size is invisible until printing, so the summary must state it
 	// and point at the alternative while the user can still act on it.
 	l, _ := parseLayout("a4", 72, 0)
-	data, natural, err := l.imageToPDF(testPNGBytes(t, 400, 200))
+	data, err := l.imageToPDF(testPNGBytes(t, 400, 200))
 	if err != nil {
 		t.Fatalf("imageToPDF: %v", err)
 	}
 
-	stderr := captureStderr(t, func() { report("out.pdf", 1, 1, data, l, natural) })
+	stderr := captureStderr(t, func() { report("out.pdf", 1, 1, data, l) })
 	for _, want := range []string{
 		"1 input, 1 page → out.pdf",
 		"1 image fitted to A4 595×842pt",
-		"-page image sizes each page to its image (400×200pt at 72dpi)",
+		"-page image sizes each page to its image",
 	} {
 		if !strings.Contains(stderr, want) {
 			t.Errorf("summary lacks %q:\n%s", want, stderr)
@@ -287,10 +284,10 @@ func TestReportNamesThePageSizeAndTheWayOut(t *testing.T) {
 	// Under -page image there is nothing to escape to, and a merge of PDFs
 	// alone fitted no images; neither should get the second line.
 	native, _ := parseLayout("image", 0, 0)
-	if got := captureStderr(t, func() { report("out.pdf", 1, 1, data, native, natural) }); strings.Contains(got, "-page image sizes") {
+	if got := captureStderr(t, func() { report("out.pdf", 1, 1, data, native) }); strings.Contains(got, "-page image sizes") {
 		t.Errorf("-page image should not advertise itself:\n%s", got)
 	}
-	if got := captureStderr(t, func() { report("out.pdf", 2, 0, data, l, naturalPage{}) }); strings.Contains(got, "fitted to") {
+	if got := captureStderr(t, func() { report("out.pdf", 2, 0, data, l) }); strings.Contains(got, "fitted to") {
 		t.Errorf("a merge with no images should not mention fitting:\n%s", got)
 	}
 }

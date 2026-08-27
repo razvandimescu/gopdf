@@ -10,7 +10,7 @@ import (
 
 func runWatermark(args []string) error {
 	fs := flag.NewFlagSet("watermark", flag.ExitOnError)
-	image := fs.String("img", "", "watermark image path; PNG or JPEG (required)")
+	image := fs.String("img", "", "watermark image path; PNG, JPEG or GIF (required)")
 	out := fs.String("o", "", "output PDF path (default: stdout)")
 	angle := fs.Float64("angle", 45, "rotation in degrees, counter-clockwise")
 	opacity := fs.Float64("opacity", 0.15, "opacity in [0, 1]")

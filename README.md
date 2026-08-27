@@ -82,9 +82,9 @@ only one that pairs that with table extraction, under a permissive licence.
 - Visual redaction (filled rectangles with configurable color)
 - Text removal: glyphs deleted from the content stream, not covered over
 - Reads encrypted PDFs (RC4 40/128-bit, AES-128, AES-256; user or owner password)
-- Image overlay / watermark (PNG/JPEG, rotation, opacity, transparent SMask)
+- Image overlay / watermark (PNG/JPEG/GIF, rotation, opacity, transparent SMask)
 - PDF creation with text, rectangles, lines, images, and multiple fonts
-- Images as pages: PDFs and PNG/JPEG mixed into one document, detected by content, with baseline JPEGs embedded unre-encoded and EXIF orientation honoured
+- Images as pages: PDFs and PNG/JPEG/GIF mixed into one document, detected by content, with baseline JPEGs embedded unre-encoded and EXIF orientation honoured
 - One CLI — `gopdf tables`, `gopdf merge`, `gopdf watermark`
 - Pure Go — no CGo, no system dependencies
 
@@ -429,16 +429,16 @@ page size chosen and the way out of it:
 
 ```
 2 inputs, 2 pages → out.pdf (7.1 MiB)
-  2 images fitted to A4 595×842pt; -page image sizes each page to its image (3024×4032pt at 72dpi)
+  2 images fitted to A4 595×842pt; -page image sizes each page to its image
 ```
 
-PNG and JPEG are the formats Go's standard library decodes, so they are the
-formats gopdf reads. Hand it a HEIC, AVIF, WebP, TIFF, GIF, or BMP and the
-error names the format and the command that fixes it:
+PNG, JPEG and GIF are the formats Go's standard library decodes, so they are
+the formats gopdf reads. Hand it a HEIC, AVIF, WebP or TIFF and the error
+names the format and the command that fixes it:
 
 ```
 $ gopdf merge IMG_6407.HEIC -o out.pdf
-gopdf merge: IMG_6407.HEIC: HEIC is not supported (PNG and JPEG only)
+gopdf merge: IMG_6407.HEIC: HEIC is not supported (PNG, JPEG and GIF only)
   convert it first:  sips -s format jpeg IMG_6407.HEIC --out IMG_6407.jpg
 ```
 
@@ -459,7 +459,7 @@ gopdf watermark -img draft.png in.pdf -o out.pdf -angle 30 -opacity 0.12 -skip-f
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `-img` | — | watermark image, PNG or JPEG (required) |
+| `-img` | — | watermark image; PNG, JPEG or GIF (required) |
 | `-o` | stdout | output PDF path |
 | `-angle` | `45` | rotation in degrees, counter-clockwise |
 | `-opacity` | `0.15` | opacity, in [0, 1] |
@@ -636,7 +636,7 @@ type Rect struct {
 - **Redaction covers two operations with different guarantees.** `RemoveText` / `RemoveRegion` delete the glyphs from the page content streams and the Form XObjects those pages draw — and nothing else in the file (see the table above). `RedactText` / `Redact` only draw a rectangle: the text stays in the content stream and remains recoverable by copy/paste or any PDF parser.
 - **Reading encrypted PDFs is supported; writing them is not.** Output from merge, rewrite, and creation is always unencrypted, so an encrypted input is effectively decrypted by any operation that writes it back out. Public-key (certificate) security handlers are not supported.
 - No image extraction
-- **Images read as PNG and JPEG only.** HEIC and AVIF need an HEVC or AV1 decoder, which the standard library does not have. The Go decoders that do exist are either CGo wrappers around LGPL libraries or wrap AGPL-licensed code, so neither fits a CGo-free MIT library; unsupported formats are named in the error with a conversion command instead. WebP and TIFF would need `golang.org/x/image`, which is a dependency this library does not take.
+- **Images read as PNG, JPEG and GIF only** — what the standard library decodes. HEIC and AVIF need an HEVC or AV1 decoder, which it does not have; the Go decoders that do exist are either CGo wrappers around LGPL libraries or wrap AGPL-licensed code, so neither fits a CGo-free MIT library. WebP and TIFF would need `golang.org/x/image`, a dependency this library does not take. Unsupported formats are named in the error, with a conversion command.
 - PDF creation supports standard 14 fonts only (no font embedding)
 - Merge drops interactive features (forms, bookmarks, JS)
 - Text overlay uses Helvetica only
@@ -653,7 +653,7 @@ pdf/
   merge.go      PDF merge: size constraints (fail/truncate/shrink), stream dedup, JPEG recompression
   edit.go       Text search, text overlay, image overlay, visual redaction
   redact.go     Text removal: glyph-level content stream rewriting
-  image.go      Image decoding (PNG/JPEG) → RGB + grayscale SMask streams
+  image.go      Image decoding (PNG/JPEG/GIF) → RGB + grayscale SMask streams
   creator.go    PDF creation from scratch (text, shapes, images, fonts)
   lexer.go      PDF byte stream tokenizer
   parser.go     Token -> object parser (dicts, arrays, refs)

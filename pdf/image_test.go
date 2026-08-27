@@ -7,6 +7,7 @@ import (
 	"hash/crc32"
 	"image"
 	"image/color"
+	"image/gif"
 	"image/jpeg"
 	"math"
 	"strings"
@@ -201,8 +202,6 @@ func TestRecognizedFormat(t *testing.T) {
 		{"webp", webp, "WebP"},
 		{"tiff little-endian", []byte("II*\x00rest"), "TIFF"},
 		{"tiff big-endian", []byte("MM\x00*rest"), "TIFF"},
-		{"gif", []byte("GIF89a...."), "GIF"},
-		{"bmp", []byte("BM......"), "BMP"},
 		{"png", testPNG(t, false), ""},
 		{"short", []byte("ab"), ""},
 	}
@@ -473,5 +472,35 @@ func TestDeclaredDPI(t *testing.T) {
 	}
 	if img.DPI != 300 {
 		t.Errorf("DPI = %v with both JFIF 150 and EXIF 300, want 300", img.DPI)
+	}
+}
+
+// TestGIFDecodes pins the reason the GIF branch of recognizedFormat is gone:
+// the standard library decodes GIF, so refusing it was a special case where
+// a blank import would do.
+func TestGIFDecodes(t *testing.T) {
+	src := image.NewPaletted(image.Rect(0, 0, 8, 4), color.Palette{
+		color.RGBA{A: 255}, color.RGBA{R: 200, G: 100, B: 50, A: 255},
+	})
+	for x := range 8 {
+		src.SetColorIndex(x, 0, 1)
+	}
+	var buf bytes.Buffer
+	if err := gif.Encode(&buf, src, nil); err != nil {
+		t.Fatalf("encoding test GIF: %v", err)
+	}
+
+	img, err := LoadImageBytes(buf.Bytes())
+	if err != nil {
+		t.Fatalf("loading GIF: %v", err)
+	}
+	if img.Width != 8 || img.Height != 4 {
+		t.Errorf("size = %d×%d, want 8×4", img.Width, img.Height)
+	}
+	if img.rgb == nil {
+		t.Error("GIF should take the decode path; it has no DCTDecode form")
+	}
+	if got := recognizedFormat(buf.Bytes()); got != "" {
+		t.Errorf("recognizedFormat = %q; a format we decode must not be named as unsupported", got)
 	}
 }

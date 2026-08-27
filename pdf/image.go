@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"image"
+	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
 	"math"
@@ -25,7 +26,7 @@ type Image struct {
 	components    int     // jpeg color components: 1 grayscale, 3 YCbCr
 }
 
-// LoadImage decodes a PNG or JPEG image from disk.
+// LoadImage decodes a PNG, JPEG, or GIF image from disk.
 func LoadImage(path string) (*Image, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -34,7 +35,8 @@ func LoadImage(path string) (*Image, error) {
 	return LoadImageBytes(data)
 }
 
-// LoadImageBytes decodes a PNG or JPEG image from memory.
+// LoadImageBytes decodes a PNG, JPEG, or GIF image from memory. An animated
+// GIF yields its first frame.
 //
 // A JPEG that PDF viewers can decode themselves keeps its original encoding
 // and is embedded with DCTDecode. Decoding a photograph to RGB and deflating
@@ -307,11 +309,11 @@ func (img *Image) FitRotated(pageW, pageH, rotation, scale float64) (width, heig
 // decode. Callers can match it with errors.As to say something useful about
 // the file — suggest a conversion, say — rather than relay "unknown format".
 type UnsupportedFormatError struct {
-	Format string // "HEIC", "HEIF", "AVIF", "WebP", "TIFF", "GIF" or "BMP"
+	Format string // "HEIC", "HEIF", "AVIF", "WebP" or "TIFF"
 }
 
 func (e *UnsupportedFormatError) Error() string {
-	return fmt.Sprintf("%s is not supported (PNG and JPEG only)", e.Format)
+	return fmt.Sprintf("%s is not supported (PNG, JPEG and GIF only)", e.Format)
 }
 
 // heifBrands are the ISO base media brands that mark a still image the
@@ -334,10 +336,6 @@ func recognizedFormat(data []byte) string {
 		return "WebP"
 	case bytes.HasPrefix(data, []byte("II*\x00")), bytes.HasPrefix(data, []byte("MM\x00*")):
 		return "TIFF"
-	case bytes.HasPrefix(data, []byte("BM")):
-		return "BMP"
-	case bytes.HasPrefix(data, []byte("GIF8")):
-		return "GIF"
 	}
 	return ""
 }

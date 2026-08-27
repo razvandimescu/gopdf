@@ -22,9 +22,30 @@ tables, _ := doc.Page(0).Tables()
 fmt.Println(tables[0].CellByName(0, "Amount")) // "1,204.50"
 ```
 
+## Try it
+
+```bash
+go install github.com/razvandimescu/gopdf/cmd/gopdf@latest
+gopdf tables statement.pdf -format csv
+```
+
+```csv
+Date,Description,Debit,Credit
+01-04-2025,Card payment,"94,19","0,00"
+02-04-2025,Transfer received,"0,00","1.000,00"
+```
+
+One static binary, no toolchain, nothing to install alongside it. The same
+command handles multi-line cells and tables that continue across pages. See
+[the CLI section](#command-line) for `gopdf merge` and `gopdf watermark`.
+
 ## Why gopdf?
 
-Table extraction in pure Go, under a permissive licence. [unipdf](https://github.com/unidoc/unipdf) extracts tables too, but is AGPL or commercial. [ledongthuc/pdf](https://github.com/ledongthuc/pdf) gives you positioned text and groups it into rows and columns, but has no header anchoring, multi-line cell merging, or multi-page continuation.
+`go.mod` has no `require` block — static binaries, `FROM scratch` containers,
+and cross-compilation without a C toolchain. Of the libraries below it is the
+only one that pairs that with table extraction, under a permissive licence.
+
+[unipdf](https://github.com/unidoc/unipdf) extracts tables too, but is AGPL or commercial. [ledongthuc/pdf](https://github.com/ledongthuc/pdf) gives you positioned text and groups it into rows and columns, but has no header anchoring, multi-line cell merging, or multi-page continuation.
 
 | | gopdf | unipdf | pdfcpu | ledongthuc/pdf | MuPDF bindings |
 |---|---|---|---|---|---|
@@ -39,7 +60,7 @@ Table extraction in pure Go, under a permissive licence. [unipdf](https://github
 | **Text removal (true redaction)** | Yes | Yes | No | No | No |
 | **PDF creation** | Yes | Yes | Yes | No | Yes |
 | **Reads encrypted PDFs** | Yes | Yes | Yes | No | Yes |
-| **Dependencies** | 0 | Many | 0 | 0 | System lib |
+| **Dependencies** | 0 | Many | 10 | 0 | System lib |
 
 ### When to use something else
 
@@ -63,16 +84,25 @@ Table extraction in pure Go, under a permissive licence. [unipdf](https://github
 - Reads encrypted PDFs (RC4 40/128-bit, AES-128, AES-256; user or owner password)
 - Image overlay / watermark (PNG/JPEG, rotation, opacity, transparent SMask)
 - PDF creation with text, rectangles, lines, images, and multiple fonts
-- Images as pages: `gopdf merge` mixes PDFs and PNG/JPEG images, detected by content
-- Baseline JPEGs embed unre-encoded (`DCTDecode`), so photographs keep their size
-- EXIF orientation honoured, so sideways phone photos land upright
+- Images as pages: PDFs and PNG/JPEG mixed into one document, detected by content, with baseline JPEGs embedded unre-encoded and EXIF orientation honoured
+- One CLI — `gopdf tables`, `gopdf merge`, `gopdf watermark`
 - Pure Go — no CGo, no system dependencies
 
 ## Installation
 
+The CLI, as a single binary:
+
+```bash
+go install github.com/razvandimescu/gopdf/cmd/gopdf@latest
+```
+
+The library:
+
 ```bash
 go get github.com/razvandimescu/gopdf@latest
 ```
+
+`go.mod` has no `require` block, so neither one pulls anything in.
 
 ## Quick Start
 
@@ -324,7 +354,8 @@ instead, since viewer support for them behind `DCTDecode` is uneven.
 
 ### Command line
 
-One binary, `gopdf`, with a subcommand per capability:
+One binary, `gopdf`, with a subcommand per capability. Installed with
+`go install github.com/razvandimescu/gopdf/cmd/gopdf@latest`:
 
 ```bash
 gopdf tables invoice.pdf -format csv        # extract a table

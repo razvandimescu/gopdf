@@ -62,7 +62,10 @@ Table extraction in pure Go, under a permissive licence. [unipdf](https://github
 - Text removal: glyphs deleted from the content stream, not covered over
 - Reads encrypted PDFs (RC4 40/128-bit, AES-128, AES-256; user or owner password)
 - Image overlay / watermark (PNG/JPEG, rotation, opacity, transparent SMask)
-- PDF creation with text, rectangles, lines, and multiple fonts
+- PDF creation with text, rectangles, lines, images, and multiple fonts
+- Images as pages: `gopdf merge` mixes PDFs and PNG/JPEG images, detected by content
+- Baseline JPEGs embed unre-encoded (`DCTDecode`), so photographs keep their size
+- EXIF orientation honoured, so sideways phone photos land upright
 - Pure Go — no CGo, no system dependencies
 
 ## Installation
@@ -283,6 +286,131 @@ data, err := c.Build()
 os.WriteFile("invoice.pdf", data, 0644)
 ```
 
+### Images as pages
+
+`DrawImage` places a decoded PNG/JPEG by its lower-left corner, scaled to the
+width and height you give it. `FitRotated` returns the largest such pair that
+keeps the image's aspect ratio inside a page:
+
+```go
+img, err := pdf.LoadImage("scan.png")
+
+c := pdf.NewCreator()
+pageW, pageH := 595.0, 842.0 // A4
+w, h := img.FitRotated(pageW-36, pageH-36, 0, 1) // fit inside an 18pt margin
+
+page := c.NewPage(pageW, pageH)
+page.DrawImage(img, (pageW-w)/2, (pageH-h)/2, w, h)
+
+data, err := c.Build()
+```
+
+An image drawn on several pages is written to the file once. Transparency
+travels with it as a soft mask.
+
+A JPEG's EXIF orientation is honoured. Phone cameras record how the handset
+was held rather than rotating the pixels, so a photo taken sideways is stored
+landscape and declares a quarter turn; `DrawImage` folds that turn into the
+placement matrix. It costs nothing — the pixels are never touched — and
+`DisplaySize` reports the dimensions the image will actually occupy, which is
+what you want when sizing a page around it. `Image.DPI` carries the resolution
+the file declares — EXIF or JFIF for JPEG, the `pHYs` chunk for PNG — and is 0
+when it declares none.
+
+A baseline JPEG is embedded in its original encoding, behind `DCTDecode` —
+decoding a photograph to RGB and deflating the pixels would multiply its size
+several-fold. Progressive, 12-bit, and CMYK JPEGs take the decode path
+instead, since viewer support for them behind `DCTDecode` is uneven.
+
+### Command line
+
+One binary, `gopdf`, with a subcommand per capability:
+
+```bash
+gopdf tables invoice.pdf -format csv        # extract a table
+gopdf merge report.pdf scan.png -o out.pdf  # combine PDFs and images
+gopdf watermark -img logo.png in.pdf -o out.pdf
+```
+
+Install it with `go install github.com/razvandimescu/gopdf/cmd/gopdf@latest`.
+
+#### gopdf tables
+
+Detects a table and prints its rows as aligned text or CSV. Columns come from
+their headers when `-headers` is given, and from column geometry otherwise.
+
+```bash
+gopdf tables statement.pdf -format csv -o rows.csv
+gopdf tables invoice.pdf -headers "Quantity,Product Code,Description"
+gopdf tables statement.pdf -anchor Date -filter "Page ,Continued"
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `-format` | `text` | `text` or `csv` |
+| `-o` | stdout | output path |
+| `-headers` | — | comma-separated header anchors |
+| `-anchor` | — | column that signals a new row; rows where it is empty merge upwards |
+| `-filter` | — | substrings whose rows are dropped |
+| `-require` | — | columns of which at least one must be filled |
+| `-merge-gap`, `-max-row-gap` | auto | row grouping distances; auto-tuned when unset |
+| `-col-width` | `30` | maximum column width, for `-format text` |
+| `-password` | — | password for an encrypted PDF |
+
+#### gopdf merge
+
+Merges PDFs and images into one PDF. Each input is classified by
+its bytes, not its extension: a PDF header (tolerating prepended transport
+bytes, as the reader does) means PDF, anything else is decoded as an image.
+Images become one page each, in the order given.
+
+```bash
+gopdf merge -o out.pdf scan.png photo.jpg     # images only
+gopdf merge -o out.pdf report.pdf scan.png    # append a scan
+gopdf merge -page image -o out.pdf scan.png   # page follows the image
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `-o` | stdout | output PDF path |
+| `-page` | `a4` | page size for image inputs: `a4`, `letter`, or `image` |
+| `-dpi` | `0` | image resolution; `0` reads it from the file, falling back to 72 |
+| `-margin` | `0` | whitespace around an image, in points |
+
+Image pages default to a paper size rather than to the image, which is the
+opposite of what a converter like `mutool convert` or ImageMagick does. The
+reason is the verb: `merge` promises one document, and pages of a document
+have to agree with each other — `merge report.pdf photo.jpg` with page-follows-
+image would bind a 42×56 inch page next to an A4 one, because a phone camera
+declares 72 dpi when it has no real size to report. `-page image` is right when
+the resolution means something, as it does for a 300 dpi scan, and it now
+honours what the file declares instead of assuming 72.
+
+Fitting an image to a page already letterboxes it on one axis, so `-margin`
+defaults to 0; pass `-margin 18` for printers that cannot reach the edge.
+
+The summary goes to stderr, leaving stdout for the PDF, and names both the
+page size chosen and the way out of it:
+
+```
+2 inputs, 2 pages → out.pdf (7.1 MiB)
+  2 images fitted to A4 595×842pt; -page image sizes each page to its image (3024×4032pt at 72dpi)
+```
+
+PNG and JPEG are the formats Go's standard library decodes, so they are the
+formats gopdf reads. Hand it a HEIC, AVIF, WebP, TIFF, GIF, or BMP and the
+error names the format and the command that fixes it:
+
+```
+$ gopdf merge IMG_6407.HEIC -o out.pdf
+gopdf merge: IMG_6407.HEIC: HEIC is not supported (PNG and JPEG only)
+  convert it first:  sips -s format jpeg IMG_6407.HEIC --out IMG_6407.jpg
+```
+
+`sips` ships with macOS; elsewhere the hint names ImageMagick. Library callers
+can match `*pdf.UnsupportedFormatError` with `errors.As` to react to the format
+themselves.
+
 ### Text overlay
 
 ```go
@@ -373,11 +501,11 @@ result, err := ed.Apply()
 ```
 
 The same image is written once and shared by every page that references it.
-The bundled `cmd/watermark` wraps this for one-shot usage:
+The CLI wraps this for one-shot usage:
 
-```
-go run ./cmd/watermark -i in.pdf -img logo.png -o out.pdf \
-    -angle 45 -opacity 0.15 -scale 0.85
+```bash
+gopdf watermark -img logo.png in.pdf -o out.pdf \
+  -angle 30 -opacity 0.12 -scale 0.9 -skip-first
 ```
 
 ## API Reference
@@ -454,6 +582,7 @@ type Rect struct {
 - **Redaction covers two operations with different guarantees.** `RemoveText` / `RemoveRegion` delete the glyphs from the page content streams and the Form XObjects those pages draw — and nothing else in the file (see the table above). `RedactText` / `Redact` only draw a rectangle: the text stays in the content stream and remains recoverable by copy/paste or any PDF parser.
 - **Reading encrypted PDFs is supported; writing them is not.** Output from merge, rewrite, and creation is always unencrypted, so an encrypted input is effectively decrypted by any operation that writes it back out. Public-key (certificate) security handlers are not supported.
 - No image extraction
+- **Images read as PNG and JPEG only.** HEIC and AVIF need an HEVC or AV1 decoder, which the standard library does not have. The Go decoders that do exist are either CGo wrappers around LGPL libraries or wrap AGPL-licensed code, so neither fits a CGo-free MIT library; unsupported formats are named in the error with a conversion command instead. WebP and TIFF would need `golang.org/x/image`, which is a dependency this library does not take.
 - PDF creation supports standard 14 fonts only (no font embedding)
 - Merge drops interactive features (forms, bookmarks, JS)
 - Text overlay uses Helvetica only
@@ -471,12 +600,17 @@ pdf/
   edit.go       Text search, text overlay, image overlay, visual redaction
   redact.go     Text removal: glyph-level content stream rewriting
   image.go      Image decoding (PNG/JPEG) → RGB + grayscale SMask streams
-  creator.go    PDF creation from scratch (text, shapes, fonts)
+  creator.go    PDF creation from scratch (text, shapes, images, fonts)
   lexer.go      PDF byte stream tokenizer
   parser.go     Token -> object parser (dicts, arrays, refs)
   objects.go    Types: Dict, Array, Name, Ref, Stream; matrix math helpers
   glyphlist.go  Adobe Glyph List (generated, 4200 entries)
   stdfonts.go   Standard 14 font width tables
+
+cmd/
+  gopdf         CLI: tables, merge, watermark
+  sample        generates the README's sample PDFs
+  genglyphlist  regenerates glyphlist.go from the Adobe Glyph List
 ```
 
 ## License

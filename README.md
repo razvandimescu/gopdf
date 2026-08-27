@@ -367,6 +367,8 @@ gopdf watermark -img logo.png in.pdf -o out.pdf
 
 Detects a table and prints its rows as aligned text or CSV. Columns come from
 their headers when `-headers` is given, and from column geometry otherwise.
+When no table is found it says so on stderr and exits non-zero, rather than
+printing whatever the geometry happened to line up.
 
 ```bash
 gopdf tables statement.pdf -format csv -o rows.csv
@@ -635,6 +637,12 @@ type Rect struct {
 
 - **Redaction covers two operations with different guarantees.** `RemoveText` / `RemoveRegion` delete the glyphs from the page content streams and the Form XObjects those pages draw — and nothing else in the file (see the table above). `RedactText` / `Redact` only draw a rectangle: the text stays in the content stream and remains recoverable by copy/paste or any PDF parser.
 - **Reading encrypted PDFs is supported; writing them is not.** Output from merge, rewrite, and creation is always unencrypted, so an encrypted input is effectively decrypted by any operation that writes it back out. Public-key (certificate) security handlers are not supported.
+- **Auto-detection judges a table by its column names.** Running text is
+  sliced into "columns" wherever word gaps line up, so auto-detection rejects
+  candidates whose headings read as fragments rather than words. That is what
+  keeps prose from being reported as a table, and it means a real table whose
+  columns are named with one or two characters needs `-headers` (or
+  `TableOpts.Headers`) to be found.
 - No image extraction
 - **Images read as PNG, JPEG and GIF only** — what the standard library decodes. HEIC and AVIF need an HEVC or AV1 decoder, which it does not have; the Go decoders that do exist are either CGo wrappers around LGPL libraries or wrap AGPL-licensed code, so neither fits a CGo-free MIT library. WebP and TIFF would need `golang.org/x/image`, a dependency this library does not take. Unsupported formats are named in the error, with a conversion command.
 - PDF creation supports standard 14 fonts only (no font embedding)

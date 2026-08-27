@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"image/jpeg"
 	"os"
+	"slices"
 )
 
 // OversizeBehavior controls what happens when a merge exceeds MaxSize.
@@ -498,9 +499,19 @@ func isDCTDecode(d Dict) bool {
 	return len(filters) > 0 && filters[0] == "DCTDecode"
 }
 
+// copyDict walks keys in sorted order. copyObject allocates a reference as it
+// descends, so map order would otherwise decide object numbering and the same
+// merge would emit different bytes on every run.
 func (ctx *copyContext) copyDict(d Dict) Dict {
+	keys := make([]Name, 0, len(d))
+	for k := range d {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+
 	newDict := make(Dict, len(d))
-	for k, v := range d {
+	for _, k := range keys {
+		v := d[k]
 		if k == "Parent" && !ctx.fullClone {
 			continue
 		}

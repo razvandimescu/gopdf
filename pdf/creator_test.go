@@ -1,6 +1,10 @@
 package pdf
 
 import (
+	"bytes"
+	"image"
+	"image/color"
+	"image/png"
 	"strings"
 	"testing"
 )
@@ -146,5 +150,129 @@ func TestCreatorDrawShapes(t *testing.T) {
 	}
 	if doc.NumPages() != 1 {
 		t.Errorf("pages: got %d, want 1", doc.NumPages())
+	}
+}
+
+// testPNG encodes a 2x2 PNG; when translucent, one pixel is partly transparent so
+// the embedded XObject carries an SMask.
+func testPNG(t *testing.T, translucent bool) []byte {
+	t.Helper()
+	img := image.NewNRGBA(image.Rect(0, 0, 2, 2))
+	for i := range 4 {
+		img.Set(i%2, i/2, color.NRGBA{R: 200, G: 100, B: 50, A: 255})
+	}
+	if translucent {
+		img.Set(0, 0, color.NRGBA{R: 200, G: 100, B: 50, A: 128})
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encoding test PNG: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func TestCreatorDrawImage(t *testing.T) {
+	img, err := LoadImageBytes(testPNG(t, true))
+	if err != nil {
+		t.Fatalf("loading test image: %v", err)
+	}
+
+	// The same image on two pages must be written once and referenced twice.
+	c := NewCreator()
+	c.NewPage(200, 100).DrawImage(img, 10, 20, 80, 60)
+	c.NewPage(200, 100).DrawImage(img, 0, 0, 200, 100)
+	data, err := c.Build()
+	if err != nil {
+		t.Fatalf("building: %v", err)
+	}
+
+	doc, err := OpenBytes(data)
+	if err != nil {
+		t.Fatalf("opening created PDF: %v", err)
+	}
+	if doc.NumPages() != 2 {
+		t.Fatalf("pages: got %d, want 2", doc.NumPages())
+	}
+
+	var refs []Ref
+	for i, page := range doc.pages {
+		res, ok := doc.reader.ResolveDict(page["Resources"])
+		if !ok {
+			t.Fatalf("page %d: no Resources dict", i)
+		}
+		xobj, ok := doc.reader.ResolveDict(res["XObject"])
+		if !ok {
+			t.Fatalf("page %d: Resources has no XObject dict", i)
+		}
+		ref, ok := xobj["Im1"].(Ref)
+		if !ok {
+			t.Fatalf("page %d: XObject has no /Im1 reference, got %v", i, xobj)
+		}
+		refs = append(refs, ref)
+
+		content, err := doc.reader.PageContent(page)
+		if err != nil {
+			t.Fatalf("page %d: reading content: %v", i, err)
+		}
+		if !strings.Contains(string(content), "/Im1 Do") {
+			t.Errorf("page %d: content draws no image: %s", i, content)
+		}
+	}
+	if refs[0] != refs[1] {
+		t.Errorf("image written twice: page 0 has %v, page 1 has %v", refs[0], refs[1])
+	}
+
+	// Placement: "w 0 0 h x y cm" positions the image by its lower-left corner.
+	content, _ := doc.reader.PageContent(doc.pages[0])
+	if want := "80.0000 0.0000 0.0000 60.0000 10.0000 20.0000 cm"; !strings.Contains(string(content), want) {
+		t.Errorf("content missing %q: %s", want, content)
+	}
+
+	// Translucency travels with the image as a grayscale soft mask.
+	stream, ok := doc.reader.Resolve(refs[0]).(*Stream)
+	if !ok {
+		t.Fatalf("image XObject %v does not resolve to a stream", refs[0])
+	}
+	xdict := stream.Dict
+	if xdict["Subtype"] != Name("Image") || xdict["Width"] != 2 {
+		t.Errorf("image XObject = %v, want a 2-wide /Image", xdict)
+	}
+	smask, ok := doc.reader.Resolve(xdict["SMask"]).(*Stream)
+	if !ok {
+		t.Fatalf("translucent image has no SMask stream, got %v", xdict)
+	}
+	if smask.Dict["ColorSpace"] != Name("DeviceGray") {
+		t.Errorf("SMask ColorSpace = %v, want DeviceGray", smask.Dict["ColorSpace"])
+	}
+}
+
+func TestCreatorDrawImageOpaqueAndNil(t *testing.T) {
+	img, err := LoadImageBytes(testPNG(t, false))
+	if err != nil {
+		t.Fatalf("loading test image: %v", err)
+	}
+	c := NewCreator()
+	page := c.NewPage(200, 100)
+	page.DrawImage(nil, 0, 0, 10, 10) // ignored, not a panic
+	page.DrawImage(img, 0, 0, 200, 100)
+	data, err := c.Build()
+	if err != nil {
+		t.Fatalf("building: %v", err)
+	}
+	doc, err := OpenBytes(data)
+	if err != nil {
+		t.Fatalf("opening created PDF: %v", err)
+	}
+	res, _ := doc.reader.ResolveDict(doc.pages[0]["Resources"])
+	xobj, _ := doc.reader.ResolveDict(res["XObject"])
+	if len(xobj) != 1 {
+		t.Fatalf("XObject dict = %v, want exactly one entry", xobj)
+	}
+	stream, ok := doc.reader.Resolve(xobj["Im1"]).(*Stream)
+	if !ok {
+		t.Fatalf("image XObject does not resolve to a stream: %v", xobj["Im1"])
+	}
+	if _, has := stream.Dict["SMask"]; has {
+		t.Errorf("opaque image carries an SMask: %v", stream.Dict)
 	}
 }

@@ -13,13 +13,14 @@ import (
 	"github.com/razvandimescu/gopdf/pdf"
 )
 
-// namedPageSizes are the -page values that fix the page, in points.
-var namedPageSizes = map[string][2]float64{
-	"a4":     {595, 842},
-	"letter": {612, 792},
+// paperSizes are the -page values that fix the page, in points.
+var paperSizes = map[string]struct {
+	name          string
+	width, height float64
+}{
+	"a4":     {"A4", 595, 842},
+	"letter": {"Letter", 612, 792},
 }
-
-var pageNames = map[string]string{"a4": "A4", "letter": "Letter"}
 
 func runMerge(args []string) error {
 	fs := flag.NewFlagSet("merge", flag.ExitOnError)
@@ -112,10 +113,14 @@ func isPDF(data []byte) bool {
 
 // layout turns an image into a page.
 type layout struct {
-	name          string  // "A4", "Letter", or "" when pages follow the image
-	width, height float64 // 0, 0 means the page takes the image's own size
+	paper         string  // "A4", "Letter", or "" when a page follows its image
+	width, height float64 // the paper's size; unset when paper is ""
 	dpi, margin   float64 // dpi 0 means "whatever the file declares"
 }
+
+// fitsPaper reports whether images are fitted to a fixed page rather than
+// given one of their own.
+func (l layout) fitsPaper() bool { return l.paper != "" }
 
 func parseLayout(page string, dpi, margin float64) (layout, error) {
 	if dpi < 0 {
@@ -124,19 +129,20 @@ func parseLayout(page string, dpi, margin float64) (layout, error) {
 	if margin < 0 {
 		return layout{}, fmt.Errorf("-margin must not be negative, got %v", margin)
 	}
-	size, fixed := namedPageSizes[strings.ToLower(page)]
+	paper, fixed := paperSizes[strings.ToLower(page)]
 	if !fixed {
 		if strings.ToLower(page) != "image" {
 			return layout{}, fmt.Errorf("unknown -page %q; want a4, letter, or image", page)
 		}
 		return layout{dpi: dpi, margin: margin}, nil
 	}
-	if size[0] <= 2*margin || size[1] <= 2*margin {
-		return layout{}, fmt.Errorf("-margin %v leaves no room on a %v×%v page", margin, size[0], size[1])
+	if paper.width <= 2*margin || paper.height <= 2*margin {
+		return layout{}, fmt.Errorf("-margin %v leaves no room on a %v×%v page", margin, paper.width, paper.height)
 	}
 	return layout{
-		name:  pageNames[strings.ToLower(page)],
-		width: size[0], height: size[1], dpi: dpi, margin: margin,
+		paper: paper.name,
+		width: paper.width, height: paper.height,
+		dpi: dpi, margin: margin,
 	}, nil
 }
 
@@ -176,7 +182,7 @@ func (l layout) imageToPDF(data []byte) ([]byte, naturalPage, error) {
 	natural := naturalPage{width: w, height: h, dpi: dpi}
 
 	pageW, pageH := w+2*l.margin, h+2*l.margin
-	if l.width > 0 {
+	if l.fitsPaper() {
 		pageW, pageH = l.width, l.height
 		// Rotation 0: the largest w×h with the image's aspect ratio that fits
 		// the page inside its margins.
@@ -200,11 +206,11 @@ func report(destination string, inputs, images int, merged []byte, l layout, nat
 	fmt.Fprintf(os.Stderr, "%d input%s, %s → %s (%s)\n",
 		inputs, plural(inputs), pages, destination, humanSize(len(merged)))
 
-	if images == 0 || l.name == "" {
+	if images == 0 || !l.fitsPaper() {
 		return
 	}
 	fmt.Fprintf(os.Stderr,
 		"  %d image%s fitted to %s %.0f×%.0fpt; -page image sizes each page to its image (%.0f×%.0fpt at %.0fdpi)\n",
-		images, plural(images), l.name, l.width, l.height,
+		images, plural(images), l.paper, l.width, l.height,
 		natural.width, natural.height, natural.dpi)
 }

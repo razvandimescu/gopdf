@@ -16,6 +16,7 @@ const (
 	anchorClusterTol     = 5.0  // X-distance for clustering span start positions
 	anchorMinRowFrac     = 0.15 // fraction of rows an anchor must appear in
 	anchorMaxHeaderLen   = 30   // max text length for header-like spans
+	minHeaderNameRunes   = 3    // a column name shorter than this is a word fragment
 	minMeanHeaderRunes   = 4    // mean column-name length below this reads as word fragments, not headings
 	anchorMinColSpacing  = 20.0 // min X-distance between anchor columns (filters char-level spans)
 	anchorMaxColumns     = 10   // reject anchor detection with more columns than this
@@ -521,7 +522,14 @@ func discoverAnchorsAcrossPages(pages [][]TextSpan, opts *TableOpts) []Column {
 	// falling back to the header X positions directly.
 	cols := bestHeaderCols
 	if len(dataAnchors) >= minCols {
-		cols = mapHeadersToAnchors(bestHeaderCols, dataAnchors)
+		if mapped := mapHeadersToAnchors(bestHeaderCols, dataAnchors); mapped != nil {
+			cols = mapped
+		} else if hasFragment(bestHeaderCols) {
+			// The data does not corroborate this header layout, so the
+			// header row has to speak for itself, and a fragment in it
+			// means it cannot.
+			return nil
+		}
 	}
 	// Mapping can drop or merge columns, so hold the result to the same
 	// standard as the candidate: enough columns, and named like headings.
@@ -552,9 +560,14 @@ func mapHeadersToAnchors(headers []Column, anchors []xCluster) []Column {
 	for _, h := range headers {
 		for i := 0; i < n; i++ {
 			if h.X >= boundaries[i] && h.X < boundaries[i+1] {
-				if cols[i].Name == "" {
-					cols[i].Name = h.Name
+				if cols[i].Name != "" {
+					// Two headings share one data zone, so the zones
+					// describe some other block on the page, not this
+					// header. Keeping the mapping would silently drop a
+					// column and file its values under its neighbour.
+					return nil
 				}
+				cols[i].Name = h.Name
 				break
 			}
 		}
@@ -1164,6 +1177,16 @@ func buildAnchorColumns(row tableRow, anchors []xCluster) []Column {
 		}
 	}
 	return cols
+}
+
+// hasFragment reports whether any column name is too short to be a word.
+func hasFragment(cols []Column) bool {
+	for _, c := range cols {
+		if len([]rune(c.Name)) < minHeaderNameRunes {
+			return true
+		}
+	}
+	return false
 }
 
 // mostlyFragments reports whether column names are, on average, too short to

@@ -1184,3 +1184,54 @@ func TestFindTableAcrossPages_ProseDoesNotHideTable(t *testing.T) {
 		t.Errorf("first column = %q, want %q", got, "Quantity")
 	}
 }
+
+func TestFindTableAcrossPages_FooterDoesNotCollapseColumns(t *testing.T) {
+	// A short table above a long block of terms, as quotations are laid out.
+	// The terms have more rows than the table, so they dominate the data-X
+	// clustering; two headings then fall inside one cluster's zone. Mapping
+	// onto those zones would drop a column and file its values under its
+	// neighbour ("3.00 NC0255" in one cell).
+	headings := []string{"Quantity", "Product Code", "Suppliers Code", "Product Description"}
+	headX := []float64{40, 82, 169, 253}
+
+	var spans []TextSpan
+	for i, h := range headings {
+		spans = append(spans, makeSpan(headX[i], 700, h))
+	}
+	for r, values := range [][]string{
+		{"3.00", "NC0255", "B8263AA", "Basin Mixer"},
+		{"1.00", "LOGI-CHG", "-", "Logistics Charge"},
+	} {
+		for i, v := range values {
+			spans = append(spans, makeSpan(headX[i]+8, 680-float64(r)*20, v))
+		}
+	}
+	for r, label := range []string{
+		"Quote Expiry:", "Pricing:", "Logistics Charge:", "Vesting:",
+		"Stock Holding:", "Restocking:", "Terms & Conditions:",
+	} {
+		y := 600 - float64(r)*20
+		spans = append(spans, makeSpan(36, y, label))
+		spans = append(spans, makeSpan(162, y, "terms text for this clause"))
+	}
+
+	tbl := FindTableAcrossPages([][]TextSpan{spans}, &TableOpts{AutoTune: true})
+	if tbl == nil {
+		t.Fatal("no table found")
+	}
+	var got []string
+	for _, c := range tbl.Columns {
+		got = append(got, c.Name)
+	}
+	if len(tbl.Columns) != len(headings) {
+		t.Fatalf("columns = %v, want %v", got, headings)
+	}
+	for i, want := range headings {
+		if got[i] != want {
+			t.Errorf("column %d = %q, want %q", i, got[i], want)
+		}
+	}
+	if cell := tbl.CellByName(0, "Product Code"); cell != "NC0255" {
+		t.Errorf("Product Code of row 0 = %q, want %q", cell, "NC0255")
+	}
+}

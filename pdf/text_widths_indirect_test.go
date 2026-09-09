@@ -38,7 +38,7 @@ func buildRawPDFFromBodies(bodies []string, rootObj int) []byte {
 // pattern pdfTeX/hyperref commonly emit. Regression fixture for the bug
 // where Dict accessors (Array/Int/Float) never resolved indirect
 // references, silently dropping the width table and falling back to a
-// flat 0.6em guess for every glyph (issue #705 in web-researcher-mcp).
+// flat 0.6em guess for every glyph.
 // /FirstChar is an indirect int (object 6), /Widths an indirect array
 // (object 7).
 func buildIndirectWidthsPDF() []byte {
@@ -128,5 +128,59 @@ func TestFontWidths_IndirectCIDWidths(t *testing.T) {
 	want := 200.0
 	if math.Abs(got-want) > 0.01 {
 		t.Errorf("glyph advance = %v, want %v (indirect /W, /DW, or /DescendantFonts not resolved)", got, want)
+	}
+}
+
+// buildBrokenDWPDF builds a single-page PDF with a Type0/CID font whose /DW
+// is unusable: either an indirect reference to an object absent from the
+// xref, or a direct value of the wrong type. Neither carries a width, so
+// PDF 32000-1 table 117's default of 1000 must survive.
+func buildBrokenDWPDF(dw string) []byte {
+	content := "BT /F1 100 Tf 72 700 Td <0000> Tj ET"
+
+	bodies := []string{
+		"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+		"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+		"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] " +
+			"/Resources << /Font << /F1 4 0 R >> >> /Contents 6 0 R >>\nendobj\n",
+		"4 0 obj\n<< /Type /Font /Subtype /Type0 /BaseFont /CustomCID " +
+			"/Encoding /Identity-H /DescendantFonts [5 0 R] >>\nendobj\n",
+		"5 0 obj\n<< /Type /Font /Subtype /CIDFontType2 /BaseFont /CustomCID " +
+			"/DW " + dw + " >>\nendobj\n",
+		fmt.Sprintf("6 0 obj\n<< /Length %d >>\nstream\n%s\nendstream\nendobj\n", len(content), content),
+	}
+	return buildRawPDFFromBodies(bodies, 1)
+}
+
+// A /DW that cannot be read is not a /DW of zero. ResolveFloat reports ok
+// for any non-nil value, so an unresolvable reference and a wrong-typed
+// value both coerce to 0 and overwrite the caller's default, collapsing
+// every CID that has no /W entry onto a single X coordinate.
+func TestFontWidths_UnreadableDWKeepsSpecDefault(t *testing.T) {
+	cases := map[string]string{
+		"dangling reference": "99 0 R",
+		"wrong type":         "/Bogus",
+	}
+	for name, dw := range cases {
+		t.Run(name, func(t *testing.T) {
+			doc, err := OpenBytes(buildBrokenDWPDF(dw))
+			if err != nil {
+				t.Fatalf("OpenBytes: %v", err)
+			}
+			spans, err := doc.Page(0).TextSpans()
+			if err != nil {
+				t.Fatalf("TextSpans: %v", err)
+			}
+			if len(spans) != 1 {
+				t.Fatalf("expected 1 span, got %d: %+v", len(spans), spans)
+			}
+
+			// Default /DW of 1000/1000em at Tf 100 advances 100pt.
+			got := spans[0].EndX - spans[0].X
+			want := 100.0
+			if math.Abs(got-want) > 0.01 {
+				t.Errorf("glyph advance = %v, want %v (unreadable /DW overwrote the 1000 default)", got, want)
+			}
+		})
 	}
 }

@@ -33,53 +33,82 @@ func buildRawPDFFromBodies(bodies []string, rootObj int) []byte {
 	return buf.Bytes()
 }
 
-// buildIndirectWidthsPDF builds a single-page PDF whose Type1 font
-// dictionary stores /Widths and /FirstChar as indirect references — the
-// pattern pdfTeX/hyperref commonly emit. Regression fixture for the bug
-// where Dict accessors (Array/Int/Float) never resolved indirect
-// references, silently dropping the width table and falling back to a
-// flat 0.6em guess for every glyph.
-// /FirstChar is an indirect int (object 6), /Widths an indirect array
-// (object 7).
-func buildIndirectWidthsPDF() []byte {
-	content := "BT /F1 100 Tf 72 700 Td (A) Tj ET"
+// buildFontPDF assembles a single-page PDF around one font. Objects 1-3 are
+// the catalog, page tree and page; fontObjs follow from object 4, with /F1
+// bound to the first of them; the content stream lands last. Callers number
+// their own cross-references from 4 upward and are spared the page scaffold.
+func buildFontPDF(fontObjs []string, content string) []byte {
+	contentObj := 4 + len(fontObjs)
 
 	bodies := []string{
 		"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
 		"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
-		"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] " +
-			"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n",
-		"4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /CustomFont1 " +
-			"/FirstChar 6 0 R /LastChar 65 /Widths 7 0 R >>\nendobj\n",
-		fmt.Sprintf("5 0 obj\n<< /Length %d >>\nstream\n%s\nendstream\nendobj\n", len(content), content),
-		"6 0 obj\n65\nendobj\n",
-		"7 0 obj\n[2000]\nendobj\n",
+		fmt.Sprintf("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "+
+			"/Resources << /Font << /F1 4 0 R >> >> /Contents %d 0 R >>\nendobj\n", contentObj),
 	}
+	for i, obj := range fontObjs {
+		bodies = append(bodies, fmt.Sprintf("%d 0 obj\n%s\nendobj\n", 4+i, obj))
+	}
+	bodies = append(bodies, fmt.Sprintf("%d 0 obj\n<< /Length %d >>\nstream\n%s\nendstream\nendobj\n",
+		contentObj, len(content), content))
+
 	return buildRawPDFFromBodies(bodies, 1)
 }
 
-// buildIndirectCIDWidthsPDF builds a single-page PDF with a Type0/CID font
-// whose /DW, /W, and /DescendantFonts are all indirect references —
-// same defect class as buildIndirectWidthsPDF, different (composite-font)
-// code path in the same function.
-func buildIndirectCIDWidthsPDF() []byte {
-	content := "BT /F1 100 Tf 72 700 Td <0000> Tj ET"
+// buildIndirectWidthsPDF builds a Type1 font whose /Widths (object 6) and
+// /FirstChar (object 5) are indirect references — the pattern pdfTeX and
+// hyperref commonly emit. Regression fixture for the bug where Dict
+// accessors never resolved indirect references, silently dropping the width
+// table and falling back to a flat 0.6em guess for every glyph.
+func buildIndirectWidthsPDF() []byte {
+	return buildFontPDF([]string{
+		"<< /Type /Font /Subtype /Type1 /BaseFont /CustomFont1 " +
+			"/FirstChar 5 0 R /LastChar 65 /Widths 6 0 R >>",
+		"65",
+		"[2000]",
+	}, "BT /F1 100 Tf 72 700 Td (A) Tj ET")
+}
 
-	bodies := []string{
-		"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
-		"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
-		"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] " +
-			"/Resources << /Font << /F1 4 0 R >> >> /Contents 9 0 R >>\nendobj\n",
-		"4 0 obj\n<< /Type /Font /Subtype /Type0 /BaseFont /CustomCID " +
-			"/Encoding /Identity-H /DescendantFonts 8 0 R >>\nendobj\n",
-		"5 0 obj\n<< /Type /Font /Subtype /CIDFontType2 /BaseFont /CustomCID " +
-			"/DW 6 0 R /W 7 0 R >>\nendobj\n",
-		"6 0 obj\n1000\nendobj\n",
-		"7 0 obj\n[0 [2000]]\nendobj\n",
-		"8 0 obj\n[5 0 R]\nendobj\n",
-		fmt.Sprintf("9 0 obj\n<< /Length %d >>\nstream\n%s\nendstream\nendobj\n", len(content), content),
+// buildIndirectCIDWidthsPDF builds a Type0/CID font whose /DW, /W and
+// /DescendantFonts are all indirect references — same defect class as
+// buildIndirectWidthsPDF, different (composite-font) code path.
+func buildIndirectCIDWidthsPDF() []byte {
+	return buildFontPDF([]string{
+		"<< /Type /Font /Subtype /Type0 /BaseFont /CustomCID " +
+			"/Encoding /Identity-H /DescendantFonts 8 0 R >>",
+		"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /CustomCID " +
+			"/DW 6 0 R /W 7 0 R >>",
+		"1000",
+		"[0 [2000]]",
+		"[5 0 R]",
+	}, "BT /F1 100 Tf 72 700 Td <0000> Tj ET")
+}
+
+// buildBrokenDWPDF builds a Type0/CID font whose /DW is unusable: an
+// indirect reference to an object absent from the xref, or a direct value of
+// the wrong type. Neither carries a width, so PDF 32000-1 table 117's
+// default of 1000 must survive.
+func buildBrokenDWPDF(dw string) []byte {
+	return buildFontPDF([]string{
+		"<< /Type /Font /Subtype /Type0 /BaseFont /CustomCID " +
+			"/Encoding /Identity-H /DescendantFonts [5 0 R] >>",
+		"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /CustomCID /DW " + dw + " >>",
+	}, "BT /F1 100 Tf 72 700 Td <0000> Tj ET")
+}
+
+// buildDifferencesPDF builds a Type1 font whose /Encoding remaps code 65 to
+// /bullet, reaching the overlay either directly or through object 5.
+func buildDifferencesPDF(indirect bool) []byte {
+	diffs := "[65 /bullet]"
+	if indirect {
+		diffs = "5 0 R"
 	}
-	return buildRawPDFFromBodies(bodies, 1)
+	return buildFontPDF([]string{
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica " +
+			"/Encoding << /Type /Encoding /BaseEncoding /WinAnsiEncoding " +
+			"/Differences " + diffs + " >> >>",
+		"[65 /bullet]",
+	}, "BT /F1 12 Tf 72 700 Td (A) Tj ET")
 }
 
 func TestFontWidths_IndirectSimpleFontWidthsArray(t *testing.T) {
@@ -131,51 +160,6 @@ func TestFontWidths_IndirectCIDWidths(t *testing.T) {
 	}
 }
 
-// buildBrokenDWPDF builds a single-page PDF with a Type0/CID font whose /DW
-// is unusable: either an indirect reference to an object absent from the
-// xref, or a direct value of the wrong type. Neither carries a width, so
-// PDF 32000-1 table 117's default of 1000 must survive.
-func buildBrokenDWPDF(dw string) []byte {
-	content := "BT /F1 100 Tf 72 700 Td <0000> Tj ET"
-
-	bodies := []string{
-		"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
-		"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
-		"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] " +
-			"/Resources << /Font << /F1 4 0 R >> >> /Contents 6 0 R >>\nendobj\n",
-		"4 0 obj\n<< /Type /Font /Subtype /Type0 /BaseFont /CustomCID " +
-			"/Encoding /Identity-H /DescendantFonts [5 0 R] >>\nendobj\n",
-		"5 0 obj\n<< /Type /Font /Subtype /CIDFontType2 /BaseFont /CustomCID " +
-			"/DW " + dw + " >>\nendobj\n",
-		fmt.Sprintf("6 0 obj\n<< /Length %d >>\nstream\n%s\nendstream\nendobj\n", len(content), content),
-	}
-	return buildRawPDFFromBodies(bodies, 1)
-}
-
-// buildIndirectDifferencesPDF builds a single-page PDF whose /Encoding
-// dictionary reaches its /Differences overlay through an indirect
-// reference (object 6), remapping code 65 to /bullet.
-func buildIndirectDifferencesPDF(indirect bool) []byte {
-	content := "BT /F1 12 Tf 72 700 Td (A) Tj ET"
-
-	diffs := "[65 /bullet]"
-	if indirect {
-		diffs = "6 0 R"
-	}
-	bodies := []string{
-		"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
-		"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
-		"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] " +
-			"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n",
-		"4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica " +
-			"/Encoding << /Type /Encoding /BaseEncoding /WinAnsiEncoding " +
-			"/Differences " + diffs + " >> >>\nendobj\n",
-		fmt.Sprintf("5 0 obj\n<< /Length %d >>\nstream\n%s\nendstream\nendobj\n", len(content), content),
-		"6 0 obj\n[65 /bullet]\nendobj\n",
-	}
-	return buildRawPDFFromBodies(bodies, 1)
-}
-
 // A /DW that cannot be read is not a /DW of zero. ResolveFloat reports ok
 // for any non-nil value, so an unresolvable reference and a wrong-typed
 // value both coerce to 0 and overwrite the caller's default, collapsing
@@ -215,7 +199,7 @@ func TestFontWidths_UnreadableDWKeepsSpecDefault(t *testing.T) {
 func TestFontEncoding_IndirectDifferences(t *testing.T) {
 	for name, indirect := range map[string]bool{"direct": false, "indirect": true} {
 		t.Run(name, func(t *testing.T) {
-			doc, err := OpenBytes(buildIndirectDifferencesPDF(indirect))
+			doc, err := OpenBytes(buildDifferencesPDF(indirect))
 			if err != nil {
 				t.Fatalf("OpenBytes: %v", err)
 			}

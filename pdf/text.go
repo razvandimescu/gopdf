@@ -169,7 +169,7 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 				if ok {
 					// Default width.
 					dw := 1000.0
-					if v, ok := reader.ResolveFloat(cidFont["DW"]); ok {
+					if v, ok := toFloat(reader.Resolve(cidFont["DW"])); ok {
 						dw = v
 					}
 					fontMissingWidths[sname] = dw / 1000.0
@@ -183,7 +183,7 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 					// Font descriptor MissingWidth.
 					if descRef, ok := cidFont["FontDescriptor"]; ok {
 						if desc, ok := reader.ResolveDict(descRef); ok {
-							if mw, ok := reader.ResolveFloat(desc["MissingWidth"]); ok {
+							if mw, ok := toFloat(reader.Resolve(desc["MissingWidth"])); ok {
 								fontMissingWidths[sname] = mw / 1000.0
 							}
 						}
@@ -196,20 +196,20 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 		// Simple font — extract widths from Widths array.
 		if widths, ok := reader.ResolveArray(fd["Widths"]); ok {
 			wm := make(map[int]float64)
-			fc, _ := reader.ResolveInt(fd["FirstChar"])
+			fc := asInt(reader.Resolve(fd["FirstChar"]))
 			fontFirstChars[sname] = fc
 			for i, w := range widths {
 				wm[fc+i] = asFloat(reader.Resolve(w))
 			}
 			fontWidths[sname] = wm
 		}
-		if mw, ok := reader.ResolveFloat(fd["MissingWidth"]); ok {
+		if mw, ok := toFloat(reader.Resolve(fd["MissingWidth"])); ok {
 			fontMissingWidths[sname] = mw
 		}
 		// Check font descriptor for MissingWidth.
 		if descRef, ok := fd["FontDescriptor"]; ok {
 			if desc, ok := reader.ResolveDict(descRef); ok {
-				if mw, ok := reader.ResolveFloat(desc["MissingWidth"]); ok {
+				if mw, ok := toFloat(reader.Resolve(desc["MissingWidth"])); ok {
 					fontMissingWidths[sname] = mw
 				}
 			}

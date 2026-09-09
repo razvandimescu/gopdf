@@ -1179,7 +1179,7 @@ func (r *Reader) FontEncoding(font Dict) map[byte]string {
 	}
 
 	// Apply /Differences overlay.
-	diffArr, ok := encDict.Array("Differences")
+	diffArr, ok := r.ResolveArray(encDict["Differences"])
 	if !ok {
 		return diffs
 	}

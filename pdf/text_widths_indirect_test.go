@@ -152,6 +152,30 @@ func buildBrokenDWPDF(dw string) []byte {
 	return buildRawPDFFromBodies(bodies, 1)
 }
 
+// buildIndirectDifferencesPDF builds a single-page PDF whose /Encoding
+// dictionary reaches its /Differences overlay through an indirect
+// reference (object 6), remapping code 65 to /bullet.
+func buildIndirectDifferencesPDF(indirect bool) []byte {
+	content := "BT /F1 12 Tf 72 700 Td (A) Tj ET"
+
+	diffs := "[65 /bullet]"
+	if indirect {
+		diffs = "6 0 R"
+	}
+	bodies := []string{
+		"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+		"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+		"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] " +
+			"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n",
+		"4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica " +
+			"/Encoding << /Type /Encoding /BaseEncoding /WinAnsiEncoding " +
+			"/Differences " + diffs + " >> >>\nendobj\n",
+		fmt.Sprintf("5 0 obj\n<< /Length %d >>\nstream\n%s\nendstream\nendobj\n", len(content), content),
+		"6 0 obj\n[65 /bullet]\nendobj\n",
+	}
+	return buildRawPDFFromBodies(bodies, 1)
+}
+
 // A /DW that cannot be read is not a /DW of zero. ResolveFloat reports ok
 // for any non-nil value, so an unresolvable reference and a wrong-typed
 // value both coerce to 0 and overwrite the caller's default, collapsing
@@ -180,6 +204,30 @@ func TestFontWidths_UnreadableDWKeepsSpecDefault(t *testing.T) {
 			want := 100.0
 			if math.Abs(got-want) > 0.01 {
 				t.Errorf("glyph advance = %v, want %v (unreadable /DW overwrote the 1000 default)", got, want)
+			}
+		})
+	}
+}
+
+// The encoding overlay is subject to the same indirection as the width
+// tables: /Differences may be a reference, and dropping it yields the
+// wrong characters rather than merely the wrong spacing.
+func TestFontEncoding_IndirectDifferences(t *testing.T) {
+	for name, indirect := range map[string]bool{"direct": false, "indirect": true} {
+		t.Run(name, func(t *testing.T) {
+			doc, err := OpenBytes(buildIndirectDifferencesPDF(indirect))
+			if err != nil {
+				t.Fatalf("OpenBytes: %v", err)
+			}
+			spans, err := doc.Page(0).TextSpans()
+			if err != nil {
+				t.Fatalf("TextSpans: %v", err)
+			}
+			if len(spans) != 1 {
+				t.Fatalf("expected 1 span, got %d: %+v", len(spans), spans)
+			}
+			if got, want := spans[0].Text, "•"; got != want {
+				t.Errorf("text = %q, want %q (/Differences overlay not applied)", got, want)
 			}
 		})
 	}

@@ -37,7 +37,7 @@ Date,Description,Debit,Credit
 
 One static binary, no toolchain, nothing to install alongside it. The same
 command handles multi-line cells and tables that continue across pages. See
-[the CLI section](#command-line) for `gopdf merge` and `gopdf watermark`.
+[the CLI section](#command-line) for `gopdf merge`, `gopdf pages` and `gopdf watermark`.
 
 ## Why gopdf?
 
@@ -85,7 +85,7 @@ only one that pairs that with table extraction, under a permissive licence.
 - Image overlay / watermark (PNG/JPEG/GIF, rotation, opacity, transparent SMask)
 - PDF creation with text, rectangles, lines, images, and multiple fonts
 - Images as pages: PDFs and PNG/JPEG/GIF mixed into one document, detected by content, with baseline JPEGs embedded unre-encoded and EXIF orientation honoured
-- One CLI — `gopdf tables`, `gopdf merge`, `gopdf watermark`
+- One CLI — `gopdf tables`, `gopdf merge`, `gopdf pages`, `gopdf watermark`
 - Pure Go — no CGo, no system dependencies
 
 ## Installation
@@ -360,6 +360,7 @@ One binary, `gopdf`, with a subcommand per capability. Installed with
 ```bash
 gopdf tables invoice.pdf -format csv        # extract a table
 gopdf merge report.pdf scan.png -o out.pdf  # combine PDFs and images
+gopdf pages 1-2 report.pdf -o first-two.pdf # keep only some pages
 gopdf watermark -img logo.png in.pdf -o out.pdf
 ```
 
@@ -447,6 +448,32 @@ gopdf merge: IMG_6407.HEIC: HEIC is not supported (PNG, JPEG and GIF only)
 `sips` ships with macOS; elsewhere the hint names ImageMagick. Library callers
 can match `*pdf.UnsupportedFormatError` with `errors.As` to react to the format
 themselves.
+
+#### gopdf pages
+
+Keeps only the pages named by the range and drops the rest. Pages count from 1,
+and the output follows the order written, so a range can also reorder.
+
+```bash
+gopdf pages 1-2 report.pdf -o first-two.pdf  # split off the first two pages
+gopdf pages 5- report.pdf > tail.pdf         # page 5 to the end
+gopdf pages 1,3,5-7 report.pdf -o some.pdf   # a list of pages and ranges
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `-o` | stdout | output PDF path |
+
+A range is a comma-separated list of `N`, `A-B`, or `A-` (to the end). Anything
+else is rejected before a byte is written, naming what went wrong:
+
+```
+$ gopdf pages 15 report.pdf
+gopdf pages: page 15 is out of range; the document has 14 pages
+```
+
+The output is a rebuilt document: shared resources come across, but anything
+attached to the file as a whole — a digital signature above all — does not.
 
 #### gopdf watermark
 
@@ -670,7 +697,7 @@ pdf/
   stdfonts.go   Standard 14 font width tables
 
 cmd/
-  gopdf         CLI: tables, merge, watermark
+  gopdf         CLI: tables, merge, pages, watermark
   sample        generates the README's sample PDFs
   genglyphlist  regenerates glyphlist.go from the Adobe Glyph List
 ```

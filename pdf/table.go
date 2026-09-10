@@ -1312,16 +1312,30 @@ func mergeByAnchorColumn(rows []Row, columns []Column, anchor string) []Row {
 	return merged
 }
 
-// isContinuationRow returns true if the row looks like a description
-// continuation: it must have non-numeric text in the column immediately
-// after the anchor (the "description" column). Rows with content only
-// in distant columns (summaries, totals) are not continuations.
+// isContinuationRow returns true if the row looks like the wrapped tail of the
+// record above: every cell it fills after the anchor holds text, and none holds
+// a bare number. A row carrying an amount is a record or a summary of its own —
+// merging one would run two figures into a single cell.
+//
+// Which columns wrap is a property of the document, so no single column can be
+// asked. A quotation laid out as Quantity | Product Code | Suppliers Code |
+// Description leaves Product Code empty on every tail, and keying on that one
+// column (the anchor's neighbour) dropped the tail of every wrapped cell in the
+// file: a supplier code came out as its first line ("XYZ-ECO-I302M-A-" for
+// XYZ-ECO-I302M-A-NB), with the rest of the description lost beside it.
 func isContinuationRow(row Row, anchorIdx int) bool {
-	descIdx := anchorIdx + 1
-	if descIdx >= len(row.Cells) {
-		return false
+	text := false
+	for ci := anchorIdx + 1; ci < len(row.Cells); ci++ {
+		cell := row.Cells[ci].Text
+		if cell == "" {
+			continue
+		}
+		if isAllNumeric(cell) {
+			return false
+		}
+		text = true
 	}
-	return row.Cells[descIdx].Text != "" && !isAllNumeric(row.Cells[descIdx].Text)
+	return text
 }
 
 func isAllNumeric(s string) bool {

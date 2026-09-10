@@ -1102,3 +1102,73 @@ func TestIntegration_AllQuotationPDFs(t *testing.T) {
 		t.Error("no quotation PDFs were detected — expected at least one")
 	}
 }
+
+func TestMergeByAnchorColumn_WrapTailWithEmptyNeighbourColumn(t *testing.T) {
+	// A quotation whose code column is wide enough to wrap, with an EMPTY column
+	// between the anchor and the text:
+	//
+	//   Y=700: Quantity  Product Code  Suppliers Code    Product Description  (header)
+	//   Y=680: 76.00                   XYZ-ECO-I302M-A-  ACME ECO DECK MOUNTED
+	//   Y=668:                         NB                TAP BRUSHED NICKEL
+	//
+	// The tail fills neither the anchor nor its neighbour, which is what used to
+	// disqualify it: the row was dropped and the code kept only its first line.
+	spans := []TextSpan{
+		makeSpan(50, 700, "Quantity"),
+		makeSpan(110, 700, "Product Code"),
+		makeSpan(200, 700, "Suppliers Code"),
+		makeSpan(300, 700, "Product Description"),
+		makeSpan(50, 680, "76.00"),
+		makeSpan(200, 680, "XYZ-ECO-I302M-A-"),
+		makeSpan(300, 680, "ACME ECO DECK MOUNTED"),
+		makeSpan(200, 668, "NB"),
+		makeSpan(300, 668, "TAP BRUSHED NICKEL"),
+	}
+
+	tbl := FindTableAcrossPages([][]TextSpan{spans}, &TableOpts{
+		Headers:      []string{"Suppliers", "Product Description"},
+		AnchorColumn: "Quantity",
+	})
+	if tbl == nil {
+		t.Fatal("no table found")
+	}
+	if len(tbl.Rows) != 1 {
+		t.Fatalf("rows = %d, want 1 (the tail merges into its record)", len(tbl.Rows))
+	}
+	if got := tbl.CellByName(0, "Suppliers Code"); got != "XYZ-ECO-I302M-A- NB" {
+		t.Errorf("Suppliers Code = %q, want %q", got, "XYZ-ECO-I302M-A- NB")
+	}
+	if got := tbl.CellByName(0, "Product Description"); got != "ACME ECO DECK MOUNTED TAP BRUSHED NICKEL" {
+		t.Errorf("Product Description = %q, want the wrapped line appended", got)
+	}
+}
+
+func TestMergeByAnchorColumn_AmountRowIsNotATail(t *testing.T) {
+	// The rule the wrap tail must not break: a row carrying a figure is a record
+	// or a summary of its own, and merging one would run two amounts together.
+	spans := []TextSpan{
+		makeSpan(50, 700, "Date"),
+		makeSpan(150, 700, "Description"),
+		makeSpan(450, 700, "Credit"),
+		makeSpan(50, 680, "Jan 05"),
+		makeSpan(150, 680, "Payment to"),
+		makeSpan(450, 680, "100.00"),
+		makeSpan(150, 668, "ACME Corp"),
+		makeSpan(150, 640, "Interest"),
+		makeSpan(450, 640, "200.00"),
+	}
+
+	tbl := FindTableAcrossPages([][]TextSpan{spans}, &TableOpts{
+		Headers:      []string{"Description", "Credit"},
+		AnchorColumn: "Date",
+	})
+	if tbl == nil {
+		t.Fatal("no table found")
+	}
+	if got := tbl.CellByName(0, "Credit"); got != "100.00" {
+		t.Errorf("Credit = %q, want %q — a second amount was merged in", got, "100.00")
+	}
+	if got := tbl.CellByName(0, "Description"); got != "Payment to ACME Corp" {
+		t.Errorf("Description = %q, want the text tail merged", got)
+	}
+}

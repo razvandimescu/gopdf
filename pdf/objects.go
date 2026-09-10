@@ -63,32 +63,12 @@ func (d Dict) Ref(key Name) (Ref, bool) {
 
 // Int returns the value at key as an int, converting from float64 if needed.
 func (d Dict) Int(key Name) (int, bool) {
-	v, ok := d[key]
-	if !ok {
-		return 0, false
-	}
-	switch n := v.(type) {
-	case int:
-		return n, true
-	case float64:
-		return int(n), true
-	}
-	return 0, false
+	return toInt(d[key])
 }
 
 // Float returns the value at key as a float64, converting from int if needed.
 func (d Dict) Float(key Name) (float64, bool) {
-	v, ok := d[key]
-	if !ok {
-		return 0, false
-	}
-	switch n := v.(type) {
-	case float64:
-		return n, true
-	case int:
-		return float64(n), true
-	}
-	return 0, false
+	return toFloat(d[key])
 }
 
 // String returns the value at key as a string.
@@ -111,24 +91,37 @@ func (d Dict) Stream(key Name) (*Stream, bool) {
 	return s, ok
 }
 
-func asFloat(v any) float64 {
+// toFloat reports v as a float64. ok is false when v is not a number, which
+// lets callers keep a spec-mandated default instead of taking a zero.
+func toFloat(v any) (float64, bool) {
 	switch n := v.(type) {
 	case float64:
-		return n
+		return n, true
 	case int:
-		return float64(n)
+		return float64(n), true
 	}
-	return 0
+	return 0, false
+}
+
+// toInt reports v as an int, under the same contract as toFloat.
+func toInt(v any) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case float64:
+		return int(n), true
+	}
+	return 0, false
+}
+
+func asFloat(v any) float64 {
+	f, _ := toFloat(v)
+	return f
 }
 
 func asInt(v any) int {
-	switch n := v.(type) {
-	case int:
-		return n
-	case float64:
-		return int(n)
-	}
-	return 0
+	n, _ := toInt(v)
+	return n
 }
 
 // matMul6 multiplies two 6-element affine matrices [a b c d e f].

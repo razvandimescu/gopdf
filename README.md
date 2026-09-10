@@ -102,8 +102,6 @@ The library:
 go get github.com/razvandimescu/gopdf@latest
 ```
 
-`go.mod` has no `require` block, so neither one pulls anything in.
-
 ## Quick Start
 
 ```go
@@ -338,19 +336,16 @@ data, err := c.Build()
 An image drawn on several pages is written to the file once. Transparency
 travels with it as a soft mask.
 
-A JPEG's EXIF orientation is honoured. Phone cameras record how the handset
-was held rather than rotating the pixels, so a photo taken sideways is stored
-landscape and declares a quarter turn; `DrawImage` folds that turn into the
-placement matrix. It costs nothing — the pixels are never touched — and
-`DisplaySize` reports the dimensions the image will actually occupy, which is
-what you want when sizing a page around it. `Image.DPI` carries the resolution
-the file declares — EXIF or JFIF for JPEG, the `pHYs` chunk for PNG — and is 0
-when it declares none.
+A JPEG's EXIF orientation is folded into the placement matrix, so a photo taken
+sideways lands upright without the pixels being touched, and `DisplaySize`
+reports the dimensions it will occupy. `Image.DPI` carries the resolution the
+file declares — EXIF or JFIF for JPEG, `pHYs` for PNG — and is 0 when it
+declares none.
 
-A baseline JPEG is embedded in its original encoding, behind `DCTDecode` —
-decoding a photograph to RGB and deflating the pixels would multiply its size
-several-fold. Progressive, 12-bit, and CMYK JPEGs take the decode path
-instead, since viewer support for them behind `DCTDecode` is uneven.
+A baseline JPEG is embedded in its original encoding, behind `DCTDecode`;
+re-encoding a photograph would multiply its size several-fold. Progressive,
+12-bit, and CMYK JPEGs take the decode path, where viewer support behind
+`DCTDecode` is uneven.
 
 ### Command line
 
@@ -415,17 +410,11 @@ gopdf merge -page image -o out.pdf scan.png   # page follows the image
 | `-dpi` | `0` | image resolution; `0` reads it from the file, falling back to 72 |
 | `-margin` | `0` | whitespace around an image, in points |
 
-Image pages default to a paper size rather than to the image, which is the
-opposite of what a converter like `mutool convert` or ImageMagick does. The
-reason is the verb: `merge` promises one document, and pages of a document
-have to agree with each other — `merge report.pdf photo.jpg` with page-follows-
-image would bind a 42×56 inch page next to an A4 one, because a phone camera
-declares 72 dpi when it has no real size to report. `-page image` is right when
-the resolution means something, as it does for a 300 dpi scan, and it now
-honours what the file declares instead of assuming 72.
-
-Fitting an image to a page already letterboxes it on one axis, so `-margin`
-defaults to 0; pass `-margin 18` for printers that cannot reach the edge.
+Image pages default to paper, not to the image, unlike a converter: `merge`
+promises one document, and a phone photo taken at its declared 72 dpi would
+bind a 42×56 inch page next to an A4 one. Use `-page image` where the declared
+resolution means something, as it does for a 300 dpi scan. Fitting already
+letterboxes on one axis, so `-margin` defaults to 0.
 
 PNG, JPEG and GIF are the formats Go's standard library decodes, so they are
 the formats gopdf reads. Hand it a HEIC, AVIF, WebP or TIFF and the error names
@@ -482,9 +471,6 @@ gopdf watermark -img draft.png in.pdf -o out.pdf -angle 30 -opacity 0.12 -skip-f
 | `-scale` | `0.85` | size as a fraction of the page |
 | `-skip-first` | off | leave the first page un-watermarked |
 | `-skip-last` | off | leave the last page un-watermarked |
-
-The image is written to the file once and shared by every page that references
-it, so a hundred-page watermark costs one copy.
 
 ### Text overlay
 
@@ -653,12 +639,11 @@ type Rect struct {
 - **Reading encrypted PDFs is supported; writing them is not.** Output from merge, rewrite, and creation is always unencrypted, so an encrypted input is effectively decrypted by any operation that writes it back out. Public-key (certificate) security handlers are not supported.
 - **Auto-detection judges a table by its column names.** Running text is
   sliced into "columns" wherever word gaps line up, so auto-detection rejects
-  candidates whose headings read as fragments rather than words. That is what
-  keeps prose from being reported as a table, and it means a real table whose
-  columns are named with one or two characters needs `-headers` (or
-  `TableOpts.Headers`) to be found.
+  candidates whose headings read as fragments rather than words. A real table
+  whose columns are named in one or two characters therefore needs `-headers`
+  (or `TableOpts.Headers`) to be found.
 - No image extraction
-- **Images read as PNG, JPEG and GIF only** — what the standard library decodes. HEIC and AVIF need an HEVC or AV1 decoder, which it does not have; the Go decoders that do exist are either CGo wrappers around LGPL libraries or wrap AGPL-licensed code, so neither fits a CGo-free MIT library. WebP and TIFF would need `golang.org/x/image`, a dependency this library does not take. Unsupported formats are named in the error.
+- **Images read as PNG, JPEG and GIF only** — what the standard library decodes. HEIC and AVIF need an HEVC or AV1 decoder, available only through CGo or copyleft code; WebP and TIFF would need `golang.org/x/image`. Neither fits a CGo-free MIT library with no dependencies. Unsupported formats are named in the error.
 - PDF creation supports standard 14 fonts only (no font embedding)
 - Merge drops interactive features (forms, bookmarks, JS)
 - Text overlay uses Helvetica only

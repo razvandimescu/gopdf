@@ -61,17 +61,13 @@ func plural(n int) string {
 	return "s"
 }
 
-func humanSize(n int) string {
-	const unit = 1024
-	if n < unit {
-		return fmt.Sprintf("%d B", n)
+// writeOutput sends a result to a file, or to stdout when no path is given.
+func writeOutput(path string, data []byte) error {
+	if path == "" {
+		_, err := os.Stdout.Write(data)
+		return err
 	}
-	div, exp := int64(unit), 0
-	for size := int64(n) / unit; size >= unit; size /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGT"[exp])
+	return os.WriteFile(path, data, 0644)
 }
 
 // parseInterspersed parses flags that appear before, between, or after the

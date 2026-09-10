@@ -427,14 +427,6 @@ honours what the file declares instead of assuming 72.
 Fitting an image to a page already letterboxes it on one axis, so `-margin`
 defaults to 0; pass `-margin 18` for printers that cannot reach the edge.
 
-The summary goes to stderr, leaving stdout for the PDF, and names both the
-page size chosen and the way out of it:
-
-```
-2 inputs, 2 pages → out.pdf (7.1 MiB)
-  2 images fitted to A4 595×842pt; -page image sizes each page to its image
-```
-
 PNG, JPEG and GIF are the formats Go's standard library decodes, so they are
 the formats gopdf reads. Hand it a HEIC, AVIF, WebP or TIFF and the error
 names the format and the command that fixes it:

@@ -74,13 +74,8 @@ func TestPagesCommand(t *testing.T) {
 		t.Fatalf("writing input: %v", err)
 	}
 
-	stderr := captureStderr(t, func() {
-		if err := runPages([]string{"3,1", in, "-o", out}); err != nil {
-			t.Fatalf("runPages: %v", err)
-		}
-	})
-	if want := "2 of 4 pages → " + out; !strings.Contains(stderr, want) {
-		t.Errorf("summary = %q, want it to contain %q", stderr, want)
+	if err := runPages([]string{"3,1", in, "-o", out}); err != nil {
+		t.Fatalf("runPages: %v", err)
 	}
 
 	doc, err := pdf.OpenFile(out)

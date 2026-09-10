@@ -50,7 +50,6 @@ func runWatermark(args []string) error {
 		return err
 	}
 
-	stamped := 0
 	for i := range doc.NumPages() {
 		if (*skipFirst && i == 0) || (*skipLast && i == doc.NumPages()-1) {
 			continue
@@ -73,7 +72,6 @@ func runWatermark(args []string) error {
 			Rotation: *angle,
 			Opacity:  *opacity,
 		})
-		stamped++
 	}
 
 	output, err := editor.Apply()
@@ -81,16 +79,5 @@ func runWatermark(args []string) error {
 		return err
 	}
 
-	destination := *out
-	if destination == "" {
-		if _, err := os.Stdout.Write(output); err != nil {
-			return err
-		}
-		destination = "stdout"
-	} else if err := os.WriteFile(destination, output, 0644); err != nil {
-		return err
-	}
-	fmt.Fprintf(os.Stderr, "%d of %d page%s stamped → %s (%s)\n",
-		stamped, doc.NumPages(), plural(doc.NumPages()), destination, humanSize(len(output)))
-	return nil
+	return writeOutput(*out, output)
 }

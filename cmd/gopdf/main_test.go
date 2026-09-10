@@ -10,7 +10,6 @@ import (
 	"image/color"
 	"image/png"
 	"math"
-	"os"
 	"runtime"
 	"strings"
 	"testing"
@@ -259,73 +258,4 @@ func pngAt300DPI(t *testing.T) []byte {
 	out := append([]byte{}, src[:afterIHDR]...)
 	out = append(out, chunk...)
 	return append(out, src[afterIHDR:]...)
-}
-
-func TestReportNamesThePageSizeAndTheWayOut(t *testing.T) {
-	// A page size is invisible until printing, so the summary must state it
-	// and point at the alternative while the user can still act on it.
-	l, _ := parseLayout("a4", 72, 0)
-	data, err := l.imageToPDF(testPNGBytes(t, 400, 200))
-	if err != nil {
-		t.Fatalf("imageToPDF: %v", err)
-	}
-
-	stderr := captureStderr(t, func() { report("out.pdf", 1, 1, data, l) })
-	for _, want := range []string{
-		"1 input, 1 page → out.pdf",
-		"1 image fitted to A4 595×842pt",
-		"-page image sizes each page to its image",
-	} {
-		if !strings.Contains(stderr, want) {
-			t.Errorf("summary lacks %q:\n%s", want, stderr)
-		}
-	}
-
-	// Under -page image there is nothing to escape to, and a merge of PDFs
-	// alone fitted no images; neither should get the second line.
-	native, _ := parseLayout("image", 0, 0)
-	if got := captureStderr(t, func() { report("out.pdf", 1, 1, data, native) }); strings.Contains(got, "-page image sizes") {
-		t.Errorf("-page image should not advertise itself:\n%s", got)
-	}
-	if got := captureStderr(t, func() { report("out.pdf", 2, 0, data, l) }); strings.Contains(got, "fitted to") {
-		t.Errorf("a merge with no images should not mention fitting:\n%s", got)
-	}
-}
-
-func captureStderr(t *testing.T, f func()) string {
-	t.Helper()
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("pipe: %v", err)
-	}
-	saved := os.Stderr
-	os.Stderr = w
-	f()
-	os.Stderr = saved
-	w.Close()
-
-	var buf bytes.Buffer
-	if _, err := buf.ReadFrom(r); err != nil {
-		t.Fatalf("reading captured stderr: %v", err)
-	}
-	return buf.String()
-}
-
-func TestHumanSize(t *testing.T) {
-	tests := []struct {
-		n    int
-		want string
-	}{
-		{0, "0 B"},
-		{999, "999 B"},
-		{1024, "1.0 KiB"},
-		{1536, "1.5 KiB"},
-		{7407108, "7.1 MiB"},
-		{3 * 1024 * 1024 * 1024, "3.0 GiB"},
-	}
-	for _, tt := range tests {
-		if got := humanSize(tt.n); got != tt.want {
-			t.Errorf("humanSize(%d) = %q, want %q", tt.n, got, tt.want)
-		}
-	}
 }

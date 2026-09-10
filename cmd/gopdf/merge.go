@@ -48,7 +48,6 @@ func runMerge(args []string) error {
 	}
 
 	docs := make([][]byte, len(paths))
-	images := 0
 	for i, path := range paths {
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -58,7 +57,6 @@ func runMerge(args []string) error {
 			if data, err = layout.imageToPDF(data); err != nil {
 				return fmt.Errorf("%s: %w%s", path, err, conversionHint(path, err))
 			}
-			images++
 		}
 		docs[i] = data
 	}
@@ -70,17 +68,7 @@ func runMerge(args []string) error {
 		}
 	}
 
-	destination := *out
-	if destination == "" {
-		if _, err := os.Stdout.Write(merged); err != nil {
-			return err
-		}
-		destination = "stdout"
-	} else if err := os.WriteFile(destination, merged, 0644); err != nil {
-		return err
-	}
-	report(destination, len(paths), images, merged, layout)
-	return nil
+	return writeOutput(*out, merged)
 }
 
 // conversionHint spells out a command that turns a file gopdf cannot decode
@@ -177,22 +165,4 @@ func (l layout) imageToPDF(data []byte) ([]byte, error) {
 	c := pdf.NewCreator()
 	c.NewPage(pageW, pageH).DrawImage(img, (pageW-w)/2, (pageH-h)/2, w, h)
 	return c.Build()
-}
-
-// report describes what came out, on stderr so it stays clear of a PDF on
-// stdout. A page size is invisible until someone prints the file, so when
-// images were fitted to paper the summary also names the way out.
-func report(destination string, inputs, images int, merged []byte, l layout) {
-	pages := "unknown pages"
-	if doc, err := pdf.OpenBytes(merged); err == nil {
-		pages = fmt.Sprintf("%d page%s", doc.NumPages(), plural(doc.NumPages()))
-	}
-	fmt.Fprintf(os.Stderr, "%d input%s, %s → %s (%s)\n",
-		inputs, plural(inputs), pages, destination, humanSize(len(merged)))
-
-	if images == 0 || !l.fitsPaper() {
-		return
-	}
-	fmt.Fprintf(os.Stderr, "  %d image%s fitted to %s %.0f×%.0fpt; -page image sizes each page to its image\n",
-		images, plural(images), l.paper, l.width, l.height)
 }

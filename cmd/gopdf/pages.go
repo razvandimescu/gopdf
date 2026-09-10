@@ -55,18 +55,7 @@ func runPages(args []string) error {
 		return err
 	}
 
-	destination := *out
-	if destination == "" {
-		if _, err := os.Stdout.Write(output); err != nil {
-			return err
-		}
-		destination = "stdout"
-	} else if err := os.WriteFile(destination, output, 0644); err != nil {
-		return err
-	}
-	fmt.Fprintf(os.Stderr, "%d of %d page%s → %s (%s)\n",
-		len(pages), doc.NumPages(), plural(doc.NumPages()), destination, humanSize(len(output)))
-	return nil
+	return writeOutput(*out, output)
 }
 
 // parsePages turns a 1-based range like "1,3,5-7" into 0-based indices into an

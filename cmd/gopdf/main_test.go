@@ -3,14 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"hash/crc32"
 	"image"
 	"image/color"
 	"image/png"
 	"math"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -150,32 +148,14 @@ func TestImageToPDFRejectsNonImage(t *testing.T) {
 	}
 }
 
-func TestConversionHint(t *testing.T) {
+// TestUnsupportedFormatIsNamed: "unknown format" leaves a user with a phone
+// photo nothing to act on, so the format the file declares reaches the error.
+func TestUnsupportedFormatIsNamed(t *testing.T) {
 	heic := append([]byte{0, 0, 0, 0x18}, "ftypheic"...)
 	l, _ := parseLayout("a4", 72, 18)
 	_, err := l.imageToPDF(heic)
-	if err == nil {
-		t.Fatal("HEIC decoded without error")
-	}
-	if got := err.Error(); got != "HEIC is not supported (PNG, JPEG and GIF only)" {
-		t.Errorf("error = %q; an unsupported format should not also be called a non-PDF", got)
-	}
-
-	hint := conversionHint("/pics/IMG_6407.HEIC", err)
-	if !strings.Contains(hint, "/pics/IMG_6407.jpg") {
-		t.Errorf("hint = %q, want it to name the converted file", hint)
-	}
-	wantTool := "magick"
-	if runtime.GOOS == "darwin" {
-		wantTool = "sips -s format jpeg"
-	}
-	if !strings.Contains(hint, wantTool) {
-		t.Errorf("hint = %q, want it to suggest %q on %s", hint, wantTool, runtime.GOOS)
-	}
-
-	// Every other failure is left to speak for itself.
-	if got := conversionHint("x.pdf", errors.New("some other problem")); got != "" {
-		t.Errorf("hint for an unrelated error = %q, want none", got)
+	if err == nil || !strings.Contains(err.Error(), "HEIC is not supported") {
+		t.Errorf("error = %v, want it to name HEIC", err)
 	}
 }
 

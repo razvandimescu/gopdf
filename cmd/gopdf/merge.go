@@ -2,12 +2,9 @@ package main
 
 import (
 	"bytes"
-	"errors"
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/razvandimescu/gopdf/pdf"
@@ -55,7 +52,7 @@ func runMerge(args []string) error {
 		}
 		if !isPDF(data) {
 			if data, err = layout.imageToPDF(data); err != nil {
-				return fmt.Errorf("%s: %w%s", path, err, conversionHint(path, err))
+				return fmt.Errorf("%s: %w", path, err)
 			}
 		}
 		docs[i] = data
@@ -69,22 +66,6 @@ func runMerge(args []string) error {
 	}
 
 	return writeOutput(*out, merged)
-}
-
-// conversionHint spells out a command that turns a file gopdf cannot decode
-// into one it can, so the error says what to do and not only what failed.
-// It returns "" for any other failure.
-func conversionHint(path string, err error) string {
-	var unsupported *pdf.UnsupportedFormatError
-	if !errors.As(err, &unsupported) {
-		return ""
-	}
-	jpg := strings.TrimSuffix(path, filepath.Ext(path)) + ".jpg"
-	command := fmt.Sprintf("magick %s %s", path, jpg) // ImageMagick, everywhere else
-	if runtime.GOOS == "darwin" {
-		command = fmt.Sprintf("sips -s format jpeg %s --out %s", path, jpg)
-	}
-	return "\n  convert it first:  " + command
 }
 
 // isPDF reports whether data carries a PDF header, using the same tolerance
@@ -144,10 +125,6 @@ func (l layout) resolution(img *pdf.Image) float64 {
 func (l layout) imageToPDF(data []byte) ([]byte, error) {
 	img, err := pdf.LoadImageBytes(data)
 	if err != nil {
-		var unsupported *pdf.UnsupportedFormatError
-		if errors.As(err, &unsupported) {
-			return nil, unsupported // a named format is diagnosis enough
-		}
 		return nil, fmt.Errorf("not a PDF, and %w", err)
 	}
 	dw, dh := img.DisplaySize() // a photo held sideways occupies a taller page

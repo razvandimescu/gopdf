@@ -428,18 +428,13 @@ Fitting an image to a page already letterboxes it on one axis, so `-margin`
 defaults to 0; pass `-margin 18` for printers that cannot reach the edge.
 
 PNG, JPEG and GIF are the formats Go's standard library decodes, so they are
-the formats gopdf reads. Hand it a HEIC, AVIF, WebP or TIFF and the error
-names the format and the command that fixes it:
+the formats gopdf reads. Hand it a HEIC, AVIF, WebP or TIFF and the error names
+the format rather than reporting an unknown one:
 
 ```
 $ gopdf merge IMG_6407.HEIC -o out.pdf
-gopdf merge: IMG_6407.HEIC: HEIC is not supported (PNG, JPEG and GIF only)
-  convert it first:  sips -s format jpeg IMG_6407.HEIC --out IMG_6407.jpg
+gopdf merge: IMG_6407.HEIC: not a PDF, and HEIC is not supported (PNG, JPEG and GIF only)
 ```
-
-`sips` ships with macOS; elsewhere the hint names ImageMagick. Library callers
-can match `*pdf.UnsupportedFormatError` with `errors.As` to react to the format
-themselves.
 
 #### gopdf pages
 
@@ -663,7 +658,7 @@ type Rect struct {
   columns are named with one or two characters needs `-headers` (or
   `TableOpts.Headers`) to be found.
 - No image extraction
-- **Images read as PNG, JPEG and GIF only** — what the standard library decodes. HEIC and AVIF need an HEVC or AV1 decoder, which it does not have; the Go decoders that do exist are either CGo wrappers around LGPL libraries or wrap AGPL-licensed code, so neither fits a CGo-free MIT library. WebP and TIFF would need `golang.org/x/image`, a dependency this library does not take. Unsupported formats are named in the error, with a conversion command.
+- **Images read as PNG, JPEG and GIF only** — what the standard library decodes. HEIC and AVIF need an HEVC or AV1 decoder, which it does not have; the Go decoders that do exist are either CGo wrappers around LGPL libraries or wrap AGPL-licensed code, so neither fits a CGo-free MIT library. WebP and TIFF would need `golang.org/x/image`, a dependency this library does not take. Unsupported formats are named in the error.
 - PDF creation supports standard 14 fonts only (no font embedding)
 - Merge drops interactive features (forms, bookmarks, JS)
 - Text overlay uses Helvetica only

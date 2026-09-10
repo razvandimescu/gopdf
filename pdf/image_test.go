@@ -3,7 +3,6 @@ package pdf
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"hash/crc32"
 	"image"
 	"image/color"
@@ -213,25 +212,17 @@ func TestRecognizedFormat(t *testing.T) {
 		})
 	}
 
-	// The name reaches the caller as a typed error it can act on, rather
-	// than as "unknown format".
-	_, err := LoadImageBytes(heic)
-	var unsupported *UnsupportedFormatError
-	if !errors.As(err, &unsupported) {
-		t.Fatalf("LoadImageBytes error = %v, want an *UnsupportedFormatError", err)
-	}
-	if unsupported.Format != "HEIC" {
-		t.Errorf("Format = %q, want HEIC", unsupported.Format)
-	}
-	if !strings.Contains(err.Error(), "HEIC is not supported") {
-		t.Errorf("message = %q, want it to name HEIC", err)
+	// The name reaches the caller, rather than "unknown format".
+	if _, err := LoadImageBytes(heic); err == nil ||
+		!strings.Contains(err.Error(), "HEIC is not supported") {
+		t.Errorf("LoadImageBytes error = %v, want it to name HEIC", err)
 	}
 
-	// A format it cannot name still fails, just without the typed error.
+	// A format it cannot name still fails, just without naming one.
 	if _, err := LoadImageBytes([]byte("no image here at all")); err == nil {
 		t.Error("garbage decoded without error")
-	} else if errors.As(err, &unsupported) {
-		t.Errorf("unrecognized bytes reported as format %q", unsupported.Format)
+	} else if !strings.Contains(err.Error(), "decode image") {
+		t.Errorf("error = %v, want the decoder's own failure", err)
 	}
 }
 

@@ -54,7 +54,7 @@ func LoadImageBytes(data []byte) (*Image, error) {
 	img, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
 		if name := recognizedFormat(data); name != "" {
-			return nil, &UnsupportedFormatError{Format: name}
+			return nil, fmt.Errorf("%s is not supported (PNG, JPEG and GIF only)", name)
 		}
 		return nil, fmt.Errorf("decode image: %w", err)
 	}
@@ -303,17 +303,6 @@ func (img *Image) FitRotated(pageW, pageH, rotation, scale float64) (width, heig
 	// and w·|sin|+h·|cos| vertically; bound both against the page.
 	w := math.Min(pageW*scale/(cosT+aspect*sinT), pageH*scale/(sinT+aspect*cosT))
 	return w, w * aspect
-}
-
-// UnsupportedFormatError reports an image format gopdf recognizes but cannot
-// decode. Callers can match it with errors.As to say something useful about
-// the file — suggest a conversion, say — rather than relay "unknown format".
-type UnsupportedFormatError struct {
-	Format string // "HEIC", "HEIF", "AVIF", "WebP" or "TIFF"
-}
-
-func (e *UnsupportedFormatError) Error() string {
-	return fmt.Sprintf("%s is not supported (PNG, JPEG and GIF only)", e.Format)
 }
 
 // heifBrands are the ISO base media brands that mark a still image the

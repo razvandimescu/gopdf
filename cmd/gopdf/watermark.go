@@ -41,7 +41,7 @@ func runWatermark(args []string) error {
 	}
 	logo, err := pdf.LoadImage(*image)
 	if err != nil {
-		return fmt.Errorf("%s: %w%s", *image, err, conversionHint(*image, err))
+		return fmt.Errorf("%s: %w", *image, err)
 	}
 
 	editor := pdf.NewEditor(data)

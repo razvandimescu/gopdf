@@ -26,7 +26,7 @@ func TestOffsetsNeedAnUnambiguousLine(t *testing.T) {
 		return gs
 	}
 	one := append(seedRow(100), round()...)
-	if off, ok := learnOffsets([][]*outlineGlyph{one}, [][]*line{anchoredLines(one)})[1]; !approx(off, 0.1) || !ok {
+	if off, ok := learnOffsets([][]*outlineGlyph{one}, [][]*line{anchoredLines(one)}).offset[1]; !approx(off, 0.1) || !ok {
 		t.Errorf("beside one baseline: offset %v, %v; want 0.1", off, ok)
 	}
 	// A two-font row: a second baseline 0.8 pt away, its seeds as near.
@@ -35,7 +35,7 @@ func TestOffsetsNeedAnUnambiguousLine(t *testing.T) {
 	if len(anchors) != 2 {
 		t.Fatalf("got %d anchored lines, want 2", len(anchors))
 	}
-	if off, ok := learnOffsets([][]*outlineGlyph{two}, [][]*line{anchors})[1]; ok {
+	if off, ok := learnOffsets([][]*outlineGlyph{two}, [][]*line{anchors}).offset[1]; ok {
 		t.Errorf("between two baselines: learned offset %v, want none", off)
 	}
 }
@@ -63,7 +63,7 @@ func TestFallbackReachesFromSeedsAndPlacedGlyphs(t *testing.T) {
 	// 3 em is about 29 pt: nearSeed is 25 pt from a seed and 106 pt from the
 	// first placed glyph; nearPlaced is 16 pt from the second and 85 pt from
 	// any seed.
-	pl := place(gs, anchors, map[int]float64{1: 0.1}, nil)
+	pl := place(gs, anchors, learned{offset: map[int]float64{1: 0.1}}, nil)
 	if len(pl.omitted) != 0 || len(pl.lines) != 1 {
 		t.Fatalf("got %d lines and omitted %v; want everything on the one line", len(pl.lines), pl.omitted)
 	}
@@ -139,7 +139,7 @@ func TestTransferredOffsetsKeepTheirTolerance(t *testing.T) {
 		tolerance float64
 		joins     bool
 	}{{2 * baselineTolerance, true}, {baselineTolerance, false}} {
-		pl := place(gs, anchors, nil, map[int]transfer{5: {0.1, c.tolerance}})
+		pl := place(gs, anchors, learned{}, map[int]transfer{5: {0.1, c.tolerance}})
 		if got := slices.Contains(anchors[0].glyphs, g); got != c.joins || len(pl.transferred) != 1 {
 			t.Errorf("tolerance %v: joined the anchored line %v, want %v; transferred %d, want 1",
 				c.tolerance, got, c.joins, len(pl.transferred))

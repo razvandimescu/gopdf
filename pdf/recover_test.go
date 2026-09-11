@@ -74,6 +74,12 @@ func synthGlyph(c rune, x, y float64, translated bool) string {
 // word and 4 pt between words, jittering bottoms by a 600 dpi grid step and
 // alternating the two emission styles. Tabs separate cells, 100 pt apart.
 func synthGlyphs(lines []string) []string {
+	return synthGlyphsWith(lines, synthGlyph)
+}
+
+// synthGlyphsWith lays lines out as synthGlyphs does, drawing each glyph with
+// draw.
+func synthGlyphsWith(lines []string, draw func(c rune, x, y float64, translated bool) string) []string {
 	var out []string
 	for li, line := range lines {
 		y := 740 - 20*float64(li)
@@ -82,7 +88,7 @@ func synthGlyphs(lines []string) []string {
 			for _, word := range strings.Fields(cell) {
 				for _, c := range strings.ReplaceAll(word, "I", "l") {
 					n := len(out)
-					out = append(out, synthGlyph(c, x, y+0.12*float64(n%3-1), n%2 == 0))
+					out = append(out, draw(c, x, y+0.12*float64(n%3-1), n%2 == 0))
 					x += synthMetricOf(c).width + 1.4
 				}
 				x += 4 - 1.4
@@ -211,6 +217,97 @@ func TestRecoverOutlinesTransfersOffsetsAcrossSizes(t *testing.T) {
 		if s.Text == "PALE" && math.Abs(s.Y-790) > baselineTolerance {
 			t.Errorf("heading baseline %v, want 790", s.Y)
 		}
+	}
+}
+
+// synthWord draws s k times the synthetic size from x, with its baseline at y,
+// and returns the glyphs and the x after the last one.
+func synthWord(s string, k, x, y float64) ([]string, float64) {
+	var out []string
+	for _, c := range s {
+		if c == ' ' {
+			x += k * (4 - 1.4)
+			continue
+		}
+		out = append(out, scaledGlyph(c, k, x, y))
+		x += k * (synthMetricOf(c).width + 1.4)
+	}
+	return out, x
+}
+
+func spanNamed(t *testing.T, doc *Document, text string) TextSpan {
+	t.Helper()
+	spans, _ := doc.Page(0).TextSpans()
+	for _, s := range spans {
+		if s.Text == text {
+			return s
+		}
+	}
+	t.Fatalf("no span %q", text)
+	return TextSpan{}
+}
+
+// Many faces draw the apostrophe with the comma's outline, raised. The
+// comma's offset then predicts a baseline in the middle of the apostrophe's
+// own line, and the apostrophe would start a line of its own.
+func TestRecoverOutlinesRehomesAnApostropheDrawnAsAComma(t *testing.T) {
+	lines := append(slices.Clone(synthText), "TREK, SEAL, LOAD, NEAR") // enough commas to learn from
+	commaOutline := func(c rune, x, y float64, translated bool) string {
+		if c == '’' {
+			return synthGlyph(',', x, y+5.6, translated)
+		}
+		return synthGlyph(c, x, y, translated)
+	}
+	text, report := recoverText(t, synthDoc(t, synthGlyphsWith(lines, commaOutline), ""), synthLabeller)
+
+	if !strings.Contains(text, "\nDEAN'S NEW RED OAK DESK\n") || strings.Count(text, "\n") != len(lines)-1 {
+		t.Errorf("recovered\n%s\nwant DEAN'S whole, on its line, and no line for the apostrophe", text)
+	}
+	if len(report.Rehomed) != 1 {
+		t.Errorf("rehomed %d glyphs, want the apostrophe", len(report.Rehomed))
+	}
+}
+
+// The acceptance gate for re-homing: lines of one shape inside or near
+// another line's body, which must stay where their own offsets put them.
+// Each is kept by one guard alone.
+func TestRecoverOutlinesKeepsLinesThatBelong(t *testing.T) {
+	glyphs := synthGlyphs(synthText)
+	add := func(s string, k, x, y float64) float64 {
+		gs, end := synthWord(s, k, x, y)
+		glyphs = append(glyphs, gs...)
+		return end
+	}
+	// A mixed-size row: a body-size cell 0.8 pt below a larger font's
+	// baseline, between two of its cells. Kept as other text.
+	x := add("HEAD", 1.2, 40, 500)
+	x = add("O", 1, x+10, 499.2)
+	add("DEAL", 1.2, x+10, 500)
+	// A superscript, a smaller outline raised between two words. Kept as
+	// other text: its offset is transferred.
+	x = add("HEAD TOWN", 1, 40, 460)
+	x = add("e", 0.6, x+0.5, 463.2)
+	add("WEST", 1, x+4, 460)
+	// A cell beside a line rather than within it, its baseline 0.6 em higher.
+	// Kept as not between the line's glyphs.
+	x = add("OO", 1, 40, 425.8)
+	add("HEAD TOWN", 1, x+10, 420)
+	// A line 40 pt below the last row, under a gap in it. Kept as outside the
+	// row's body.
+	add("OOO", 1, 52, 380)
+
+	doc := synthDoc(t, glyphs, "")
+	_, report := recoverText(t, doc, synthLabeller)
+	for _, c := range []struct {
+		text     string
+		baseline float64
+	}{{"O", 499.2}, {"e", 463.2}, {"OO", 425.8}, {"OOO", 380}} {
+		if s := spanNamed(t, doc, c.text); math.Abs(s.Y-c.baseline) > baselineTolerance {
+			t.Errorf("%q moved to baseline %v, want %v", c.text, s.Y, c.baseline)
+		}
+	}
+	if len(report.Rehomed) != 0 {
+		t.Errorf("rehomed %d glyphs, want none", len(report.Rehomed))
 	}
 }
 

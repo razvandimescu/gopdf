@@ -100,14 +100,15 @@ func assemble(numPages int, glyphs []*outlineGlyph, report *RecoveryReport) asse
 	for p, gs := range pages {
 		anchors[p] = anchoredLines(gs)
 	}
-	offsets := learnOffsets(pages, anchors)
-	moved := transferOffsets(glyphs, offsets)
+	own := learnOffsets(pages, anchors)
+	moved := transferOffsets(glyphs, own.offset)
 
 	a := assembly{spans: make([][]TextSpan, numPages)}
 	for p, gs := range pages {
-		pl := place(gs, anchors[p], offsets, moved)
+		pl := place(gs, anchors[p], own, moved)
 		report.FallbackPlaced = append(report.FallbackPlaced, occurrences(pl.fallback)...)
 		report.TransferPlaced = append(report.TransferPlaced, occurrences(pl.transferred)...)
+		report.Rehomed = append(report.Rehomed, occurrences(pl.rehomed)...)
 		report.Omitted = append(report.Omitted, occurrences(pl.omitted)...)
 		for _, l := range pl.lines {
 			a.runs = append(a.runs, runsOf(l)...)
@@ -210,10 +211,18 @@ func anchoredLines(gs []*outlineGlyph) []*line {
 	return lines
 }
 
+// learned is what anchored lines teach: each shape's offset, and the seed
+// shapes of the lines whose samples agree with it. One outline is one font at
+// one size, so those seeds identify the text the shape was learned in.
+type learned struct {
+	offset map[int]float64
+	taught map[int]map[int]bool
+}
+
 // learnOffsets learns each shape's offset from glyphs that sit unambiguously
 // near an anchored line's seeds. Nothing placed later trains it, so one wrong
 // attachment cannot spread through a shape to the whole document.
-func learnOffsets(pages [][]*outlineGlyph, anchors [][]*line) map[int]float64 {
+func learnOffsets(pages [][]*outlineGlyph, anchors [][]*line) learned {
 	var heights []float64
 	for _, gs := range pages {
 		for _, g := range gs {
@@ -223,11 +232,15 @@ func learnOffsets(pages [][]*outlineGlyph, anchors [][]*line) map[int]float64 {
 		}
 	}
 	if len(heights) == 0 {
-		return nil
+		return learned{}
 	}
 	seedHeight := median(heights)
 
-	samples := map[int][]float64{}
+	type sample struct {
+		v    float64
+		line *line
+	}
+	samples := map[int][]sample{}
 	for p, gs := range pages {
 		for _, g := range gs {
 			best, bestD, second := -1, math.Inf(1), math.Inf(1)
@@ -248,25 +261,39 @@ func learnOffsets(pages [][]*outlineGlyph, anchors [][]*line) map[int]float64 {
 			// In a two-font row, a glyph near seeds of both baselines says
 			// nothing about its own offset.
 			if best >= 0 && second > bestD+0.5*seedHeight {
-				samples[g.shape] = append(samples[g.shape], anchors[p][best].y-g.y0)
+				a := anchors[p][best]
+				samples[g.shape] = append(samples[g.shape], sample{a.y - g.y0, a})
 			}
 		}
 	}
-	offsets := map[int]float64{}
-	for shape, v := range samples {
-		if len(v) < offsetSamples {
+	l := learned{offset: map[int]float64{}, taught: map[int]map[int]bool{}}
+	for shape, ss := range samples {
+		if len(ss) < offsetSamples {
 			continue
+		}
+		v := make([]float64, len(ss))
+		for i, s := range ss {
+			v[i] = s.v
 		}
 		m := median(v)
 		dev := make([]float64, len(v))
 		for i, x := range v {
 			dev[i] = math.Abs(x - m)
 		}
-		if median(dev) <= offsetSpread {
-			offsets[shape] = m
+		if median(dev) > offsetSpread {
+			continue
+		}
+		l.offset[shape] = m
+		l.taught[shape] = map[int]bool{}
+		for _, s := range ss {
+			if math.Abs(s.v-m) <= offsetSpread {
+				for _, seed := range s.line.seeds {
+					l.taught[shape][seed.shape] = true
+				}
+			}
 		}
 	}
-	return offsets
+	return l
 }
 
 // transferOffsets gives a shape with no offset of its own the offset of the
@@ -333,23 +360,24 @@ type transfer struct{ off, tolerance float64 }
 // placement is one page's lines, anchored first, then inferred in order of
 // creation, and the glyphs placed by inference or not at all.
 type placement struct {
-	lines                          []*line
-	fallback, transferred, omitted []*outlineGlyph
+	lines                                   []*line
+	fallback, transferred, rehomed, omitted []*outlineGlyph
 }
 
 // place puts one page's glyphs on lines in two deterministic passes.
 //
 // Pass 1 places glyphs whose shape has an offset, learned or transferred, on
 // an anchored line when one lies within tolerance of the predicted baseline,
-// else on an inferred line. Horizontal proximity only breaks ties between
-// anchored lines; it never excludes one. Pass 2 places the rest against the
-// lines as pass 1 left them, so fallback glyphs never attract each other and
-// their order does not matter.
-func place(gs []*outlineGlyph, anchors []*line, own map[int]float64, moved map[int]transfer) (pl placement) {
+// else on an inferred line; then dissolvePhantoms re-homes what it can of
+// the inferred lines only one shape predicts. Horizontal proximity only
+// breaks ties between anchored lines; it never excludes one. Pass 2 places
+// the rest against the lines as pass 1 left them, so fallback glyphs never
+// attract each other and their order does not matter.
+func place(gs []*outlineGlyph, anchors []*line, own learned, moved map[int]transfer) (pl placement) {
 	var pending []*outlineGlyph
 	var inferredLines []*line
 	for _, g := range gs {
-		off, ok := own[g.shape]
+		off, ok := own.offset[g.shape]
 		tol := baselineTolerance
 		if t, moves := moved[g.shape]; !ok && moves {
 			off, tol, ok = t.off, t.tolerance, true
@@ -383,6 +411,7 @@ func place(gs []*outlineGlyph, anchors []*line, own map[int]float64, moved map[i
 		}
 		best.glyphs = append(best.glyphs, g)
 	}
+	inferredLines = dissolvePhantoms(inferredLines, anchors, own.taught, &pl, &pending)
 
 	// Snapshot the targets. Their member slices keep their pass-1 length while
 	// pass 2 appends to the lines.
@@ -436,6 +465,59 @@ func place(gs []*outlineGlyph, anchors []*line, own map[int]float64, moved map[i
 		}
 	}
 	return pl
+}
+
+// dissolvePhantoms re-homes glyphs of inferred lines that sit inside an
+// anchored line's text. A comma's offset puts an apostrophe drawn with the
+// same outline on a line of its own, inside the body of the line it belongs
+// to. A glyph joins an anchored line when:
+//
+//   - its ink overlaps the line's body, from the baseline to cap height;
+//   - its shape learned its offset in the same text, on lines sharing a seed
+//     shape with this one, which rules out transferred offsets, a smaller
+//     font's cell in a mixed row, and a superscript;
+//   - the line has members on both sides of it within runGap, which rules
+//     out a cell set beside the line rather than within it.
+//
+// A glyph inside two lines is ambiguous and goes to pass 2.
+func dissolvePhantoms(inferred, anchors []*line, taught map[int]map[int]bool, pl *placement, pending *[]*outlineGlyph) []*line {
+	members := map[*line][]*outlineGlyph{}
+	for _, a := range anchors {
+		members[a] = slices.Concat(a.seeds, a.glyphs)
+	}
+	inside := func(g *outlineGlyph, a *line) bool {
+		reach := runGap * a.em
+		return g.y1 > a.y && g.y0 < a.y+capHeight*a.em &&
+			slices.ContainsFunc(a.seeds, func(s *outlineGlyph) bool { return taught[g.shape][s.shape] }) &&
+			slices.ContainsFunc(members[a], func(m *outlineGlyph) bool { return m.x0 < g.x0 && g.x0-m.x1 <= reach }) &&
+			slices.ContainsFunc(members[a], func(m *outlineGlyph) bool { return m.x1 > g.x1 && m.x0-g.x1 <= reach })
+	}
+
+	var kept []*line
+	for _, l := range inferred {
+		var stay []*outlineGlyph
+		for _, g := range l.glyphs {
+			var homes []*line
+			for _, a := range anchors {
+				if inside(g, a) {
+					homes = append(homes, a)
+				}
+			}
+			switch len(homes) {
+			case 0:
+				stay = append(stay, g)
+			case 1:
+				homes[0].glyphs = append(homes[0].glyphs, g)
+				pl.rehomed = append(pl.rehomed, g)
+			default:
+				*pending = append(*pending, g)
+			}
+		}
+		if l.glyphs = stay; len(stay) > 0 {
+			kept = append(kept, l)
+		}
+	}
+	return kept
 }
 
 // runsOf splits a line at gaps wider than runGap.

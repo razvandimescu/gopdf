@@ -3,9 +3,9 @@ package pdf
 import (
 	"fmt"
 	"math"
-	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -15,7 +15,12 @@ func approx(a, b float64) bool { return math.Abs(a-b) < 1e-6 }
 // fillsOf returns the fills of a one-page PDF whose content stream is content.
 func fillsOf(t *testing.T, content string) []filledPath {
 	t.Helper()
-	doc, err := OpenBytes(contentPDF(t, content))
+	return fillsOfPDF(t, contentPDF(t, content))
+}
+
+func fillsOfPDF(t *testing.T, data []byte) []filledPath {
+	t.Helper()
+	doc, err := OpenBytes(data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -24,6 +29,17 @@ func fillsOf(t *testing.T, content string) []filledPath {
 		t.Fatal(err)
 	}
 	return fills
+}
+
+// repeatingOutlines is 15 L and 15 T glyphs: enough repetition to look like
+// outlined text.
+func repeatingOutlines() string {
+	var b strings.Builder
+	for i := range 15 {
+		b.WriteString(glyphL(float64(20+10*i), 700, 0))
+		b.WriteString(glyphT(float64(20+10*i), 680))
+	}
+	return b.String()
 }
 
 // glyphL draws an L-shaped outline with its corner at (x, y) in absolute
@@ -141,14 +157,7 @@ func TestPathCaptureCarriesFormFillsToThePage(t *testing.T) {
 			"Contents":  contentRef,
 		}
 	})
-	doc, err := OpenBytes(data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fills, err := pageFills(doc.pages[0], doc.reader)
-	if err != nil {
-		t.Fatal(err)
-	}
+	fills := fillsOfPDF(t, data)
 	if len(fills) != 1 {
 		t.Fatalf("got %d fills, want 1", len(fills))
 	}
@@ -244,10 +253,8 @@ func TestClusterShapesAbsorbsGridJitter(t *testing.T) {
 	}
 
 	// Reversing the drawing order must not change which glyphs share a shape.
-	reversed := append([]filledPath(nil), fills...)
-	for i, j := 0, len(reversed)-1; i < j; i, j = i+1, j-1 {
-		reversed[i], reversed[j] = reversed[j], reversed[i]
-	}
+	reversed := slices.Clone(fills)
+	slices.Reverse(reversed)
 	if !reflect.DeepEqual(sameShapes(fills), sameShapes(reversed)) {
 		t.Error("reversing the drawing order changed the partition")
 	}
@@ -287,11 +294,7 @@ func outlineHint(t *testing.T, data []byte) OutlineHint {
 }
 
 func TestOutlineHint(t *testing.T) {
-	var outlined, varied, few strings.Builder
-	for i := range 15 {
-		outlined.WriteString(glyphL(float64(20+10*i), 700, 0))
-		outlined.WriteString(glyphT(float64(20+10*i), 680))
-	}
+	var varied, few strings.Builder
 	for i := range 25 {
 		// 25 different outlines: each rectangle is a different size.
 		fmt.Fprintf(&varied, "%d 600 %g 8 re f\n", 20+10*i, 1+0.5*float64(i))
@@ -299,7 +302,7 @@ func TestOutlineHint(t *testing.T) {
 	for i := range 10 {
 		few.WriteString(glyphL(float64(20+10*i), 700, 0))
 	}
-	outlined.WriteString("0 0 612 1 re f 50 50 200 40 re f") // a rule and a background are not candidates
+	outlined := repeatingOutlines() + "0 0 612 1 re f 50 50 200 40 re f" // a rule and a background are not candidates
 
 	cases := []struct {
 		name     string
@@ -307,7 +310,7 @@ func TestOutlineHint(t *testing.T) {
 		want     OutlineHint
 		possible bool
 	}{
-		{"repeating outlines", contentPDF(t, outlined.String()), OutlineHint{Candidates: 30, Shapes: 2}, true},
+		{"repeating outlines", contentPDF(t, outlined), OutlineHint{Candidates: 30, Shapes: 2}, true},
 		{"no repetition", contentPDF(t, varied.String()), OutlineHint{Candidates: 25, Shapes: 25}, false},
 		{"too few", contentPDF(t, few.String()), OutlineHint{Candidates: 10, Shapes: 1}, false},
 		{"real text", testPDF(t, "Invoice 42"), OutlineHint{}, false},
@@ -362,12 +365,8 @@ func TestPathCaptureLeavesTextUnchanged(t *testing.T) {
 // real text it is asked for and leave outlines, and the rest of the stream,
 // exactly as they were.
 func TestRemovalLeavesOutlinesAlone(t *testing.T) {
-	var outlines strings.Builder
-	for i := range 15 {
-		outlines.WriteString(glyphL(float64(20+10*i), 700, 0))
-		outlines.WriteString(glyphT(float64(20+10*i), 680))
-	}
-	content := outlines.String() + "BT /F1 12 Tf 72 600 Td (SECRET) Tj ET"
+	outlines := repeatingOutlines()
+	content := outlines + "BT /F1 12 Tf 72 600 Td (SECRET) Tj ET"
 	data := contentPDF(t, content)
 	before := outlineHint(t, data)
 
@@ -376,7 +375,7 @@ func TestRemovalLeavesOutlinesAlone(t *testing.T) {
 		t.Errorf("removal left the text: %q", text)
 	}
 	after := string(mustContent(t, doc.reader, doc.pages[0]))
-	if !strings.Contains(after, outlines.String()) {
+	if !strings.Contains(after, outlines) {
 		t.Errorf("removal changed the outline operators:\n%s", after)
 	}
 	if h, _ := doc.Page(0).OutlineHint(); h != before {
@@ -395,14 +394,7 @@ func TestRemovalLeavesOutlinesAlone(t *testing.T) {
 // outlines after one page of real text. 3,703 is the glyph count the
 // prototype found by fill colour; the geometric filter must find the same.
 func TestIntegration_OutlinedRFQ(t *testing.T) {
-	path := filepath.Join(pdfDir, "outlined_rfq.pdf")
-	if _, err := os.Stat(path); err != nil {
-		t.Skip("private corpus not present")
-	}
-	doc, err := OpenFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	doc := openTestPDF(t, "outlined_rfq.pdf")
 	total := 0
 	for i := range doc.NumPages() {
 		h, err := doc.Page(i).OutlineHint()

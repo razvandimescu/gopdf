@@ -1,6 +1,11 @@
 package pdf
 
-import "math"
+import (
+	"fmt"
+	"math"
+	"slices"
+	"strings"
+)
 
 // Some producers draw every glyph as a filled path — no text operators, no
 // fonts — and such a page extracts as empty. This file captures those fills
@@ -34,6 +39,11 @@ func (s pathSeg) points() [][2]float64 {
 	return s.pts[:1]
 }
 
+func (s pathSeg) end() [2]float64 {
+	p := s.points()
+	return p[len(p)-1]
+}
+
 // filledPath is one path as it was filled, in page space.
 //
 // Equivalent geometry is written one way: re becomes four lines, v and y become
@@ -51,12 +61,11 @@ type filledPath struct {
 type pathCollector struct {
 	cur         []pathSeg
 	start, last [2]float64
-	hasPoint    bool // a current point exists
+	hasPoint    bool
 	closed      bool // the last subpath was closed; the next segment starts a new one at start
 	fills       []filledPath
 }
 
-// construct applies a path-construction operator to its operands.
 func (c *pathCollector) construct(op string, operands []any) {
 	if c == nil {
 		return
@@ -100,35 +109,40 @@ func (c *pathCollector) construct(op string, operands []any) {
 
 func (c *pathCollector) moveTo(x, y float64) {
 	c.closeSubpath()
-	if n := len(c.cur); n > 0 && c.cur[n-1].op == 'm' {
-		c.cur = c.cur[:n-1] // a subpath with no segments draws nothing
-	}
+	c.dropBareMove()
 	c.cur = append(c.cur, pathSeg{op: 'm', pts: [3][2]float64{{x, y}}})
 	c.start, c.last = [2]float64{x, y}, [2]float64{x, y}
 	c.hasPoint, c.closed = true, false
 }
 
-// segment appends a segment ending at end. A segment with no current point is
-// malformed and dropped; one following a closed subpath starts a new subpath
-// at the old one's start, as the spec has it.
-func (c *pathCollector) segment(s pathSeg, end [2]float64) bool {
+// dropBareMove removes a trailing moveto: a subpath with no segments draws
+// nothing.
+func (c *pathCollector) dropBareMove() {
+	if n := len(c.cur); n > 0 && c.cur[n-1].op == 'm' {
+		c.cur = c.cur[:n-1]
+	}
+}
+
+// segment appends s. A segment with no current point is malformed and
+// dropped; one following a closed subpath starts a new subpath at the old
+// one's start, as the spec has it.
+func (c *pathCollector) segment(s pathSeg) {
 	if !c.hasPoint {
-		return false
+		return
 	}
 	if c.closed {
 		c.moveTo(c.start[0], c.start[1])
 	}
 	c.cur = append(c.cur, s)
-	c.last = end
-	return true
+	c.last = s.end()
 }
 
 func (c *pathCollector) lineTo(x, y float64) {
-	c.segment(pathSeg{op: 'l', pts: [3][2]float64{{x, y}}}, [2]float64{x, y})
+	c.segment(pathSeg{op: 'l', pts: [3][2]float64{{x, y}}})
 }
 
 func (c *pathCollector) curveTo(x1, y1, x2, y2, x3, y3 float64) {
-	c.segment(pathSeg{op: 'c', pts: [3][2]float64{{x1, y1}, {x2, y2}, {x3, y3}}}, [2]float64{x3, y3})
+	c.segment(pathSeg{op: 'c', pts: [3][2]float64{{x1, y1}, {x2, y2}, {x3, y3}}})
 }
 
 // closeSubpath writes the edge back to the subpath's start, unless the
@@ -150,18 +164,11 @@ func (c *pathCollector) fill(ctm [6]float64, evenOdd bool) {
 		return
 	}
 	c.closeSubpath()
-	if n := len(c.cur); n > 0 && c.cur[n-1].op == 'm' {
-		c.cur = c.cur[:n-1]
-	}
+	c.dropBareMove()
 	if len(c.cur) > 0 {
-		segs := make([]pathSeg, len(c.cur))
-		for i, s := range c.cur {
-			for k := range s.points() {
-				s.pts[k][0], s.pts[k][1] = applyMatrix6(ctm, s.pts[k][0], s.pts[k][1])
-			}
-			segs[i] = s
-		}
-		c.fills = append(c.fills, filledPath{segs: segs, evenOdd: evenOdd})
+		f := filledPath{segs: slices.Clone(c.cur), evenOdd: evenOdd}
+		f.transform(ctm)
+		c.fills = append(c.fills, f)
 	}
 	c.discard()
 }
@@ -217,6 +224,41 @@ func (f filledPath) bounds() (x0, y0, x1, y1 float64) {
 	return
 }
 
+// pdfPath writes the fill as path operators, moved so its bounds start at the
+// origin.
+func (f filledPath) pdfPath() string {
+	x0, y0, _, _ := f.bounds()
+	var b strings.Builder
+	for _, s := range f.segs {
+		for _, p := range s.points() {
+			fmt.Fprintf(&b, "%s %s ", formatOperand(p[0]-x0), formatOperand(p[1]-y0))
+		}
+		b.WriteByte(s.op)
+		b.WriteByte(' ')
+	}
+	if f.evenOdd {
+		b.WriteString("f*")
+	} else {
+		b.WriteString("f")
+	}
+	return b.String()
+}
+
+// isRect reports whether the fill is one axis-aligned rectangle, the outline
+// l, I and | share in many sans-serif faces.
+func (f filledPath) isRect() bool {
+	if len(f.segs) != 5 || f.segs[0].op != 'm' {
+		return false
+	}
+	for i := 1; i < 5; i++ {
+		a, b := f.segs[i-1].end(), f.segs[i].pts[0]
+		if f.segs[i].op != 'l' || (a[0] != b[0] && a[1] != b[1]) {
+			return false
+		}
+	}
+	return true
+}
+
 // isGlyphCandidate reports whether a fill is sized and shaped like a glyph.
 // Colour is ignored: white text on a dark cell is still text.
 func (f filledPath) isGlyphCandidate() bool {
@@ -270,7 +312,7 @@ func clusterShapes(fills []filledPath) (ids []int, shapes int) {
 		}
 		if id < 0 {
 			id = len(all)
-			all = append(all, spread{lo: append([]float64(nil), v...), hi: append([]float64(nil), v...)})
+			all = append(all, spread{lo: slices.Clone(v), hi: slices.Clone(v)})
 			byKey[key] = append(byKey[key], id)
 		} else {
 			for k, x := range v {
@@ -320,7 +362,7 @@ func (h OutlineHint) Possible() bool {
 // OutlineHint measures the page's glyph-sized fills. Text extraction is
 // unaffected: this reads the page separately.
 func (p *Page) OutlineHint() (OutlineHint, error) {
-	fills, err := pageFills(p.dict, p.reader)
+	fills, err := pageFills(p.dict(), p.doc.reader)
 	if err != nil {
 		return OutlineHint{}, err
 	}

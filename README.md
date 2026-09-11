@@ -642,6 +642,7 @@ type Rect struct {
   candidates whose headings read as fragments rather than words. A real table
   whose columns are named in one or two characters therefore needs `-headers`
   (or `TableOpts.Headers`) to be found.
+- **Text drawn as filled outlines is not extracted.** Some producers (virtual printers re-printing a PDF, "convert text to outlines") draw every glyph as a path, and such a page extracts as empty. `Page.OutlineHint` reports when a page's fills repeat like glyphs, so an empty result can be told apart from an empty page. It is a hint: repeated icons can trigger it too.
 - No image extraction
 - **Images read as PNG, JPEG and GIF only** — what the standard library decodes. HEIC and AVIF need an HEVC or AV1 decoder, available only through CGo or copyleft code; WebP and TIFF would need `golang.org/x/image`. Neither fits a CGo-free MIT library with no dependencies. Unsupported formats are named in the error.
 - PDF creation supports standard 14 fonts only (no font embedding)

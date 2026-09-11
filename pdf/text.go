@@ -31,23 +31,31 @@ func ExtractText(content []byte, fonts map[Name]Dict, reader *Reader) []TextSpan
 // ExtractTextWithResources extracts text with access to full page resources
 // (needed for Form XObject extraction via the Do operator).
 func ExtractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reader, resources Dict) []TextSpan {
-	return extractTextWithResources(content, fonts, reader, resources, 0, nil)
+	return extractTextWithResources(content, fonts, reader, resources, 0, nil, nil)
 }
 
 // ExtractPageText extracts text from a page, handling rotation and resources automatically.
 func ExtractPageText(page Dict, reader *Reader) []TextSpan {
+	spans, _ := extractPage(page, reader, nil)
+	return spans
+}
+
+// extractPage walks a page's content once. When paths is not nil it also
+// collects the page's fills, carried into displayed space as the spans are.
+func extractPage(page Dict, reader *Reader, paths *pathCollector) ([]TextSpan, error) {
 	content, err := reader.PageContent(page)
 	if err != nil || content == nil {
-		return nil
+		return nil, err
 	}
 	fonts := reader.PageFonts(page)
 	resources := reader.PageResources(page)
-	spans := extractTextWithResources(content, fonts, reader, resources, 0, nil)
+	spans := extractTextWithResources(content, fonts, reader, resources, 0, nil, paths)
 
 	rotM, rotated := pageRotationMatrix(page)
 	if !rotated {
-		return spans
+		return spans, nil
 	}
+	paths.transformSince(0, rotM)
 	for i := range spans {
 		x, y := applyMatrix6(rotM, spans[i].X, spans[i].Y)
 		if spans[i].EndX != 0 {
@@ -57,7 +65,7 @@ func ExtractPageText(page Dict, reader *Reader) []TextSpan {
 		spans[i].Y = y
 	}
 
-	return spans
+	return spans, nil
 }
 
 // pageRotationMatrix returns the map from unrotated user space — the space page
@@ -100,7 +108,7 @@ func applyMatrix6(m [6]float64, x, y float64) (float64, float64) {
 	return m[0]*x + m[2]*y + m[4], m[1]*x + m[3]*y + m[5]
 }
 
-func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reader, resources Dict, depth int, rec *showRecorder) []TextSpan {
+func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reader, resources Dict, depth int, rec *showRecorder, paths *pathCollector) []TextSpan {
 	const maxDepth = 10
 	if depth > maxDepth {
 		return nil
@@ -623,8 +631,10 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 								}
 								formResources, _ := reader.ResolveDict(stream.Dict["Resources"])
 								outer := rec.enter(xobjRef, stream.Data, formCTM)
-								formSpans := extractTextWithResources(stream.Data, formFonts, reader, formResources, depth+1, rec)
+								formFills := paths.mark()
+								formSpans := extractTextWithResources(stream.Data, formFonts, reader, formResources, depth+1, rec, paths)
 								rec.leave(outer)
+								paths.transformSince(formFills, formCTM)
 								// Transform form spans through the form's CTM.
 								for i := range formSpans {
 									formSpans[i].X, formSpans[i].Y = applyMatrix6(formCTM, formSpans[i].X, formSpans[i].Y)
@@ -676,6 +686,18 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 
 		case "BI":
 			skipInlineImage(lex)
+
+		// Paths matter only to a collector; without one these do nothing.
+		case "m", "l", "c", "v", "y", "re":
+			paths.construct(op, stack)
+		case "h":
+			paths.closeSubpath()
+		case "f", "F", "B", "b":
+			paths.fill(ctm, false)
+		case "f*", "B*", "b*":
+			paths.fill(ctm, true)
+		case "n", "S", "s":
+			paths.discard()
 		}
 
 		rec.finish(op, operandStart, lex.Pos(), fontSize, tc, tw, th)

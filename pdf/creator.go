@@ -39,6 +39,7 @@ func (c *Creator) Build() ([]byte, error) {
 	catalogRef := w.AllocRef()
 
 	var pageRefs []Ref
+	imageRefs := make(map[*Image]Ref) // an image drawn on N pages is written once
 
 	for _, pb := range c.pages {
 		// Build the font resources dict.
@@ -54,6 +55,22 @@ func (c *Creator) Build() ([]byte, error) {
 		resources := Dict{}
 		if len(fontResources) > 0 {
 			resources["Font"] = fontResources
+		}
+
+		if len(pb.images) > 0 {
+			xobjects := make(Dict)
+			for _, img := range pb.images {
+				ref, ok := imageRefs[img]
+				if !ok {
+					var err error
+					if ref, err = writeImageXObject(w, img); err != nil {
+						return nil, fmt.Errorf("writing image: %w", err)
+					}
+					imageRefs[img] = ref
+				}
+				xobjects[Name(pb.imageMap[img])] = ref
+			}
+			resources["XObject"] = xobjects
 		}
 
 		// Write content stream.
@@ -111,6 +128,8 @@ type PageBuilder struct {
 	usedFonts     map[string]string // resource name → BaseFont name
 	fontCounter   int
 	fontMap       map[string]string // BaseFont → resource name
+	images        []*Image          // in draw order, deduplicated
+	imageMap      map[*Image]string // image → resource name
 }
 
 // SetFont sets the current font and size. Supported: Helvetica, Helvetica-Bold,
@@ -156,6 +175,20 @@ func (pb *PageBuilder) FillRect(x, y, w, h, r, g, b float64) {
 		r, g, b, x, y, w, h)
 }
 
+// DrawImage draws an image into the box with its lower-left corner at (x, y)
+// and size w by h points. The box describes the image as displayed: an EXIF
+// orientation is applied on the way in, so a photo held sideways fills the
+// box the right way up. The aspect ratio is whatever w and h say it is; see
+// [Image.FitRotated] to preserve the image's own.
+func (pb *PageBuilder) DrawImage(img *Image, x, y, w, h float64) {
+	if img == nil {
+		return
+	}
+	m := matMul6(img.orientationMatrix(), [6]float64{w, 0, 0, h, x, y})
+	fmt.Fprintf(&pb.buf, "q %.4f %.4f %.4f %.4f %.4f %.4f cm /%s Do Q\n",
+		m[0], m[1], m[2], m[3], m[4], m[5], pb.ensureImage(img))
+}
+
 // TextWidth returns the width of text in the current font and size (in points).
 func (pb *PageBuilder) TextWidth(text string) float64 {
 	widths := stdFontWidths(pb.font)
@@ -185,5 +218,18 @@ func (pb *PageBuilder) ensureFont(baseFont string) string {
 	resName := fmt.Sprintf("F%d", pb.fontCounter)
 	pb.fontMap[baseFont] = resName
 	pb.usedFonts[resName] = baseFont
+	return resName
+}
+
+func (pb *PageBuilder) ensureImage(img *Image) string {
+	if resName, ok := pb.imageMap[img]; ok {
+		return resName
+	}
+	if pb.imageMap == nil {
+		pb.imageMap = make(map[*Image]string)
+	}
+	resName := fmt.Sprintf("Im%d", len(pb.images)+1)
+	pb.imageMap[img] = resName
+	pb.images = append(pb.images, img)
 	return resName
 }

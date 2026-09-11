@@ -512,6 +512,22 @@ func writeImageXObject(w *Writer, img *Image) (Ref, error) {
 		}
 	}
 
+	// A JPEG kept in its original encoding rides into the file as-is.
+	if img.jpeg != nil {
+		colorSpace := Name("DeviceRGB")
+		if img.components == 1 {
+			colorSpace = "DeviceGray"
+		}
+		dict := imageStreamDict(colorSpace)
+		dict["Filter"] = Name("DCTDecode")
+		dict["Length"] = len(img.jpeg)
+		ref := w.AllocRef()
+		if err := w.WriteObject(ref, &Stream{Dict: dict, Data: img.jpeg}); err != nil {
+			return Ref{}, err
+		}
+		return ref, nil
+	}
+
 	mainDict := imageStreamDict("DeviceRGB")
 	if img.alpha != nil {
 		smaskRef := w.AllocRef()
@@ -569,12 +585,16 @@ func writeImageOps(buf *strings.Builder, page Dict, overlays []ImageOverlay, ent
 		eX := ov.CX - W*cosT/2 + H*sinT/2
 		fY := ov.CY - W*sinT/2 - H*cosT/2
 
+		// An EXIF orientation rides in front of the placement, so an
+		// overlay of a sideways photo lands the right way up too.
+		m := matMul6(ov.Image.orientationMatrix(), [6]float64{a, b, c, d, eX, fY})
+
 		buf.WriteString("q ")
 		if gsName != "" {
 			fmt.Fprintf(buf, "/%s gs ", gsName)
 		}
 		fmt.Fprintf(buf, "%.4f %.4f %.4f %.4f %.4f %.4f cm /%s Do Q\n",
-			a, b, c, d, eX, fY, entry.name)
+			m[0], m[1], m[2], m[3], m[4], m[5], entry.name)
 	}
 }
 

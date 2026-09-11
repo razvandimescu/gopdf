@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 go build ./...              # build everything
-go build -o merge ./cmd/merge  # build one CLI (no main package at repo root)
+go build -o gopdf ./cmd/gopdf  # build the CLI (no main package at repo root)
 go test ./...               # run all tests
 go test -v -run TestSupplierCodes ./...  # run a single test
 go test -count=1 ./...      # skip test cache

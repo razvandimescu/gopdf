@@ -644,3 +644,58 @@ func TestMergeWithOptions_ShrinkJPEGRecompression(t *testing.T) {
 		len(rawData), len(res.Data), limit,
 		100*(1-float64(len(res.Data))/float64(len(rawData))))
 }
+
+// TestMergeObjectNumberingIsStable pins down map-order-dependent numbering:
+// copyObject allocates a reference as it descends, so an unsorted walk of a
+// page dict gave the same merge different object numbers — and different
+// bytes — on every run. A page needs two reference-bearing keys for the race
+// to show, so the source carries both a content stream and an image XObject.
+func TestMergeObjectNumberingIsStable(t *testing.T) {
+	img, err := LoadImageBytes(testPNG(t, false))
+	if err != nil {
+		t.Fatalf("loading test image: %v", err)
+	}
+	c := NewCreator()
+	page := c.NewPage(200, 100)
+	page.SetFont("Helvetica", 12)
+	page.DrawText(10, 10, "page one")
+	page.DrawImage(img, 0, 0, 200, 100)
+	src, err := c.Build()
+	if err != nil {
+		t.Fatalf("building source: %v", err)
+	}
+
+	// numbering renders every page's reference-bearing keys as "obj num".
+	numbering := func(data []byte) string {
+		doc, err := OpenBytes(data)
+		if err != nil {
+			t.Fatalf("opening merged PDF: %v", err)
+		}
+		var b strings.Builder
+		for i, p := range doc.pages {
+			res, _ := doc.reader.ResolveDict(p["Resources"])
+			xobj, _ := doc.reader.ResolveDict(res["XObject"])
+			fmt.Fprintf(&b, "page %d: contents=%v image=%v\n", i, p["Contents"], xobj["Im1"])
+		}
+		return b.String()
+	}
+
+	var want string
+	for run := range 10 {
+		merged, err := MergeBytes(src, src)
+		if err != nil {
+			t.Fatalf("run %d: merging: %v", run, err)
+		}
+		got := numbering(merged)
+		if run == 0 {
+			want = got
+			if !strings.Contains(got, "image={") {
+				t.Fatalf("merged pages carry no image reference:\n%s", got)
+			}
+			continue
+		}
+		if got != want {
+			t.Fatalf("run %d numbered objects differently:\ngot:\n%swant:\n%s", run, got, want)
+		}
+	}
+}

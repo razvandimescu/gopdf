@@ -21,13 +21,14 @@ type GlyphLabeler func(ctx context.Context, shapes []GlyphShape) (map[int]string
 
 // RecoveryReport accounts for every glyph RecoverOutlines found:
 // Glyphs = placed + Rejected + the Count of each Unlabeled shape + len(Omitted),
-// where placed includes FallbackPlaced.
+// where placed includes FallbackPlaced and TransferPlaced.
 type RecoveryReport struct {
 	Glyphs, Shapes  int
 	Rejected        int            // glyphs whose shape was labelled "" (not text)
 	Unlabeled       []int          // shape IDs left without a label; their glyphs are omitted
 	Omitted         []Occurrence   // glyphs with no baseline in bounds; omitted from the text
 	FallbackPlaced  []Occurrence   // placed by the bounded fallback; included in the text
+	TransferPlaced  []Occurrence   // placed by an offset learned on the same outline at another size; included in the text
 	Guessed         []GuessedGlyph // characters decided by context; included in the text
 	SpacingFallback bool           // no clear gap valley: word breaks come from local gaps, a degraded mode
 }
@@ -125,6 +126,7 @@ type outlineGlyph struct {
 	shape          int
 	rect           bool // the shape is a bare axis-aligned rectangle
 	label          string
+	fill           filledPath
 }
 
 func (g *outlineGlyph) occurrence() Occurrence {
@@ -145,7 +147,7 @@ func (d *Document) outlineGlyphs() ([]*outlineGlyph, []GlyphShape, error) {
 			if !f.isGlyphCandidate() {
 				continue
 			}
-			g := &outlineGlyph{page: p, index: i}
+			g := &outlineGlyph{page: p, index: i, fill: f}
 			g.x0, g.y0, g.x1, g.y1 = f.bounds()
 			glyphs = append(glyphs, g)
 			cands = append(cands, f)

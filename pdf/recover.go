@@ -21,7 +21,9 @@ type GlyphLabeler func(ctx context.Context, shapes []GlyphShape) (map[int]string
 
 // RecoveryReport accounts for every glyph RecoverOutlines found:
 // Glyphs = placed + Rejected + the Count of each Unlabeled shape + len(Omitted),
-// where placed includes FallbackPlaced and TransferPlaced.
+// where placed includes FallbackPlaced, TransferPlaced and Rehomed. A glyph
+// that could belong to two lines is decided by the fallback, and appears in
+// FallbackPlaced or Omitted.
 type RecoveryReport struct {
 	Glyphs, Shapes  int
 	Rejected        int            // glyphs whose shape was labelled "" (not text)
@@ -29,6 +31,7 @@ type RecoveryReport struct {
 	Omitted         []Occurrence   // glyphs with no baseline in bounds; omitted from the text
 	FallbackPlaced  []Occurrence   // placed by the bounded fallback; included in the text
 	TransferPlaced  []Occurrence   // placed by an offset learned on the same outline at another size; included in the text
+	Rehomed         []Occurrence   // moved off a line only their own shape predicted, into the line whose text they sit in; included in the text
 	Guessed         []GuessedGlyph // characters decided by context; included in the text
 	SpacingFallback bool           // no clear gap valley: word breaks come from local gaps, a degraded mode
 }

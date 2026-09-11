@@ -1,6 +1,9 @@
 package pdf
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 // seedRow is five H seeds with their bottoms at y, from x = 0.
 func seedRow(y float64) []*outlineGlyph {
@@ -32,6 +35,40 @@ func TestOffsetsNeedAnUnambiguousLine(t *testing.T) {
 	}
 	if off, ok := learnOffsets([][]*outlineGlyph{two}, [][]*line{anchors})[1]; ok {
 		t.Errorf("between two baselines: learned offset %v, want none", off)
+	}
+}
+
+// A fallback glyph may join a line within reach of any glyph known to be on
+// it: its seeds as well as the glyphs pass 1 placed. Measuring from the
+// placed glyphs alone lost the end of a line whose placed glyphs clustered at
+// its start.
+func TestFallbackReachesFromSeedsAndPlacedGlyphs(t *testing.T) {
+	var gs []*outlineGlyph
+	for _, x := range []float64{0, 20, 40, 60, 80} { // seeds with no offset of their own
+		gs = append(gs, &outlineGlyph{x0: x, y0: 100, x1: x + 4.6, y1: 107, shape: 0, label: "H"})
+	}
+	placed := func(x float64) *outlineGlyph {
+		return &outlineGlyph{x0: x, y0: 99.9, x1: x + 4, y1: 105, shape: 1, label: "o"}
+	}
+	nearSeed := &outlineGlyph{index: 1, x0: 110, y0: 100, x1: 114, y1: 105, shape: 2, label: "e"}
+	nearPlaced := &outlineGlyph{index: 2, x0: 170, y0: 100, x1: 174, y1: 105, shape: 2, label: "e"}
+	gs = append(gs, placed(0), placed(150), nearSeed, nearPlaced)
+
+	anchors := anchoredLines(gs)
+	if len(anchors) != 1 {
+		t.Fatalf("got %d anchored lines, want 1", len(anchors))
+	}
+	// 3 em is about 29 pt: nearSeed is 25 pt from a seed and 106 pt from the
+	// first placed glyph; nearPlaced is 16 pt from the second and 85 pt from
+	// any seed.
+	lines, _, omitted := place(gs, anchors, map[int]float64{1: 0.1})
+	if len(omitted) != 0 || len(lines) != 1 {
+		t.Fatalf("got %d lines and omitted %v; want everything on the one line", len(lines), omitted)
+	}
+	for _, g := range []*outlineGlyph{nearSeed, nearPlaced} {
+		if !slices.Contains(lines[0].glyphs, g) {
+			t.Errorf("glyph at x %g is not on the line", g.x0)
+		}
 	}
 }
 

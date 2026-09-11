@@ -37,7 +37,7 @@ const (
 	offsetSpread  = 0.5 // points
 	// fallbackWindow and fallbackReach bound where a glyph with no learned
 	// offset may join a line: vertically from its bottom, horizontally from the
-	// line's glyphs, both in the line's em.
+	// line's seeds and pass-1 glyphs, both in the line's em.
 	fallbackWindow = 0.5
 	fallbackReach  = 3
 	// runGap splits a line into runs, the domain of word spacing. A run is not
@@ -316,11 +316,7 @@ func place(gs []*outlineGlyph, anchors []*line, offsets map[int]float64) (lines 
 	}
 	var targets []target
 	for _, a := range anchors {
-		members := a.glyphs
-		if len(members) == 0 {
-			members = a.seeds
-		}
-		targets = append(targets, target{a, members})
+		targets = append(targets, target{a, slices.Concat(a.seeds, a.glyphs)})
 	}
 	for _, l := range inferredLines {
 		l.em = emOf(l.glyphs)

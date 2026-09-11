@@ -233,7 +233,8 @@ report, err := doc.RecoverOutlines(ctx, func(ctx context.Context, shapes []pdf.G
     return askVisionModel(ctx, sheet) // your code: shape ID -> character
 })
 // Text, TextLines, Tables and Search now include the recovered words.
-// report accounts for every glyph: guessed, placed by fallback, rejected, omitted.
+// report accounts for every glyph: guessed, placed by fallback or by an offset
+// transferred from another size, rejected, omitted.
 ```
 
 Only the character inventory leaves the process: shapes reach the labeller

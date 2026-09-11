@@ -1,7 +1,9 @@
 package pdf
 
 import (
+	"fmt"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -61,14 +63,88 @@ func TestFallbackReachesFromSeedsAndPlacedGlyphs(t *testing.T) {
 	// 3 em is about 29 pt: nearSeed is 25 pt from a seed and 106 pt from the
 	// first placed glyph; nearPlaced is 16 pt from the second and 85 pt from
 	// any seed.
-	lines, _, omitted := place(gs, anchors, map[int]float64{1: 0.1})
-	if len(omitted) != 0 || len(lines) != 1 {
-		t.Fatalf("got %d lines and omitted %v; want everything on the one line", len(lines), omitted)
+	pl := place(gs, anchors, map[int]float64{1: 0.1}, nil)
+	if len(pl.omitted) != 0 || len(pl.lines) != 1 {
+		t.Fatalf("got %d lines and omitted %v; want everything on the one line", len(pl.lines), pl.omitted)
 	}
 	for _, g := range []*outlineGlyph{nearSeed, nearPlaced} {
-		if !slices.Contains(lines[0].glyphs, g) {
+		if !slices.Contains(pl.lines[0].glyphs, g) {
 			t.Errorf("glyph at x %g is not on the line", g.x0)
 		}
+	}
+}
+
+// scaledGlyph draws c's synthetic outline k times its size, with its baseline
+// at (x, y).
+func scaledGlyph(c rune, k, x, y float64) string {
+	return fmt.Sprintf("q %g 0 0 %g %g %g cm %s Q", k, k, x, y, synthGlyph(c, 0, 0, false))
+}
+
+func TestTransferOffsets(t *testing.T) {
+	// p at 1, 2 and 3 times its size, e, another outline, at twice, and a bare
+	// rectangle at two sizes.
+	fills := fillsOf(t, strings.Join([]string{
+		scaledGlyph('p', 1, 100, 100), scaledGlyph('p', 2, 200, 100),
+		scaledGlyph('p', 3, 300, 100), scaledGlyph('e', 2, 400, 100),
+		"500 102.5 2.4 0.8 re f", "520 105 4.8 1.6 re f",
+	}, "\n"))
+	var gs []*outlineGlyph
+	for i, f := range fills {
+		g := &outlineGlyph{shape: i, fill: f, rect: f.isRect()}
+		g.x0, g.y0, g.x1, g.y1 = f.bounds()
+		gs = append(gs, g)
+	}
+	// An offset known to baselineTolerance at the donor's size is known to
+	// that times the size ratio at the recipient's.
+	cases := []struct {
+		name     string
+		own      map[int]float64
+		want     map[int]transfer
+		abstains []int
+	}{
+		{"scaled by the size ratio", map[int]float64{0: 2.1},
+			map[int]transfer{1: {4.2, 2 * baselineTolerance}, 2: {6.3, 3 * baselineTolerance}}, []int{3, 5}},
+		{"rectangles take no part", map[int]float64{4: -2.5}, nil, []int{5}},
+		{"agreeing donors", map[int]float64{0: 2.1, 2: 6.3}, map[int]transfer{1: {4.2, 2 * baselineTolerance}}, nil},
+		// At twice the size the donors say 4.2 and 2: no offset is better than
+		// either.
+		{"conflicting donors abstain", map[int]float64{0: 2.1, 2: 3}, nil, []int{1}},
+		{"another outline donates nothing", map[int]float64{3: 0.12}, nil, []int{0, 1, 2}},
+	}
+	for _, c := range cases {
+		got := transferOffsets(gs, c.own)
+		if len(got) != len(c.want) {
+			t.Errorf("%s: transferred %v, want %v", c.name, got, c.want)
+		}
+		for s, want := range c.want {
+			if !approx(got[s].off, want.off) || !approx(got[s].tolerance, want.tolerance) {
+				t.Errorf("%s: shape %d got %+v, want %+v", c.name, s, got[s], want)
+			}
+		}
+		for _, s := range c.abstains {
+			if off, ok := got[s]; ok {
+				t.Errorf("%s: shape %d got offset %v, want none", c.name, s, off)
+			}
+		}
+	}
+}
+
+// A transferred offset is matched to a baseline within the tolerance it was
+// carried with. 0.4 pt is outside baselineTolerance but inside twice it.
+func TestTransferredOffsetsKeepTheirTolerance(t *testing.T) {
+	g := &outlineGlyph{index: 1, x0: 40, y0: 99.5, x1: 44, y1: 105, shape: 5, label: "o"}
+	gs := append(seedRow(100), g)
+	anchors := anchoredLines(gs)
+	for _, c := range []struct {
+		tolerance float64
+		joins     bool
+	}{{2 * baselineTolerance, true}, {baselineTolerance, false}} {
+		pl := place(gs, anchors, nil, map[int]transfer{5: {0.1, c.tolerance}})
+		if got := slices.Contains(anchors[0].glyphs, g); got != c.joins || len(pl.transferred) != 1 {
+			t.Errorf("tolerance %v: joined the anchored line %v, want %v; transferred %d, want 1",
+				c.tolerance, got, c.joins, len(pl.transferred))
+		}
+		anchors[0].glyphs = nil
 	}
 }
 

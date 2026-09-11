@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"slices"
 	"strings"
@@ -171,6 +172,45 @@ func TestRecoverOutlinesReadsText(t *testing.T) {
 	slices.Reverse(reversed)
 	if again, _ := recoverText(t, synthDoc(t, reversed, ""), synthLabeller); again != text {
 		t.Errorf("reversed drawing order recovered\n%s\nwant\n%s", again, text)
+	}
+}
+
+// A heading at twice the body size has too few glyphs to learn offsets or
+// anchor a line. Its outlines are the body's at another size, so it takes
+// their offsets, scaled. The labeller names the heading in capitals, as a
+// small-caps face would draw it: transfer moves offsets, never labels.
+func TestRecoverOutlinesTransfersOffsetsAcrossSizes(t *testing.T) {
+	glyphs := synthGlyphs(synthText)
+	x := 40.0
+	for _, c := range "pale" {
+		glyphs = append(glyphs, scaledGlyph(c, 2, x, 790))
+		x += 2*synthMetricOf(c).width + 2.8
+	}
+	capitalsWhenLarge := func(ctx context.Context, shapes []GlyphShape) (map[int]string, error) {
+		labels, _ := synthLabeller(ctx, shapes)
+		for _, s := range shapes {
+			if s.Height > 10 {
+				labels[s.ID] = strings.ToUpper(labels[s.ID])
+			}
+		}
+		return labels, nil
+	}
+	doc := synthDoc(t, glyphs, "")
+	text, report := recoverText(t, doc, capitalsWhenLarge)
+
+	if first, _, _ := strings.Cut(text, "\n"); first != "PALE" {
+		t.Errorf("first line %q, want the heading PALE; text:\n%s", first, text)
+	}
+	// l is a bare rectangle, which transfers nothing: it joins by fallback.
+	if len(report.TransferPlaced) != 3 || len(report.Omitted) != 0 {
+		t.Errorf("%d transfer-placed, %d omitted; want p, a and e placed by transfer, none omitted",
+			len(report.TransferPlaced), len(report.Omitted))
+	}
+	spans, _ := doc.Page(0).TextSpans()
+	for _, s := range spans {
+		if s.Text == "PALE" && math.Abs(s.Y-790) > baselineTolerance {
+			t.Errorf("heading baseline %v, want 790", s.Y)
+		}
 	}
 }
 

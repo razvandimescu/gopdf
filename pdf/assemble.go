@@ -89,7 +89,8 @@ type assembly struct {
 }
 
 // assemble places glyphs, which are labelled and in page and paint order, and
-// fills in the report's Omitted, FallbackPlaced, Guessed and SpacingFallback.
+// fills in the report's Omitted, FallbackPlaced, TransferPlaced, Guessed and
+// SpacingFallback.
 func assemble(numPages int, glyphs []*outlineGlyph, report *RecoveryReport) assembly {
 	pages := make([][]*outlineGlyph, numPages)
 	for _, g := range glyphs {
@@ -100,13 +101,15 @@ func assemble(numPages int, glyphs []*outlineGlyph, report *RecoveryReport) asse
 		anchors[p] = anchoredLines(gs)
 	}
 	offsets := learnOffsets(pages, anchors)
+	moved := transferOffsets(glyphs, offsets)
 
 	a := assembly{spans: make([][]TextSpan, numPages)}
 	for p, gs := range pages {
-		lines, fallback, omitted := place(gs, anchors[p], offsets)
-		report.FallbackPlaced = append(report.FallbackPlaced, occurrences(fallback)...)
-		report.Omitted = append(report.Omitted, occurrences(omitted)...)
-		for _, l := range lines {
+		pl := place(gs, anchors[p], offsets, moved)
+		report.FallbackPlaced = append(report.FallbackPlaced, occurrences(pl.fallback)...)
+		report.TransferPlaced = append(report.TransferPlaced, occurrences(pl.transferred)...)
+		report.Omitted = append(report.Omitted, occurrences(pl.omitted)...)
+		for _, l := range pl.lines {
 			a.runs = append(a.runs, runsOf(l)...)
 		}
 	}
@@ -266,19 +269,92 @@ func learnOffsets(pages [][]*outlineGlyph, anchors [][]*line) map[int]float64 {
 	return offsets
 }
 
-// place puts one page's glyphs on lines in two deterministic passes and
-// returns the lines, anchored first, then inferred in order of creation.
+// transferOffsets gives a shape with no offset of its own the offset of the
+// shapes that are its outline at another size, scaled by the ratio of their
+// sizes. Two outlines match when, scaled to the smaller of their sizes, every
+// coordinate agrees within shapeTolerance. Only offsets learned on anchored
+// lines are given, so a transfer never seeds another, and a shape whose
+// donors disagree by more than offsetSpread gets none. Bare rectangles take
+// no part: one says nothing but its aspect ratio, and a hyphen matches a
+// hyphen of another font that sits at another height.
 //
-// Pass 1 places glyphs whose shape has an offset, on an anchored line when one
-// lies within tolerance of the predicted baseline, else on an inferred line.
-// Horizontal proximity only breaks ties between anchored lines; it never
-// excludes one. Pass 2 places the rest against the lines as pass 1 left them,
-// so fallback glyphs never attract each other and their order does not matter.
-func place(gs []*outlineGlyph, anchors []*line, offsets map[int]float64) (lines []*line, fallback, omitted []*outlineGlyph) {
+// A match says the glyphs sit alike, not that they are one character: O and
+// o can be one outline at two sizes. Labels are left as the labeller gave
+// them.
+func transferOffsets(glyphs []*outlineGlyph, own map[int]float64) map[int]transfer {
+	type outline struct {
+		key    shapeKey
+		coords []float64
+		size   float64
+	}
+	outlines := map[int]outline{}
+	for _, g := range glyphs {
+		if _, ok := outlines[g.shape]; !ok && !g.rect {
+			key, coords := g.fill.shape()
+			outlines[g.shape] = outline{key, coords, math.Max(g.x1-g.x0, g.y1-g.y0)}
+		}
+	}
+	same := func(a, b outline) bool {
+		if a.key != b.key {
+			return false
+		}
+		small := math.Min(a.size, b.size)
+		for k := range a.coords {
+			if math.Abs(a.coords[k]*small/a.size-b.coords[k]*small/b.size) > shapeTolerance {
+				return false
+			}
+		}
+		return true
+	}
+	moved := map[int]transfer{}
+	for s, o := range outlines {
+		if _, ok := own[s]; ok {
+			continue
+		}
+		var offs []float64
+		scale := 1.0
+		for d, donor := range outlines {
+			if off, ok := own[d]; ok && same(donor, o) {
+				offs = append(offs, off*o.size/donor.size)
+				scale = math.Max(scale, o.size/donor.size)
+			}
+		}
+		if len(offs) > 0 && slices.Max(offs)-slices.Min(offs) <= offsetSpread {
+			moved[s] = transfer{median(offs), baselineTolerance * scale}
+		}
+	}
+	return moved
+}
+
+// transfer is an offset carried from another size, and the tolerance it is
+// known to: an offset learned to within baselineTolerance is scaled with it.
+type transfer struct{ off, tolerance float64 }
+
+// placement is one page's lines, anchored first, then inferred in order of
+// creation, and the glyphs placed by inference or not at all.
+type placement struct {
+	lines                          []*line
+	fallback, transferred, omitted []*outlineGlyph
+}
+
+// place puts one page's glyphs on lines in two deterministic passes.
+//
+// Pass 1 places glyphs whose shape has an offset, learned or transferred, on
+// an anchored line when one lies within tolerance of the predicted baseline,
+// else on an inferred line. Horizontal proximity only breaks ties between
+// anchored lines; it never excludes one. Pass 2 places the rest against the
+// lines as pass 1 left them, so fallback glyphs never attract each other and
+// their order does not matter.
+func place(gs []*outlineGlyph, anchors []*line, own map[int]float64, moved map[int]transfer) (pl placement) {
 	var pending []*outlineGlyph
 	var inferredLines []*line
 	for _, g := range gs {
-		off, ok := offsets[g.shape]
+		off, ok := own[g.shape]
+		tol := baselineTolerance
+		if t, moves := moved[g.shape]; !ok && moves {
+			off, tol, ok = t.off, t.tolerance, true
+			pl.transferred = append(pl.transferred, g)
+		}
 		if !ok {
 			pending = append(pending, g)
 			continue
@@ -287,7 +363,7 @@ func place(gs []*outlineGlyph, anchors []*line, offsets map[int]float64) (lines 
 		var best *line
 		bestD := math.Inf(1)
 		for _, a := range anchors {
-			if math.Abs(a.y-yb) <= baselineTolerance {
+			if math.Abs(a.y-yb) <= tol {
 				if d := hdist(g, a.seeds); best == nil || d < bestD {
 					best, bestD = a, d
 				}
@@ -295,7 +371,7 @@ func place(gs []*outlineGlyph, anchors []*line, offsets map[int]float64) (lines 
 		}
 		if best == nil {
 			for _, l := range inferredLines {
-				if math.Abs(l.y-yb) <= baselineTolerance {
+				if math.Abs(l.y-yb) <= tol {
 					best = l
 					break
 				}
@@ -347,19 +423,19 @@ func place(gs []*outlineGlyph, anchors []*line, offsets map[int]float64) (lines 
 			}
 		}
 		if best == nil {
-			omitted = append(omitted, g)
+			pl.omitted = append(pl.omitted, g)
 			continue
 		}
 		best.glyphs = append(best.glyphs, g)
-		fallback = append(fallback, g)
+		pl.fallback = append(pl.fallback, g)
 	}
 
 	for _, l := range slices.Concat(anchors, inferredLines) {
 		if len(l.glyphs) > 0 {
-			lines = append(lines, l)
+			pl.lines = append(pl.lines, l)
 		}
 	}
-	return lines, fallback, omitted
+	return pl
 }
 
 // runsOf splits a line at gaps wider than runGap.

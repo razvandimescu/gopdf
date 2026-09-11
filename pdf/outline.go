@@ -1,8 +1,10 @@
 package pdf
 
 import (
+	"fmt"
 	"math"
 	"slices"
+	"strings"
 )
 
 // Some producers draw every glyph as a filled path — no text operators, no
@@ -221,6 +223,41 @@ func (f filledPath) bounds() (x0, y0, x1, y1 float64) {
 	return
 }
 
+// pdfPath writes the fill as path operators, moved so its bounds start at the
+// origin.
+func (f filledPath) pdfPath() string {
+	x0, y0, _, _ := f.bounds()
+	var b strings.Builder
+	for _, s := range f.segs {
+		for _, p := range s.points() {
+			fmt.Fprintf(&b, "%s %s ", formatOperand(p[0]-x0), formatOperand(p[1]-y0))
+		}
+		b.WriteByte(s.op)
+		b.WriteByte(' ')
+	}
+	if f.evenOdd {
+		b.WriteString("f*")
+	} else {
+		b.WriteString("f")
+	}
+	return b.String()
+}
+
+// isRect reports whether the fill is one axis-aligned rectangle, the outline
+// l, I and | share in many sans-serif faces.
+func (f filledPath) isRect() bool {
+	if len(f.segs) != 5 || f.segs[0].op != 'm' {
+		return false
+	}
+	for i := 1; i < 5; i++ {
+		a, b := f.segs[i-1].end(), f.segs[i].pts[0]
+		if f.segs[i].op != 'l' || (a[0] != b[0] && a[1] != b[1]) {
+			return false
+		}
+	}
+	return true
+}
+
 // isGlyphCandidate reports whether a fill is sized and shaped like a glyph.
 // Colour is ignored: white text on a dark cell is still text.
 func (f filledPath) isGlyphCandidate() bool {
@@ -326,7 +363,7 @@ func (h OutlineHint) Possible() bool {
 // OutlineHint measures the page's glyph-sized fills. Text extraction is
 // unaffected: this reads the page separately.
 func (p *Page) OutlineHint() (OutlineHint, error) {
-	fills, err := pageFills(p.dict, p.reader)
+	fills, err := pageFills(p.dict(), p.doc.reader)
 	if err != nil {
 		return OutlineHint{}, err
 	}

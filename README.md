@@ -216,20 +216,31 @@ for _, r := range results {
 // Page 0 at (206, 691) size 70x12
 ```
 
-### Text drawn as outlines
+### Text drawn as outlines (experimental)
 
 Some producers draw every glyph as a filled path, and such a page extracts as
-empty. `Page.OutlineHint` says when a page's fills repeat like glyphs, so an
-empty result comes with an explanation:
+empty. `Page.OutlineHint` says when a page's fills repeat like glyphs.
+`Document.RecoverOutlines` recovers the text when you supply a labeller that
+names each distinct outline — in practice a vision model looking at
+`GlyphSheet`:
 
 ```go
-hint, _ := doc.Page(0).OutlineHint()
-if hint.Possible() {
-    // this page's text is drawn as outlines, not written with text operators
-}
+report, err := doc.RecoverOutlines(ctx, func(ctx context.Context, shapes []pdf.GlyphShape) (map[int]string, error) {
+    sheet, err := pdf.GlyphSheet(shapes) // one PDF page, each shape tagged with its ID
+    if err != nil {
+        return nil, err
+    }
+    return askVisionModel(ctx, sheet) // your code: shape ID -> character
+})
+// Text, TextLines, Tables and Search now include the recovered words.
+// report accounts for every glyph: guessed, placed by fallback, rejected, omitted.
 ```
 
-It is a hint, not a verdict: a page of varied repeated symbols satisfies it too.
+Only the character inventory leaves the process: shapes reach the labeller
+without order or position. A labeller error or a cancelled context leaves the
+document unchanged. Placement and word spacing were measured on one producer
+(Microsoft Print to PDF), and two table cells closer than 1.5 em read as one,
+so tables built over recovered text are not yet reliable.
 
 ### Encrypted PDFs
 
@@ -657,7 +668,7 @@ type Rect struct {
   candidates whose headings read as fragments rather than words. A real table
   whose columns are named in one or two characters therefore needs `-headers`
   (or `TableOpts.Headers`) to be found.
-- **Text drawn as filled outlines is not extracted.** Some producers (virtual printers re-printing a PDF, "convert text to outlines") draw every glyph as a path, and such a page extracts as empty. `Page.OutlineHint` reports when a page's fills repeat like glyphs, so an empty result can be told apart from an empty page. It is a hint: repeated icons can trigger it too (see [Text drawn as outlines](#text-drawn-as-outlines)).
+- **Text drawn as filled outlines is not extracted by default.** Some producers (virtual printers re-printing a PDF, "convert text to outlines") draw every glyph as a path, and such a page extracts as empty. `Page.OutlineHint` reports when a page's fills repeat like glyphs; it is a hint, and repeated icons can trigger it too. `Document.RecoverOutlines` recovers the text given a labeller; it is experimental and measured on one producer (see [Text drawn as outlines](#text-drawn-as-outlines-experimental)).
 - No image extraction
 - **Images read as PNG, JPEG and GIF only** — what the standard library decodes. HEIC and AVIF need an HEVC or AV1 decoder, available only through CGo or copyleft code; WebP and TIFF would need `golang.org/x/image`. Neither fits a CGo-free MIT library with no dependencies. Unsupported formats are named in the error.
 - PDF creation supports standard 14 fonts only (no font embedding)
@@ -677,6 +688,8 @@ pdf/
   edit.go       Text search, text overlay, image overlay, visual redaction
   redact.go     Text removal: glyph-level content stream rewriting
   outline.go    Filled-path capture and clustering; OutlineHint
+  recover.go    RecoverOutlines, GlyphSheet: labelling outlined glyphs
+  assemble.go   Labelled glyphs -> baselines, runs, words
   image.go      Image decoding (PNG/JPEG/GIF) → RGB + grayscale SMask streams
   creator.go    PDF creation from scratch (text, shapes, images, fonts)
   lexer.go      PDF byte stream tokenizer

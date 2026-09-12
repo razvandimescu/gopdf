@@ -268,6 +268,74 @@ func TestRecoverOutlinesRehomesAnApostropheDrawnAsAComma(t *testing.T) {
 	}
 }
 
+// The same apostrophe closing a word, where the glyph to its right is too rare
+// to have an offset of its own. Nothing sits to its right until the fallback
+// places that glyph, so re-homing can only see it on a second look, after
+// pass 2.
+func TestRecoverOutlinesRehomesAfterTheFallback(t *testing.T) {
+	lines := append(slices.Clone(synthText), "TREK, SEAL, LOAD, NEAR", "WELL NOW READ’-")
+	commaOutline := func(c rune, x, y float64, translated bool) string {
+		if c == '’' {
+			return synthGlyph(',', x, y+5.6, translated)
+		}
+		return synthGlyph(c, x, y, translated)
+	}
+	text, report := recoverText(t, synthDoc(t, synthGlyphsWith(lines, commaOutline), ""), synthLabeller)
+
+	if !strings.Contains(text, "WELL NOW READ'-") || strings.Count(text, "\n") != len(lines)-1 {
+		t.Errorf("recovered\n%s\nwant READ'- whole, on its line, and no line for the apostrophe", text)
+	}
+	if len(report.Rehomed) != 2 {
+		t.Errorf("rehomed %d glyphs, want both apostrophes", len(report.Rehomed))
+	}
+}
+
+// Two baselines 0.8 pt apart both take the apostrophe into their body, and
+// both gain a member to its right only in pass 2. The second look therefore
+// finds two homes and no way to choose, and with no pass 3 left to defer to it
+// leaves the glyph on the line pass 1 gave it.
+func TestRecoverOutlinesLeavesAnAmbiguousGlyphAlone(t *testing.T) {
+	lines := append(slices.Clone(synthText), "TREK, SEAL, LOAD, NEAR")
+	glyphs := synthGlyphsWith(lines, func(c rune, x, y float64, translated bool) string {
+		if c == '’' {
+			return synthGlyph(',', x, y+5.6, translated)
+		}
+		return synthGlyph(c, x, y, translated)
+	})
+	add := func(s string, y float64) float64 {
+		gs, end := synthWord(s, 1, 40, y)
+		glyphs = append(glyphs, gs...)
+		return end
+	}
+	end := add("HEAD LAND", 500)
+	add("NEAR DEAL", 500.8)
+	// The bar to the right of the apostrophe on each line is a bare rectangle
+	// at a size of its own: it takes no transferred offset, is too rare to
+	// learn one, and is no seed, so only the fallback places it. Until then
+	// neither line has a member to the apostrophe's right.
+	glyphs = append(glyphs, synthGlyph(',', end+2, 505.6, false),
+		scaledGlyph('l', 2, end+5, 500), scaledGlyph('l', 2, end+10, 500.8))
+	barsWhenLarge := func(ctx context.Context, shapes []GlyphShape) (map[int]string, error) {
+		labels, _ := synthLabeller(ctx, shapes)
+		for _, s := range shapes {
+			if s.Height > 10 {
+				labels[s.ID] = "|"
+			}
+		}
+		return labels, nil
+	}
+
+	doc := synthDoc(t, glyphs, "")
+	_, report := recoverText(t, doc, barsWhenLarge)
+
+	if s := spanNamed(t, doc, ","); math.Abs(s.Y-505.6) > baselineTolerance {
+		t.Errorf("ambiguous glyph moved to baseline %v, want the line pass 1 gave it, 505.6", s.Y)
+	}
+	if len(report.Rehomed) != 1 {
+		t.Errorf("rehomed %d glyphs, want only the apostrophe of DEAN'S", len(report.Rehomed))
+	}
+}
+
 // The acceptance gate for re-homing: lines of one shape inside or near
 // another line's body, which must stay where their own offsets put them.
 // Each is kept by one guard alone.

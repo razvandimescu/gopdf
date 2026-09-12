@@ -372,7 +372,9 @@ type placement struct {
 // the inferred lines only one shape predicts. Horizontal proximity only
 // breaks ties between anchored lines; it never excludes one. Pass 2 places
 // the rest against the lines as pass 1 left them, so fallback glyphs never
-// attract each other and their order does not matter.
+// attract each other and their order does not matter. Re-homing then runs a
+// second time: a glyph whose right-hand neighbour has no offset of its own
+// gains members on both sides only once pass 2 has placed that neighbour.
 func place(gs []*outlineGlyph, anchors []*line, own learned, moved map[int]transfer) (pl placement) {
 	var pending []*outlineGlyph
 	var inferredLines []*line
@@ -459,6 +461,8 @@ func place(gs []*outlineGlyph, anchors []*line, own learned, moved map[int]trans
 		pl.fallback = append(pl.fallback, g)
 	}
 
+	inferredLines = dissolvePhantoms(inferredLines, anchors, own.taught, &pl, nil)
+
 	for _, l := range slices.Concat(anchors, inferredLines) {
 		if len(l.glyphs) > 0 {
 			pl.lines = append(pl.lines, l)
@@ -479,7 +483,8 @@ func place(gs []*outlineGlyph, anchors []*line, own learned, moved map[int]trans
 //   - the line has members on both sides of it within runGap, which rules
 //     out a cell set beside the line rather than within it.
 //
-// A glyph inside two lines is ambiguous and goes to pass 2.
+// A glyph inside two lines is ambiguous and goes to pass 2; with pending nil,
+// after pass 2, it stays where it is.
 func dissolvePhantoms(inferred, anchors []*line, taught map[int]map[int]bool, pl *placement, pending *[]*outlineGlyph) []*line {
 	members := map[*line][]*outlineGlyph{}
 	for _, a := range anchors {
@@ -510,7 +515,11 @@ func dissolvePhantoms(inferred, anchors []*line, taught map[int]map[int]bool, pl
 				homes[0].glyphs = append(homes[0].glyphs, g)
 				pl.rehomed = append(pl.rehomed, g)
 			default:
-				*pending = append(*pending, g)
+				if pending == nil {
+					stay = append(stay, g)
+				} else {
+					*pending = append(*pending, g)
+				}
 			}
 		}
 		if l.glyphs = stay; len(stay) > 0 {

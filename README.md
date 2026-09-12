@@ -239,9 +239,13 @@ report, err := doc.RecoverOutlines(ctx, func(ctx context.Context, shapes []pdf.G
 
 Only the character inventory leaves the process: shapes reach the labeller
 without order or position. A labeller error or a cancelled context leaves the
-document unchanged. Placement and word spacing were measured on one producer
-(Microsoft Print to PDF), and two table cells closer than 1.5 em read as one,
-so tables built over recovered text are not yet reliable.
+document unchanged. Where one bare rectangle stands for `l`, `I` and `|`, the
+case of the surrounding word decides (`Please`, `INVOICE`); where it cannot, as
+in `Item` or `myItem`, the neighbouring letters guess, and `report.Guessed`
+records which evidence decided each one. Placement and word spacing were
+measured on one producer (Microsoft Print to PDF), and two table cells closer
+than 1.5 em read as one, so tables built over recovered text are not yet
+reliable.
 
 ### Encrypted PDFs
 

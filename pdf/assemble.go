@@ -760,8 +760,8 @@ var lookAlikes = []string{"l", "I", "|"}
 
 // wordSpan builds one word's span, deciding look-alike characters by the
 // strongest evidence available. Geometry resolves them: a comma sitting well
-// above the baseline is an apostrophe. Context only guesses, and each guess is
-// reported: a rectangle beside a capital is I, otherwise l.
+// above the baseline is an apostrophe. A bare rectangle is only guessed, and
+// each guess is reported with what decided it.
 func wordSpan(w []*outlineGlyph, r *run, report *RecoveryReport) TextSpan {
 	var b strings.Builder
 	x0, x1 := math.Inf(1), math.Inf(-1)
@@ -772,21 +772,58 @@ func wordSpan(w []*outlineGlyph, r *run, report *RecoveryReport) TextSpan {
 		case label == "," && g.y0-r.line.y > 0.25*r.em:
 			label = "'"
 		case g.isLookAlike():
-			label = "l"
-			if (i > 0 && isCapital(w[i-1])) || (i < len(w)-1 && isCapital(w[i+1])) {
-				label = "I"
-			}
+			var by Evidence
+			label, by = lookAlike(w, i)
 			var alt []string
 			for _, a := range lookAlikes {
 				if a != label {
 					alt = append(alt, a)
 				}
 			}
-			report.Guessed = append(report.Guessed, GuessedGlyph{g.occurrence(), label, alt})
+			report.Guessed = append(report.Guessed, GuessedGlyph{g.occurrence(), label, alt, by})
 		}
 		b.WriteString(label)
 	}
 	return TextSpan{X: x0, Y: r.line.y, EndX: x1, FontSize: r.em, Text: b.String()}
+}
+
+// lookAlike decides the rectangle w[i] from the case of the letters around it,
+// up to the nearest non-letter, other rectangles not counting. A capital after
+// the first letter and no lowercase make it I, as in INVOICE; a first capital
+// and only lowercase after make it l, as in Please. Anything else is left to
+// its neighbours, I beside a capital and otherwise l: a lowercase word, which
+// may be an identifier (myItem); mixed case (OpenAI); a rectangle that begins
+// its word (Ideal, lever) or stands alone.
+func lookAlike(w []*outlineGlyph, i int) (string, Evidence) {
+	isLetter := func(g *outlineGlyph) bool {
+		return g.isLookAlike() || strings.ToLower(g.label) != strings.ToUpper(g.label)
+	}
+	lo, hi := i, i
+	for lo > 0 && isLetter(w[lo-1]) {
+		lo--
+	}
+	for hi < len(w)-1 && isLetter(w[hi+1]) {
+		hi++
+	}
+	var upper, lower bool // besides the first letter
+	for j, g := range w[lo : hi+1] {
+		switch {
+		case g.isLookAlike():
+		case isCapital(g):
+			upper = upper || j > 0
+		case strings.ToUpper(g.label) != g.label:
+			lower = true
+		}
+	}
+	switch {
+	case upper && !lower:
+		return "I", ByCase
+	case lower && !upper && isCapital(w[lo]):
+		return "l", ByCase
+	case (i > 0 && isCapital(w[i-1])) || (i < len(w)-1 && isCapital(w[i+1])):
+		return "I", ByNeighbour
+	}
+	return "l", ByNeighbour
 }
 
 func isCapital(g *outlineGlyph) bool {

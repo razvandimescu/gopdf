@@ -32,7 +32,7 @@ type RecoveryReport struct {
 	FallbackPlaced  []Occurrence   // placed by the bounded fallback; included in the text
 	TransferPlaced  []Occurrence   // placed by an offset learned on the same outline at another size; included in the text
 	Rehomed         []Occurrence   // moved off a line only their own shape predicted, into the line whose text they sit in; included in the text
-	Guessed         []GuessedGlyph // characters decided by context; included in the text
+	Guessed         []GuessedGlyph // look-alikes decided by the letters around them; included in the text
 	SpacingFallback bool           // no clear gap valley: word breaks come from local gaps, a degraded mode
 }
 
@@ -43,12 +43,26 @@ type Occurrence struct {
 	Box   Rect // ink bounds in displayed space
 }
 
-// GuessedGlyph is a character chosen between look-alikes by its neighbours.
+// GuessedGlyph is a character chosen between look-alikes (l, I and | drawn as
+// one bare rectangle), and what chose it.
 type GuessedGlyph struct {
 	Occurrence
 	Chosen       string
 	Alternatives []string
+	By           Evidence
 }
+
+// Evidence is what decided a GuessedGlyph.
+type Evidence int
+
+const (
+	// ByNeighbour: the word's case settles nothing, so the glyph is I beside
+	// a capital and l otherwise. A guess: Item reads ltem, and myItem myltem.
+	ByNeighbour Evidence = iota
+	// ByCase: the word's other letters, up to a non-letter, are capitals (I),
+	// or a capital followed by lowercase (l).
+	ByCase
+)
 
 // RecoverOutlines labels the document's outlined glyphs and, on success,
 // installs the recovered text: TextSpans, TextLines, Text, Tables and Search

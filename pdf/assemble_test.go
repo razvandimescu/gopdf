@@ -208,3 +208,41 @@ func TestSpacingUsesOneSidedEvidence(t *testing.T) {
 		}
 	}
 }
+
+// One rectangle stands for l and I; the letters around it decide, or its
+// neighbours guess. The second list is the gate: words whose case must not
+// decide, whatever the guess makes of them.
+func TestLookAlikesByCase(t *testing.T) {
+	decide := func(word string) (string, []Evidence) {
+		var w []*outlineGlyph
+		for _, c := range word {
+			g := &outlineGlyph{label: string(c)}
+			if c == 'l' || c == 'I' {
+				g.label, g.rect = "l", true // the labeller's one name for the outline
+			}
+			w = append(w, g)
+		}
+		var b strings.Builder
+		var by []Evidence
+		for i, g := range w {
+			label := g.label
+			if g.isLookAlike() {
+				var e Evidence
+				label, e = lookAlike(w, i)
+				by = append(by, e)
+			}
+			b.WriteString(label)
+		}
+		return b.String(), by
+	}
+	for _, word := range []string{"Please", "Old", "Detalii", "INVOICE", "BOLI", "IOM", "IL20", "RO00INGB", "LIST-Price"} {
+		if got, by := decide(word); got != word || slices.Contains(by, ByNeighbour) {
+			t.Errorf("%s: got %s by %v, want each rectangle decided by case", word, got, by)
+		}
+	}
+	for _, word := range []string{"OpenAI", "myItem", "getItemList", "InfoDesk", "PowerShell", "I", "All", "Ideal", "Itemised", "lever", "value"} {
+		if got, by := decide(word); slices.Contains(by, ByCase) {
+			t.Errorf("%s: got %s by %v; its case must not decide it", word, got, by)
+		}
+	}
+}

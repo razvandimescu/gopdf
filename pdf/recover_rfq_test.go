@@ -22,17 +22,21 @@ import (
 // remembering where the whitespace was.
 type refText struct {
 	text string
+	raw  string // text with l, I and | unfolded, at the same offsets
 	brk  []bool // brk[i]: whitespace, or the end, precedes byte i
 }
 
-var lookAlikeFold = strings.NewReplacer("I", "l", "|", "l", "'", ",", "’", ",")
+var (
+	lookAlikeFold  = strings.NewReplacer("I", "l", "|", "l", "'", ",", "’", ",")
+	apostropheFold = strings.NewReplacer("'", ",", "’", ",")
+)
 
 func foldLabel(s string) string {
 	return lookAlikeFold.Replace(strings.Join(strings.Fields(s), ""))
 }
 
 func newRefText(raw string) refText {
-	var b strings.Builder
+	var b, u strings.Builder
 	var brk []bool
 	ws := false
 	for _, r := range raw {
@@ -45,9 +49,10 @@ func newRefText(raw string) refText {
 			brk = append(brk, ws && i == 0)
 		}
 		b.WriteString(s)
+		u.WriteString(apostropheFold.Replace(string(r)))
 		ws = false
 	}
-	return refText{b.String(), append(brk, true)}
+	return refText{b.String(), u.String(), append(brk, true)}
 }
 
 // wordMatches returns where s occurs with whitespace on both sides.
@@ -93,6 +98,26 @@ func (t refText) runTruth(r *run) ([]bool, bool) {
 		truth, found = pat, true
 	}
 	return truth, found
+}
+
+// lookAlikeTruth is the unfolded character under each look-alike of r: "" where
+// the places r occurs in the reference disagree, absent where it occurs nowhere.
+func (t refText) lookAlikeTruth(r *run) map[*outlineGlyph]string {
+	truth := map[*outlineGlyph]string{}
+	for _, at := range t.wordMatches(runText(r)) {
+		pos := at
+		for _, g := range r.glyphs {
+			if g.isLookAlike() {
+				c := t.raw[pos : pos+1]
+				if prev, seen := truth[g]; seen && prev != c {
+					c = ""
+				}
+				truth[g] = c
+			}
+			pos += len(foldLabel(g.label))
+		}
+	}
+	return truth
 }
 
 func openRFQ(t *testing.T) (*Document, map[int]string, refText) {
@@ -166,6 +191,35 @@ func TestIntegration_RecoverOutlinedRFQ(t *testing.T) {
 	explained := []string{"Breastfeedi331/01", "ng/lnfant", "GlosswhitefinishwithSmartGuardanti-microbialHydrophylicglaze"}
 	if len(report.Omitted) != 0 || !reflect.DeepEqual(unmatched, explained) {
 		t.Errorf("%d omitted, unmatched runs %q; want none omitted, and only %q", len(report.Omitted), unmatched, explained)
+	}
+
+	// Look-alikes, unfolded. The words case cannot decide are Title-case words
+	// beginning with a rectangle, and the neighbour rule reads each I there as l.
+	chosen := map[[2]int]string{}
+	for _, g := range report.Guessed {
+		chosen[[2]int{g.Page, g.Index}] = g.Chosen
+	}
+	var misread []string
+	for _, r := range a.runs {
+		truth := ref.lookAlikeTruth(r)
+		for _, w := range splitWords(r) {
+			var word strings.Builder
+			wrong := false
+			for _, g := range w {
+				c, ok := chosen[[2]int{g.page, g.index}]
+				if !ok {
+					c = g.label
+				}
+				word.WriteString(c)
+				wrong = wrong || truth[g] != "" && truth[g] != c
+			}
+			if wrong {
+				misread = append(misread, word.String())
+			}
+		}
+	}
+	if want := []string{"ltemised", "ldeal", "ldeal", "ldeaISpec", "ltem"}; !slices.Equal(misread, want) {
+		t.Errorf("misread look-alikes %q, want only %q", misread, want)
 	}
 
 	scored, breaks, wholeDoc, heldOut := scoreBreaks(a, ref, doc.NumPages())

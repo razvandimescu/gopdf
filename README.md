@@ -223,7 +223,7 @@ empty. `Page.OutlineHint` says when a page's fills repeat like glyphs, so an
 empty result comes with an explanation:
 
 ```go
-hint, err := doc.Page(0).OutlineHint()
+hint, _ := doc.Page(0).OutlineHint()
 if hint.Possible() {
     // this page's text is drawn as outlines, not written with text operators
 }

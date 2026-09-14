@@ -219,33 +219,26 @@ for _, r := range results {
 ### Text drawn as outlines (experimental)
 
 Some producers draw every glyph as a filled path, and such a page extracts as
-empty. `Page.OutlineHint` says when a page's fills repeat like glyphs.
-`Document.RecoverOutlines` recovers the text when you supply a labeller that
-names each distinct outline — in practice a vision model looking at
-`GlyphSheet`:
+empty. `Page.OutlineHint` says when a page's fills repeat like glyphs, so an
+empty result comes with an explanation:
 
 ```go
-report, err := doc.RecoverOutlines(ctx, func(ctx context.Context, shapes []pdf.GlyphShape) (map[int]string, error) {
-    sheet, err := pdf.GlyphSheet(shapes) // one PDF page, each shape tagged with its ID
-    if err != nil {
-        return nil, err
-    }
-    return askVisionModel(ctx, sheet) // your code: shape ID -> character
-})
-// Text, TextLines, Tables and Search now include the recovered words.
-// report accounts for every glyph: guessed, placed by fallback, by an offset
-// transferred from another size, or re-homed from a phantom line; rejected; omitted.
+hint, err := doc.Page(0).OutlineHint()
+if hint.Possible() {
+    // this page's text is drawn as outlines, not written with text operators
+}
 ```
 
-Only the character inventory leaves the process: shapes reach the labeller
-without order or position. A labeller error or a cancelled context leaves the
-document unchanged. Where one bare rectangle stands for `l`, `I` and `|`, the
-case of the surrounding word decides (`Please`, `INVOICE`); where it cannot, as
-in `Item` or `myItem`, the neighbouring letters guess, and `report.Guessed`
-records which evidence decided each one. Placement and word spacing were
-measured on one producer (Microsoft Print to PDF), and two table cells closer
-than 1.5 em read as one, so tables built over recovered text are not yet
-reliable.
+It is a hint, not a verdict: repeated icons and checkbox grids satisfy it too.
+
+Reading the words back — clustering the outlines into distinct shapes, having a
+labeller name each one, then placing the labelled glyphs on baselines and
+splitting words — is implemented but deliberately not exported. Naming the
+shapes takes a model, which does not belong inside a library whose point is to
+be deterministic and offline, and the placement and spacing rules were measured
+on a single producer. It will ship through the CLI, where the labelling step is
+a file you produce with whatever model you like, rather than as public API
+before 1.0.
 
 ### Encrypted PDFs
 
@@ -673,7 +666,7 @@ type Rect struct {
   candidates whose headings read as fragments rather than words. A real table
   whose columns are named in one or two characters therefore needs `-headers`
   (or `TableOpts.Headers`) to be found.
-- **Text drawn as filled outlines is not extracted by default.** Some producers (virtual printers re-printing a PDF, "convert text to outlines") draw every glyph as a path, and such a page extracts as empty. `Page.OutlineHint` reports when a page's fills repeat like glyphs; it is a hint, and repeated icons can trigger it too. `Document.RecoverOutlines` recovers the text given a labeller; it is experimental and measured on one producer (see [Text drawn as outlines](#text-drawn-as-outlines-experimental)).
+- **Text drawn as filled outlines is not extracted by default.** Some producers (virtual printers re-printing a PDF, "convert text to outlines") draw every glyph as a path, and such a page extracts as empty. `Page.OutlineHint` reports when a page's fills repeat like glyphs; it is a hint, and repeated icons can trigger it too. Reading the text back is implemented but not exported, pending a CLI that keeps the labelling step outside the library (see [Text drawn as outlines](#text-drawn-as-outlines-experimental)).
 - No image extraction
 - **Images read as PNG, JPEG and GIF only** — what the standard library decodes. HEIC and AVIF need an HEVC or AV1 decoder, available only through CGo or copyleft code; WebP and TIFF would need `golang.org/x/image`. Neither fits a CGo-free MIT library with no dependencies. Unsupported formats are named in the error.
 - PDF creation supports standard 14 fonts only (no font embedding)
@@ -693,7 +686,7 @@ pdf/
   edit.go       Text search, text overlay, image overlay, visual redaction
   redact.go     Text removal: glyph-level content stream rewriting
   outline.go    Filled-path capture and clustering; OutlineHint
-  recover.go    RecoverOutlines, GlyphSheet: labelling outlined glyphs
+  recover.go    Labelling outlined glyphs and reading their text (internal)
   assemble.go   Labelled glyphs -> baselines, runs, words
   image.go      Image decoding (PNG/JPEG/GIF) → RGB + grayscale SMask streams
   creator.go    PDF creation from scratch (text, shapes, images, fonts)

@@ -104,7 +104,7 @@ type assembly struct {
 // assemble places glyphs, which are labelled and in page and paint order, and
 // fills in the report's Omitted, FallbackPlaced, TransferPlaced, Guessed and
 // SpacingFallback.
-func assemble(numPages int, glyphs []*outlineGlyph, report *RecoveryReport) assembly {
+func assemble(numPages int, glyphs []*outlineGlyph, report *recoveryReport) assembly {
 	pages := make([][]*outlineGlyph, numPages)
 	for _, g := range glyphs {
 		pages[g.page] = append(pages[g.page], g)
@@ -150,14 +150,14 @@ func assemble(numPages int, glyphs []*outlineGlyph, report *RecoveryReport) asse
 			a.spans[p] = append(a.spans[p], wordSpan(w, r, report))
 		}
 	}
-	slices.SortFunc(report.Guessed, func(x, y GuessedGlyph) int {
+	slices.SortFunc(report.Guessed, func(x, y guessedGlyph) int {
 		return cmp.Or(x.Page-y.Page, x.Index-y.Index)
 	})
 	return a
 }
 
-func occurrences(gs []*outlineGlyph) []Occurrence {
-	out := make([]Occurrence, len(gs))
+func occurrences(gs []*outlineGlyph) []glyphRef {
+	out := make([]glyphRef, len(gs))
 	for i, g := range gs {
 		out[i] = g.occurrence()
 	}
@@ -793,7 +793,7 @@ var lookAlikes = []string{"l", "I", "|"}
 // strongest evidence available. Geometry resolves them: a comma sitting well
 // above the baseline is an apostrophe. A bare rectangle is only guessed, and
 // each guess is reported with what decided it.
-func wordSpan(w []*outlineGlyph, r *run, report *RecoveryReport) TextSpan {
+func wordSpan(w []*outlineGlyph, r *run, report *recoveryReport) TextSpan {
 	var b strings.Builder
 	x0, x1 := math.Inf(1), math.Inf(-1)
 	for i, g := range w {
@@ -803,10 +803,10 @@ func wordSpan(w []*outlineGlyph, r *run, report *RecoveryReport) TextSpan {
 		case label == "," && g.y0-r.line.y > 0.25*r.em:
 			label = "'"
 		case g.isLookAlike():
-			var by Evidence
+			var by labelEvidence
 			label, by = lookAlike(w, i)
 			alt := slices.DeleteFunc(slices.Clone(lookAlikes), func(a string) bool { return a == label })
-			report.Guessed = append(report.Guessed, GuessedGlyph{g.occurrence(), label, alt, by})
+			report.Guessed = append(report.Guessed, guessedGlyph{g.occurrence(), label, alt, by})
 		}
 		b.WriteString(label)
 	}
@@ -820,7 +820,7 @@ func wordSpan(w []*outlineGlyph, r *run, report *RecoveryReport) TextSpan {
 // its neighbours, I beside a capital and otherwise l: a lowercase word, which
 // may be an identifier (myItem); mixed case (OpenAI); a rectangle that begins
 // its word (Ideal, lever) or stands alone.
-func lookAlike(w []*outlineGlyph, i int) (string, Evidence) {
+func lookAlike(w []*outlineGlyph, i int) (string, labelEvidence) {
 	isLetter := func(g *outlineGlyph) bool {
 		return g.isLookAlike() || strings.ToLower(g.label) != strings.ToUpper(g.label)
 	}
@@ -843,13 +843,13 @@ func lookAlike(w []*outlineGlyph, i int) (string, Evidence) {
 	}
 	switch {
 	case upper && !lower:
-		return "I", ByCase
+		return "I", evidenceByCase
 	case lower && !upper && isCapital(w[lo]):
-		return "l", ByCase
+		return "l", evidenceByCase
 	case (i > 0 && isCapital(w[i-1])) || (i < len(w)-1 && isCapital(w[i+1])):
-		return "I", ByNeighbour
+		return "I", evidenceByNeighbour
 	}
-	return "l", ByNeighbour
+	return "l", evidenceByNeighbour
 }
 
 func isCapital(g *outlineGlyph) bool {

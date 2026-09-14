@@ -145,15 +145,15 @@ func openRFQ(t *testing.T) (*Document, map[int]string, refText) {
 	return openTestPDF(t, "outlined_rfq.pdf"), labels, ref
 }
 
-func fixedLabeller(labels map[int]string) GlyphLabeler {
-	return func(context.Context, []GlyphShape) (map[int]string, error) {
+func fixedLabeller(labels map[int]string) glyphLabeler {
+	return func(context.Context, []glyphShape) (map[int]string, error) {
 		return labels, nil
 	}
 }
 
 func TestIntegration_RecoverOutlinedRFQ(t *testing.T) {
 	doc, labels, ref := openRFQ(t)
-	a, report, err := doc.recoverOutlines(context.Background(), fixedLabeller(labels))
+	a, report, err := doc.computeRecovery(context.Background(), fixedLabeller(labels))
 	if err != nil {
 		t.Fatal(err)
 	}

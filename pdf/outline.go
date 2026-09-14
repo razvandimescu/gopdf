@@ -266,6 +266,19 @@ func (f filledPath) isGlyphCandidate() bool {
 	return short > 0 && long <= maxGlyphSize && long <= maxGlyphAspect*short
 }
 
+// glyphCandidates picks out the fills sized and shaped like glyphs, with each
+// one's ordinal in the page's paint order. OutlineHint and recovery share it,
+// so the hint describes what recovery will see.
+func glyphCandidates(fills []filledPath) (cands []filledPath, index []int) {
+	for i, f := range fills {
+		if f.isGlyphCandidate() {
+			cands = append(cands, f)
+			index = append(index, i)
+		}
+	}
+	return cands, index
+}
+
 // shapeKey is what two instances of one outline must share exactly.
 type shapeKey struct {
 	ops     string
@@ -367,12 +380,7 @@ func (p *Page) OutlineHint() (OutlineHint, error) {
 	if err != nil {
 		return OutlineHint{}, err
 	}
-	var cands []filledPath
-	for _, f := range fills {
-		if f.isGlyphCandidate() {
-			cands = append(cands, f)
-		}
-	}
+	cands, _ := glyphCandidates(fills)
 	_, shapes := clusterShapes(cands)
 	return OutlineHint{Candidates: len(cands), Shapes: shapes}, nil
 }

@@ -123,14 +123,15 @@ func (d *Document) recoverOutlines(ctx context.Context, label GlyphLabeler) (ass
 	var text []*outlineGlyph
 	for _, g := range glyphs {
 		l, ok := labels[g.shape]
-		switch {
-		case !ok:
-		case l == "":
-			report.Rejected++
-		default:
-			g.label = l
-			text = append(text, g)
+		if !ok {
+			continue
 		}
+		if l == "" {
+			report.Rejected++
+			continue
+		}
+		g.label = l
+		text = append(text, g)
 	}
 	a := assemble(len(d.pages), text, &report)
 	return a, report, nil
@@ -160,15 +161,13 @@ func (d *Document) outlineGlyphs() ([]*outlineGlyph, []GlyphShape, error) {
 		if err != nil {
 			return nil, nil, err
 		}
-		for i, f := range fills {
-			if !f.isGlyphCandidate() {
-				continue
-			}
-			g := &outlineGlyph{page: p, index: i, fill: f}
+		pageCands, index := glyphCandidates(fills)
+		for k, f := range pageCands {
+			g := &outlineGlyph{page: p, index: index[k], fill: f}
 			g.x0, g.y0, g.x1, g.y1 = f.bounds()
 			glyphs = append(glyphs, g)
-			cands = append(cands, f)
 		}
+		cands = append(cands, pageCands...)
 	}
 	ids, n := clusterShapes(cands)
 	shapes := make([]GlyphShape, n)

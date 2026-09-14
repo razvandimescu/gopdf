@@ -43,6 +43,11 @@ const (
 	// runGap splits a line into runs, the domain of word spacing. A run is not
 	// a table cell: two cells nearer than this read as one.
 	runGap = 1.5 // em
+	// rehomeReach is how far, in em, a line's member may sit from a glyph and
+	// still count as being beside it when re-homing. Measured in E4 and E6: it
+	// shares runGap's value but not its meaning, and must be free to move when
+	// column evidence replaces runGap.
+	rehomeReach = 1.5 // em
 	// gapBin is the histogram resolution for finding the word-space valley.
 	gapBin = 0.02 // em
 	// breakMargin is how far a gap must exceed its pair's fitted correction to
@@ -60,12 +65,17 @@ type line struct {
 	glyphs []*outlineGlyph
 }
 
+// members is everything on the line. Pass 2 appends to glyphs, so the copy
+// this returns is a snapshot of the line as it stands.
+func (l *line) members() []*outlineGlyph { return slices.Concat(l.seeds, l.glyphs) }
+
 // run is a stretch of a line without a gap wider than runGap.
 type run struct {
 	line   *line
 	em     float64
 	glyphs []*outlineGlyph // left to right
 	breaks []bool          // breaks[i]: a word ends after glyphs[i]
+	gapv   []wordGap       // memoised gaps()
 }
 
 // wordGap is the gap between two adjacent glyphs of a run, in em.
@@ -74,13 +84,16 @@ type wordGap struct {
 	v           float64
 }
 
+// gaps is read three times over the same run, so it is computed once.
 func (r *run) gaps() []wordGap {
-	var gs []wordGap
-	for i := 1; i < len(r.glyphs); i++ {
-		a, b := r.glyphs[i-1], r.glyphs[i]
-		gs = append(gs, wordGap{a.shape, b.shape, (b.x0 - a.x1) / r.em})
+	if r.gapv == nil {
+		r.gapv = make([]wordGap, 0, max(0, len(r.glyphs)-1))
+		for i := 1; i < len(r.glyphs); i++ {
+			a, b := r.glyphs[i-1], r.glyphs[i]
+			r.gapv = append(r.gapv, wordGap{a.shape, b.shape, (b.x0 - a.x1) / r.em})
+		}
 	}
-	return gs
+	return r.gapv
 }
 
 type assembly struct {
@@ -243,8 +256,9 @@ func learnOffsets(pages [][]*outlineGlyph, anchors [][]*line) learned {
 	samples := map[int][]sample{}
 	for p, gs := range pages {
 		for _, g := range gs {
-			best, bestD, second := -1, math.Inf(1), math.Inf(1)
-			for i, a := range anchors[p] {
+			var best *line
+			bestD, second := math.Inf(1), math.Inf(1)
+			for _, a := range anchors[p] {
 				if a.y > g.y1 || a.y < g.y0-offsetReach*a.em {
 					continue
 				}
@@ -253,16 +267,15 @@ func learnOffsets(pages [][]*outlineGlyph, anchors [][]*line) learned {
 					continue
 				}
 				if d < bestD {
-					second, best, bestD = bestD, i, d
+					second, best, bestD = bestD, a, d
 				} else {
 					second = math.Min(second, d)
 				}
 			}
 			// In a two-font row, a glyph near seeds of both baselines says
 			// nothing about its own offset.
-			if best >= 0 && second > bestD+0.5*seedHeight {
-				a := anchors[p][best]
-				samples[g.shape] = append(samples[g.shape], sample{a.y - g.y0, a})
+			if best != nil && second > bestD+0.5*seedHeight {
+				samples[g.shape] = append(samples[g.shape], sample{best.y - g.y0, best})
 			}
 		}
 	}
@@ -285,8 +298,10 @@ func learnOffsets(pages [][]*outlineGlyph, anchors [][]*line) learned {
 		}
 		l.offset[shape] = m
 		l.taught[shape] = map[int]bool{}
+		seen := map[*line]bool{}
 		for _, s := range ss {
-			if math.Abs(s.v-m) <= offsetSpread {
+			if math.Abs(s.v-m) <= offsetSpread && !seen[s.line] {
+				seen[s.line] = true
 				for _, seed := range s.line.seeds {
 					l.taught[shape][seed.shape] = true
 				}
@@ -321,6 +336,12 @@ func transferOffsets(glyphs []*outlineGlyph, own map[int]float64) map[int]transf
 			outlines[g.shape] = outline{key, coords, math.Max(g.x1-g.x0, g.y1-g.y0)}
 		}
 	}
+	// Only outlines sharing a key can match, so each is compared with its
+	// bucket rather than with every other outline.
+	byKey := map[shapeKey][]int{}
+	for s, o := range outlines {
+		byKey[o.key] = append(byKey[o.key], s)
+	}
 	same := func(a, b outline) bool {
 		if a.key != b.key {
 			return false
@@ -340,7 +361,8 @@ func transferOffsets(glyphs []*outlineGlyph, own map[int]float64) map[int]transf
 		}
 		var offs []float64
 		scale := 1.0
-		for d, donor := range outlines {
+		for _, d := range byKey[o.key] {
+			donor := outlines[d]
 			if off, ok := own[d]; ok && same(donor, o) {
 				offs = append(offs, off*o.size/donor.size)
 				scale = math.Max(scale, o.size/donor.size)
@@ -421,13 +443,12 @@ func place(gs []*outlineGlyph, anchors []*line, own learned, moved map[int]trans
 		line    *line
 		members []*outlineGlyph
 	}
-	var targets []target
-	for _, a := range anchors {
-		targets = append(targets, target{a, slices.Concat(a.seeds, a.glyphs)})
-	}
 	for _, l := range inferredLines {
 		l.em = emOf(l.glyphs)
-		targets = append(targets, target{l, l.glyphs})
+	}
+	var targets []target
+	for _, l := range slices.Concat(anchors, inferredLines) {
+		targets = append(targets, target{l, l.members()})
 	}
 	type candidate struct {
 		line *line
@@ -488,10 +509,10 @@ func place(gs []*outlineGlyph, anchors []*line, own learned, moved map[int]trans
 func dissolvePhantoms(inferred, anchors []*line, taught map[int]map[int]bool, pl *placement, pending *[]*outlineGlyph) []*line {
 	members := map[*line][]*outlineGlyph{}
 	for _, a := range anchors {
-		members[a] = slices.Concat(a.seeds, a.glyphs)
+		members[a] = a.members()
 	}
 	inside := func(g *outlineGlyph, a *line) bool {
-		reach := runGap * a.em
+		reach := rehomeReach * a.em
 		return g.y1 > a.y && g.y0 < a.y+capHeight*a.em &&
 			slices.ContainsFunc(a.seeds, func(s *outlineGlyph) bool { return taught[g.shape][s.shape] }) &&
 			slices.ContainsFunc(members[a], func(m *outlineGlyph) bool { return m.x0 < g.x0 && g.x0-m.x1 <= reach }) &&
@@ -716,7 +737,8 @@ func localBreaks(runs []*run) {
 		for _, g := range r.gaps() {
 			gaps[i] = append(gaps[i], g.v)
 		}
-		pooled[groupOf(r)] = append(pooled[groupOf(r)], gaps[i]...)
+		g := groupOf(r)
+		pooled[g] = append(pooled[g], gaps[i]...)
 	}
 	thresholds := map[group]float64{}
 	for k, v := range pooled {
@@ -783,12 +805,7 @@ func wordSpan(w []*outlineGlyph, r *run, report *RecoveryReport) TextSpan {
 		case g.isLookAlike():
 			var by Evidence
 			label, by = lookAlike(w, i)
-			var alt []string
-			for _, a := range lookAlikes {
-				if a != label {
-					alt = append(alt, a)
-				}
-			}
+			alt := slices.DeleteFunc(slices.Clone(lookAlikes), func(a string) bool { return a == label })
 			report.Guessed = append(report.Guessed, GuessedGlyph{g.occurrence(), label, alt, by})
 		}
 		b.WriteString(label)

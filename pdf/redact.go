@@ -566,7 +566,7 @@ func markPage(r *Reader, page Dict, queries []string, rects []Rect) (*showRecord
 	}
 
 	rec := newShowRecorder(content)
-	extractTextWithResources(content, r.PageFonts(page), r, r.PageResources(page), 0, rec)
+	extractTextWithResources(content, r.PageFonts(page), r, r.PageResources(page), 0, rec, nil)
 
 	rec.matchQueries(queries)
 	if len(rects) == 0 {

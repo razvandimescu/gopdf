@@ -236,9 +236,9 @@ labeller name each one, then placing the labelled glyphs on baselines and
 splitting words — is implemented but deliberately not exported. Naming the
 shapes takes a model, which does not belong inside a library whose point is to
 be deterministic and offline, and the placement and spacing rules were measured
-on a single producer. It will ship through the CLI, where the labelling step is
-a file you produce with whatever model you like, rather than as public API
-before 1.0.
+on a single producer. How it reaches callers — a CLI verb that takes the labels
+as a file, or something else — is undecided; it will not be public API before
+1.0.
 
 ### Encrypted PDFs
 
@@ -666,7 +666,7 @@ type Rect struct {
   candidates whose headings read as fragments rather than words. A real table
   whose columns are named in one or two characters therefore needs `-headers`
   (or `TableOpts.Headers`) to be found.
-- **Text drawn as filled outlines is not extracted by default.** Some producers (virtual printers re-printing a PDF, "convert text to outlines") draw every glyph as a path, and such a page extracts as empty. `Page.OutlineHint` reports when a page's fills repeat like glyphs; it is a hint, and repeated icons can trigger it too. Reading the text back is implemented but not exported, pending a CLI that keeps the labelling step outside the library (see [Text drawn as outlines](#text-drawn-as-outlines-experimental)).
+- **Text drawn as filled outlines is not extracted by default.** Some producers (virtual printers re-printing a PDF, "convert text to outlines") draw every glyph as a path, and such a page extracts as empty. `Page.OutlineHint` reports when a page's fills repeat like glyphs; it is a hint, and repeated icons can trigger it too. Reading the text back is implemented but not exported, since naming the shapes takes a model and the delivery vehicle is undecided (see [Text drawn as outlines](#text-drawn-as-outlines-experimental)).
 - No image extraction
 - **Images read as PNG, JPEG and GIF only** — what the standard library decodes. HEIC and AVIF need an HEVC or AV1 decoder, available only through CGo or copyleft code; WebP and TIFF would need `golang.org/x/image`. Neither fits a CGo-free MIT library with no dependencies. Unsupported formats are named in the error.
 - PDF creation supports standard 14 fonts only (no font embedding)

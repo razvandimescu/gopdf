@@ -17,7 +17,7 @@ import (
 
 // synthAlphabet gives each character its own outline: a box whose bottom edge
 // is split into as many collinear segments as the character's index, plus
-// one. A labeller can tell the characters apart from GlyphShape.Path alone.
+// one. A labeller can tell the characters apart from glyphShape.Path alone.
 // 'l' comes first, so its outline is a bare rectangle, which I shares; ’ is an
 // apostrophe that the labeller names ",", as a real labeller did.
 const synthAlphabet = "lHELOWRDTAKNSpae-,’"
@@ -113,7 +113,7 @@ var synthText = []string{
 // synthLabeller reads each shape's character from its outline, as a vision
 // model would read it from a picture: it cannot tell l from I, and it names
 // the apostrophe ",".
-func synthLabeller(_ context.Context, shapes []GlyphShape) (map[int]string, error) {
+func synthLabeller(_ context.Context, shapes []glyphShape) (map[int]string, error) {
 	labels := map[int]string{}
 	for _, s := range shapes {
 		c := []rune(synthAlphabet)[strings.Count(s.Path, " l ")-4]
@@ -134,9 +134,9 @@ func synthDoc(t *testing.T, glyphs []string, extra string) *Document {
 	return doc
 }
 
-func recoverText(t *testing.T, doc *Document, label GlyphLabeler) (string, RecoveryReport) {
+func recoverText(t *testing.T, doc *Document, label glyphLabeler) (string, recoveryReport) {
 	t.Helper()
-	report, err := doc.RecoverOutlines(context.Background(), label)
+	report, err := doc.recoverOutlines(context.Background(), label)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +192,7 @@ func TestRecoverOutlinesTransfersOffsetsAcrossSizes(t *testing.T) {
 		glyphs = append(glyphs, scaledGlyph(c, 2, x, 790))
 		x += 2*synthMetricOf(c).width + 2.8
 	}
-	capitalsWhenLarge := func(ctx context.Context, shapes []GlyphShape) (map[int]string, error) {
+	capitalsWhenLarge := func(ctx context.Context, shapes []glyphShape) (map[int]string, error) {
 		labels, _ := synthLabeller(ctx, shapes)
 		for _, s := range shapes {
 			if s.Height > 10 {
@@ -315,7 +315,7 @@ func TestRecoverOutlinesLeavesAnAmbiguousGlyphAlone(t *testing.T) {
 	// neither line has a member to the apostrophe's right.
 	glyphs = append(glyphs, synthGlyph(',', end+2, 505.6, false),
 		scaledGlyph('l', 2, end+5, 500), scaledGlyph('l', 2, end+10, 500.8))
-	barsWhenLarge := func(ctx context.Context, shapes []GlyphShape) (map[int]string, error) {
+	barsWhenLarge := func(ctx context.Context, shapes []glyphShape) (map[int]string, error) {
 		labels, _ := synthLabeller(ctx, shapes)
 		for _, s := range shapes {
 			if s.Height > 10 {
@@ -414,7 +414,7 @@ func TestRecoverOutlinesFeedsTables(t *testing.T) {
 func TestRecoverOutlinesAccountsForEveryGlyph(t *testing.T) {
 	// A stray hyphen far from any line has nowhere to go.
 	doc := synthDoc(t, synthGlyphs(synthText), synthGlyph('-', 400, 300, false))
-	report, err := doc.RecoverOutlines(context.Background(), func(ctx context.Context, shapes []GlyphShape) (map[int]string, error) {
+	report, err := doc.recoverOutlines(context.Background(), func(ctx context.Context, shapes []glyphShape) (map[int]string, error) {
 		labels, _ := synthLabeller(ctx, shapes)
 		for id, l := range labels {
 			switch l {
@@ -459,17 +459,17 @@ func TestRecoverOutlinesIsAllOrNothing(t *testing.T) {
 	before := docText(t, doc)
 
 	failing := errors.New("labeller down")
-	if _, err := doc.RecoverOutlines(context.Background(), func(context.Context, []GlyphShape) (map[int]string, error) {
+	if _, err := doc.recoverOutlines(context.Background(), func(context.Context, []glyphShape) (map[int]string, error) {
 		return nil, failing
 	}); !errors.Is(err, failing) {
 		t.Errorf("labeller error: got %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := doc.RecoverOutlines(ctx, synthLabeller); !errors.Is(err, context.Canceled) {
+	if _, err := doc.recoverOutlines(ctx, synthLabeller); !errors.Is(err, context.Canceled) {
 		t.Errorf("cancelled context: got %v", err)
 	}
-	if _, err := doc.RecoverOutlines(context.Background(), func(context.Context, []GlyphShape) (map[int]string, error) {
+	if _, err := doc.recoverOutlines(context.Background(), func(context.Context, []glyphShape) (map[int]string, error) {
 		return map[int]string{999: "x"}, nil
 	}); err == nil {
 		t.Error("a label for a shape that does not exist was accepted")
@@ -487,7 +487,7 @@ func TestRecoverOutlinesIsAllOrNothing(t *testing.T) {
 
 func TestRecoverOutlinesWithoutCandidates(t *testing.T) {
 	doc := synthDoc(t, nil, "BT /F1 12 Tf 72 700 Td (Only text) Tj ET")
-	text, report := recoverText(t, doc, func(context.Context, []GlyphShape) (map[int]string, error) {
+	text, report := recoverText(t, doc, func(context.Context, []glyphShape) (map[int]string, error) {
 		t.Error("labeller called with no candidates")
 		return nil, nil
 	})
@@ -503,7 +503,7 @@ func TestRemovalNeverSeesRecoveredText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := doc.RecoverOutlines(context.Background(), synthLabeller); err != nil {
+	if _, err := doc.recoverOutlines(context.Background(), synthLabeller); err != nil {
 		t.Fatal(err)
 	}
 	if len(doc.Search("HELLO")) == 0 {
@@ -529,7 +529,7 @@ func TestGlyphSheet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sheet, err := GlyphSheet(shapes)
+	sheet, err := glyphSheet(shapes)
 	if err != nil {
 		t.Fatal(err)
 	}

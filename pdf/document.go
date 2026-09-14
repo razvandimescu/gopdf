@@ -9,7 +9,7 @@ import (
 type Document struct {
 	reader    *Reader
 	pages     []Dict
-	recovered [][]TextSpan // per page, installed by RecoverOutlines
+	recovered [][]TextSpan // per page, installed by recoverOutlines
 }
 
 // Option configures how a PDF is opened.
@@ -100,8 +100,7 @@ type Page struct {
 
 func (p *Page) dict() Dict { return p.doc.pages[p.num] }
 
-// TextSpans returns the raw positioned text spans on this page, followed by any
-// text [Document.RecoverOutlines] recovered from it.
+// TextSpans returns the raw positioned text spans on this page.
 func (p *Page) TextSpans() ([]TextSpan, error) {
 	spans, err := extractPage(p.dict(), p.doc.reader, nil)
 	if err != nil {

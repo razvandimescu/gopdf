@@ -71,7 +71,8 @@ func TestPathCaptureNormalisesEquivalentGeometry(t *testing.T) {
 		},
 		{"0 0 m 5 5 10 10 v f", "0 0 m 0 0 5 5 10 10 c f"},
 		{"0 0 m 1 1 10 10 y f", "0 0 m 1 1 10 10 10 10 c f"},
-		{"0 0 m 5 5 m 9 9 l 5 9 l f", "5 5 m 9 9 l 5 9 l f"}, // a subpath with no segments draws nothing
+		{"0 0 m 5 5 m 9 9 l 5 9 l f", "5 5 m 9 9 l 5 9 l f"},                         // a subpath with no segments draws nothing
+		{"0 0 m 10 0 l 10 10 l h 0 0 m 0 10 l f", "0 0 m 10 0 l 10 10 l h 0 10 l f"}, // after h, a segment starts a new subpath at the old start
 	}
 	for _, group := range equivalent {
 		want := fillsOf(t, group[0])
@@ -103,6 +104,7 @@ func TestPathCaptureRecordsOnlyFills(t *testing.T) {
 		{"0 0 m 10 10 l S", 0, false},
 		{"0 0 10 10 re s", 0, false},
 		{"10 10 l 20 20 l f", 0, false}, // no current point: malformed, dropped
+		{"10 10 re f", 0, false},        // too few operands: malformed, ignored
 	}
 	for _, c := range cases {
 		fills := fillsOf(t, c.content)
@@ -323,6 +325,20 @@ func TestOutlineHint(t *testing.T) {
 	}
 }
 
+// A page whose content cannot be read is an error, not an empty hint.
+func TestOutlineHintReportsUnreadableContent(t *testing.T) {
+	data := buildRawPDF(t, func(w *Writer, pagesRef Ref) Dict {
+		return Dict{"Type": Name("Page"), "Parent": pagesRef, "MediaBox": Array{0, 0, 612, 792}, "Contents": 7}
+	})
+	doc, err := OpenBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := doc.Page(0).OutlineHint(); err == nil {
+		t.Error("got no error for a page whose Contents is not a stream")
+	}
+}
+
 // Collecting paths rides along with text extraction; it must not change a
 // single span. Checked on synthetic content mixing both, on the committed
 // fixtures, and on the private corpus when it is present.
@@ -346,7 +362,7 @@ func TestPathCaptureLeavesTextUnchanged(t *testing.T) {
 	}
 
 	mixed, err := OpenBytes(contentPDF(t, glyphL(20, 700, 0)+
-		"BT /F1 12 Tf 72 650 Td (Total) Tj 40 0 Td (42.00) Tj ET 0 0 612 1 re f "+glyphLTranslated(40, 700, 0.12)))
+		"BT /F1 12 Tf 72 650 Td (Total) Tj 40 0 Td (42.00) Tj ET 0 0 612 1 re f 72 640 m 200 640 l S "+glyphLTranslated(40, 700, 0.12)))
 	if err != nil {
 		t.Fatal(err)
 	}

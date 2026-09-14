@@ -1,6 +1,9 @@
 package pdf
 
-import "math"
+import (
+	"math"
+	"slices"
+)
 
 // Some producers draw every glyph as a filled path — no text operators, no
 // fonts — and such a page extracts as empty. This file captures those fills
@@ -34,6 +37,11 @@ func (s pathSeg) points() [][2]float64 {
 	return s.pts[:1]
 }
 
+func (s pathSeg) end() [2]float64 {
+	p := s.points()
+	return p[len(p)-1]
+}
+
 // filledPath is one path as it was filled, in page space.
 //
 // Equivalent geometry is written one way: re becomes four lines, v and y become
@@ -51,12 +59,10 @@ type filledPath struct {
 type pathCollector struct {
 	cur         []pathSeg
 	start, last [2]float64
-	hasPoint    bool // a current point exists
 	closed      bool // the last subpath was closed; the next segment starts a new one at start
 	fills       []filledPath
 }
 
-// construct applies a path-construction operator to its operands.
 func (c *pathCollector) construct(op string, operands []any) {
 	if c == nil {
 		return
@@ -100,41 +106,46 @@ func (c *pathCollector) construct(op string, operands []any) {
 
 func (c *pathCollector) moveTo(x, y float64) {
 	c.closeSubpath()
-	if n := len(c.cur); n > 0 && c.cur[n-1].op == 'm' {
-		c.cur = c.cur[:n-1] // a subpath with no segments draws nothing
-	}
+	c.dropBareMove()
 	c.cur = append(c.cur, pathSeg{op: 'm', pts: [3][2]float64{{x, y}}})
 	c.start, c.last = [2]float64{x, y}, [2]float64{x, y}
-	c.hasPoint, c.closed = true, false
+	c.closed = false
 }
 
-// segment appends a segment ending at end. A segment with no current point is
-// malformed and dropped; one following a closed subpath starts a new subpath
-// at the old one's start, as the spec has it.
-func (c *pathCollector) segment(s pathSeg, end [2]float64) bool {
-	if !c.hasPoint {
-		return false
+// dropBareMove removes a trailing moveto: a subpath with no segments draws
+// nothing.
+func (c *pathCollector) dropBareMove() {
+	if n := len(c.cur); n > 0 && c.cur[n-1].op == 'm' {
+		c.cur = c.cur[:n-1]
+	}
+}
+
+// segment appends s. A segment with no current point is malformed and
+// dropped; one following a closed subpath starts a new subpath at the old
+// one's start, as the spec has it.
+func (c *pathCollector) segment(s pathSeg) {
+	if len(c.cur) == 0 {
+		return
 	}
 	if c.closed {
 		c.moveTo(c.start[0], c.start[1])
 	}
 	c.cur = append(c.cur, s)
-	c.last = end
-	return true
+	c.last = s.end()
 }
 
 func (c *pathCollector) lineTo(x, y float64) {
-	c.segment(pathSeg{op: 'l', pts: [3][2]float64{{x, y}}}, [2]float64{x, y})
+	c.segment(pathSeg{op: 'l', pts: [3][2]float64{{x, y}}})
 }
 
 func (c *pathCollector) curveTo(x1, y1, x2, y2, x3, y3 float64) {
-	c.segment(pathSeg{op: 'c', pts: [3][2]float64{{x1, y1}, {x2, y2}, {x3, y3}}}, [2]float64{x3, y3})
+	c.segment(pathSeg{op: 'c', pts: [3][2]float64{{x1, y1}, {x2, y2}, {x3, y3}}})
 }
 
 // closeSubpath writes the edge back to the subpath's start, unless the
 // producer already drew it.
 func (c *pathCollector) closeSubpath() {
-	if c == nil || !c.hasPoint || c.closed {
+	if c == nil || len(c.cur) == 0 || c.closed {
 		return
 	}
 	if c.last != c.start {
@@ -150,18 +161,11 @@ func (c *pathCollector) fill(ctm [6]float64, evenOdd bool) {
 		return
 	}
 	c.closeSubpath()
-	if n := len(c.cur); n > 0 && c.cur[n-1].op == 'm' {
-		c.cur = c.cur[:n-1]
-	}
+	c.dropBareMove()
 	if len(c.cur) > 0 {
-		segs := make([]pathSeg, len(c.cur))
-		for i, s := range c.cur {
-			for k := range s.points() {
-				s.pts[k][0], s.pts[k][1] = applyMatrix6(ctm, s.pts[k][0], s.pts[k][1])
-			}
-			segs[i] = s
-		}
-		c.fills = append(c.fills, filledPath{segs: segs, evenOdd: evenOdd})
+		f := filledPath{segs: slices.Clone(c.cur), evenOdd: evenOdd}
+		f.transform(ctm)
+		c.fills = append(c.fills, f)
 	}
 	c.discard()
 }
@@ -173,7 +177,7 @@ func (c *pathCollector) discard() {
 		return
 	}
 	c.cur = c.cur[:0]
-	c.hasPoint, c.closed = false, false
+	c.closed = false
 }
 
 // mark and transformSince bracket a Form XObject: its fills are recorded in
@@ -190,12 +194,12 @@ func (c *pathCollector) transformSince(from int, m [6]float64) {
 	if c == nil {
 		return
 	}
-	for _, f := range c.fills[from:] {
-		f.transform(m)
+	for i := from; i < len(c.fills); i++ {
+		c.fills[i].transform(m)
 	}
 }
 
-func (f filledPath) transform(m [6]float64) {
+func (f *filledPath) transform(m [6]float64) {
 	for i := range f.segs {
 		for k := range f.segs[i].points() {
 			p := &f.segs[i].pts[k]
@@ -270,7 +274,7 @@ func clusterShapes(fills []filledPath) (ids []int, shapes int) {
 		}
 		if id < 0 {
 			id = len(all)
-			all = append(all, spread{lo: append([]float64(nil), v...), hi: append([]float64(nil), v...)})
+			all = append(all, spread{lo: slices.Clone(v), hi: slices.Clone(v)})
 			byKey[key] = append(byKey[key], id)
 		} else {
 			for k, x := range v {

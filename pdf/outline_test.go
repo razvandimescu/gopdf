@@ -190,7 +190,7 @@ func TestPathCaptureFollowsPageRotation(t *testing.T) {
 	if err != nil || len(fills) != 1 {
 		t.Fatalf("got %d fills, err %v", len(fills), err)
 	}
-	spans, _ := doc.Page(0).TextSpans()
+	spans := mustSpans(t, doc.Page(0))
 	first := fills[0].segs[0].pts[0]
 	if !approx(first[0], 200) || !approx(first[1], 512) {
 		t.Errorf("fill starts at (%g, %g), want (200, 512)", first[0], first[1])
@@ -343,12 +343,8 @@ func TestOutlineHintReportsUnreadableContent(t *testing.T) {
 // single span. Checked on synthetic content mixing both, on the committed
 // fixtures, and on the private corpus when it is present.
 func TestPathCaptureLeavesTextUnchanged(t *testing.T) {
-	var docs []string
-	for _, pattern := range []string{"../testdata/*.pdf", filepath.Join(pdfDir, "*.pdf")} {
-		matches, _ := filepath.Glob(pattern)
-		docs = append(docs, matches...)
-	}
-	check := func(name string, doc *Document) {
+	check := func(t *testing.T, name string, doc *Document) {
+		t.Helper()
 		for i, page := range doc.pages {
 			want := ExtractPageText(page, doc.reader)
 			got, err := extractPage(page, doc.reader, &pathCollector{})
@@ -366,15 +362,23 @@ func TestPathCaptureLeavesTextUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	check("mixed", mixed)
+	check(t, "mixed", mixed)
 
-	for _, path := range docs {
-		doc, err := OpenFile(path)
-		if err != nil {
-			continue // unreadable or encrypted fixtures are covered elsewhere
+	checkFiles := func(t *testing.T, paths []string) {
+		for _, path := range paths {
+			doc, err := OpenFile(path)
+			if err != nil {
+				continue // unreadable or encrypted fixtures are covered elsewhere
+			}
+			check(t, filepath.Base(path), doc)
 		}
-		check(filepath.Base(path), doc)
 	}
+	fixtures, _ := filepath.Glob("testdata/*.pdf")
+	if len(fixtures) == 0 {
+		t.Fatal("no committed fixtures in testdata")
+	}
+	checkFiles(t, fixtures)
+	t.Run("corpus", func(t *testing.T) { checkFiles(t, realPDFs(t)) })
 }
 
 // Removal walks the same content without collecting paths. It must delete the

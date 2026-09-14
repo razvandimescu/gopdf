@@ -61,7 +61,6 @@ type filledPath struct {
 type pathCollector struct {
 	cur         []pathSeg
 	start, last [2]float64
-	hasPoint    bool
 	closed      bool // the last subpath was closed; the next segment starts a new one at start
 	fills       []filledPath
 }
@@ -112,7 +111,7 @@ func (c *pathCollector) moveTo(x, y float64) {
 	c.dropBareMove()
 	c.cur = append(c.cur, pathSeg{op: 'm', pts: [3][2]float64{{x, y}}})
 	c.start, c.last = [2]float64{x, y}, [2]float64{x, y}
-	c.hasPoint, c.closed = true, false
+	c.closed = false
 }
 
 // dropBareMove removes a trailing moveto: a subpath with no segments draws
@@ -127,7 +126,7 @@ func (c *pathCollector) dropBareMove() {
 // dropped; one following a closed subpath starts a new subpath at the old
 // one's start, as the spec has it.
 func (c *pathCollector) segment(s pathSeg) {
-	if !c.hasPoint {
+	if len(c.cur) == 0 {
 		return
 	}
 	if c.closed {
@@ -148,7 +147,7 @@ func (c *pathCollector) curveTo(x1, y1, x2, y2, x3, y3 float64) {
 // closeSubpath writes the edge back to the subpath's start, unless the
 // producer already drew it.
 func (c *pathCollector) closeSubpath() {
-	if c == nil || !c.hasPoint || c.closed {
+	if c == nil || len(c.cur) == 0 || c.closed {
 		return
 	}
 	if c.last != c.start {
@@ -180,7 +179,7 @@ func (c *pathCollector) discard() {
 		return
 	}
 	c.cur = c.cur[:0]
-	c.hasPoint, c.closed = false, false
+	c.closed = false
 }
 
 // mark and transformSince bracket a Form XObject: its fills are recorded in
@@ -197,12 +196,12 @@ func (c *pathCollector) transformSince(from int, m [6]float64) {
 	if c == nil {
 		return
 	}
-	for _, f := range c.fills[from:] {
-		f.transform(m)
+	for i := from; i < len(c.fills); i++ {
+		c.fills[i].transform(m)
 	}
 }
 
-func (f filledPath) transform(m [6]float64) {
+func (f *filledPath) transform(m [6]float64) {
 	for i := range f.segs {
 		for k := range f.segs[i].points() {
 			p := &f.segs[i].pts[k]
@@ -265,6 +264,19 @@ func (f filledPath) isGlyphCandidate() bool {
 	x0, y0, x1, y1 := f.bounds()
 	long, short := math.Max(x1-x0, y1-y0), math.Min(x1-x0, y1-y0)
 	return short > 0 && long <= maxGlyphSize && long <= maxGlyphAspect*short
+}
+
+// glyphCandidates picks out the fills sized and shaped like glyphs, with each
+// one's ordinal in the page's paint order. OutlineHint and recovery share it,
+// so the hint describes what recovery will see.
+func glyphCandidates(fills []filledPath) (cands []filledPath, index []int) {
+	for i, f := range fills {
+		if f.isGlyphCandidate() {
+			cands = append(cands, f)
+			index = append(index, i)
+		}
+	}
+	return cands, index
 }
 
 // shapeKey is what two instances of one outline must share exactly.
@@ -366,12 +378,7 @@ func (p *Page) OutlineHint() (OutlineHint, error) {
 	if err != nil {
 		return OutlineHint{}, err
 	}
-	var cands []filledPath
-	for _, f := range fills {
-		if f.isGlyphCandidate() {
-			cands = append(cands, f)
-		}
-	}
+	cands, _ := glyphCandidates(fills)
 	_, shapes := clusterShapes(cands)
 	return OutlineHint{Candidates: len(cands), Shapes: shapes}, nil
 }

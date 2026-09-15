@@ -344,7 +344,14 @@ func (r *Reader) readStreamData(lex *Lexer, d Dict, num, gen int) ([]byte, []byt
 		return nil, nil, fmt.Errorf("stream keyword not found")
 	}
 	dataStart := pos + idx + len("stream")
-	// Skip the EOL after "stream".
+	// Skip the EOL after "stream", and any spaces some producers write before it.
+	eol := dataStart
+	for eol < len(r.data) && (r.data[eol] == ' ' || r.data[eol] == '\t') {
+		eol++
+	}
+	if eol < len(r.data) && (r.data[eol] == '\r' || r.data[eol] == '\n') {
+		dataStart = eol
+	}
 	if dataStart < len(r.data) && r.data[dataStart] == '\r' {
 		dataStart++
 	}

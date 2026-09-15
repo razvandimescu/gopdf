@@ -296,7 +296,13 @@ func outlineHint(t *testing.T, data []byte) OutlineHint {
 }
 
 func TestOutlineHint(t *testing.T) {
-	var varied, few strings.Builder
+	var alphabet, varied, few strings.Builder
+	for i := range 10 {
+		for j := range 3 {
+			// Ten outlines, three of each: each outline is a different width.
+			fmt.Fprintf(&alphabet, "%d %d %g 8 re f\n", 20+12*i, 600-12*j, 1+0.5*float64(i))
+		}
+	}
 	for i := range 25 {
 		// 25 different outlines: each rectangle is a different size.
 		fmt.Fprintf(&varied, "%d 600 %g 8 re f\n", 20+10*i, 1+0.5*float64(i))
@@ -304,7 +310,7 @@ func TestOutlineHint(t *testing.T) {
 	for i := range 10 {
 		few.WriteString(glyphL(float64(20+10*i), 700, 0))
 	}
-	outlined := repeatingOutlines() + "0 0 612 1 re f 50 50 200 40 re f" // a rule and a background are not candidates
+	outlined := alphabet.String() + "0 0 612 1 re f 50 50 200 40 re f" // a rule and a background are not candidates
 
 	cases := []struct {
 		name     string
@@ -312,7 +318,8 @@ func TestOutlineHint(t *testing.T) {
 		want     OutlineHint
 		possible bool
 	}{
-		{"repeating outlines", contentPDF(t, outlined), OutlineHint{Candidates: 30, Shapes: 2}, true},
+		{"repeating outlines", contentPDF(t, outlined), OutlineHint{Candidates: 30, Shapes: 10}, true},
+		{"two marks repeated", contentPDF(t, repeatingOutlines()), OutlineHint{Candidates: 30, Shapes: 2}, false},
 		{"no repetition", contentPDF(t, varied.String()), OutlineHint{Candidates: 25, Shapes: 25}, false},
 		{"too few", contentPDF(t, few.String()), OutlineHint{Candidates: 10, Shapes: 1}, false},
 		{"real text", testPDF(t, "Invoice 42"), OutlineHint{}, false},

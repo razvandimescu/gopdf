@@ -313,12 +313,14 @@ type OutlineHint struct {
 }
 
 // Possible reports whether the candidates repeat enough to suggest text drawn
-// as outlines: at least 20 of them, at least three per distinct outline.
+// as outlines: at least 20 of them, at least three per distinct outline, and
+// at least ten distinct outlines, since text draws many glyphs where a repeated
+// mark or checkbox draws one or two.
 //
-// It is a hint, not a verdict. Repeated icons, checkbox grids and diagrams
-// satisfy it too, and a page with only a few outlined words does not.
+// It is a hint, not a verdict. A page of varied repeated symbols satisfies it
+// too, and a page with only a few outlined words does not.
 func (h OutlineHint) Possible() bool {
-	return h.Candidates >= 20 && h.Candidates >= 3*h.Shapes
+	return h.Candidates >= 20 && h.Candidates >= 3*h.Shapes && h.Shapes >= 10
 }
 
 // OutlineHint measures the page's glyph-sized fills. Text extraction is

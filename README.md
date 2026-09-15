@@ -229,7 +229,7 @@ if hint.Possible() {
 }
 ```
 
-It is a hint, not a verdict: repeated icons and checkbox grids satisfy it too.
+It is a hint, not a verdict: a page of varied repeated symbols satisfies it too.
 
 ### Encrypted PDFs
 

@@ -1,6 +1,9 @@
 package pdf
 
-import "os"
+import (
+	"fmt"
+	"os"
+)
 
 // Document represents an opened PDF file.
 type Document struct {
@@ -78,7 +81,7 @@ func (d *Document) Text() (string, error) {
 		p := d.Page(i)
 		text, err := p.Text()
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("page %d: %w", i+1, err)
 		}
 		if i > 0 {
 			result += "\n"

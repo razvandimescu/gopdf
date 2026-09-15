@@ -370,6 +370,9 @@ func TestUnreadableContentIsReportedAlike(t *testing.T) {
 		if _, err := page.TextSpans(); (err != nil) != c.wantErr {
 			t.Errorf("%s: TextSpans error = %v, want error %v", c.name, err, c.wantErr)
 		}
+		if _, err := doc.Text(); (err != nil) != c.wantErr || err != nil && !strings.HasPrefix(err.Error(), "page 1: ") {
+			t.Errorf("%s: Document.Text error = %v, want error %v naming page 1", c.name, err, c.wantErr)
+		}
 	}
 }
 

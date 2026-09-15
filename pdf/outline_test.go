@@ -326,19 +326,31 @@ func TestOutlineHint(t *testing.T) {
 }
 
 // A page whose content cannot be read is an error, not an empty result, and
-// text and outline hints agree on which pages those are. A Contents that
-// resolves to null is no content, not unreadable content.
+// text and outline hints agree on which pages those are. Null, or a reference
+// to an object the file does not define, is no content, not unreadable content.
 func TestUnreadableContentIsReportedAlike(t *testing.T) {
+	broken := func(w *Writer) Ref {
+		ref := w.AllocRef()
+		w.WriteObject(ref, &Stream{Dict: Dict{"Filter": Name("FlateDecode"), "Length": 7}, Data: []byte("garbage")})
+		return ref
+	}
 	for _, c := range []struct {
 		name     string
-		contents any
+		contents func(w *Writer) any
 		wantErr  bool
 	}{
-		{"not a stream", 7, true},
-		{"missing object", Ref{Num: 99}, false},
+		{"not a stream", func(*Writer) any { return 7 }, true},
+		{"broken stream", func(w *Writer) any { return broken(w) }, true},
+		{"broken stream in an array", func(w *Writer) any {
+			ref := w.AllocRef()
+			w.WriteStream(ref, Dict{}, []byte("BT ET"))
+			return Array{ref, broken(w)}
+		}, true},
+		{"missing object", func(*Writer) any { return Ref{Num: 99} }, false},
+		{"null", func(*Writer) any { return nil }, false},
 	} {
 		data := buildRawPDF(t, func(w *Writer, pagesRef Ref) Dict {
-			return Dict{"Type": Name("Page"), "Parent": pagesRef, "MediaBox": Array{0, 0, 612, 792}, "Contents": c.contents}
+			return Dict{"Type": Name("Page"), "Parent": pagesRef, "MediaBox": Array{0, 0, 612, 792}, "Contents": c.contents(w)}
 		})
 		doc, err := OpenBytes(data)
 		if err != nil {

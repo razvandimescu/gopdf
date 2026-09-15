@@ -904,24 +904,47 @@ func (r *Reader) PageContent(page Dict) ([]byte, error) {
 	}
 
 	switch c := r.Resolve(contents).(type) {
-	case nil: // null, or a reference to a missing object: no content
-		return nil, nil
-	case *Stream:
-		return c.Data, nil
 	case Array:
 		// Multiple content streams — concatenate.
 		var buf bytes.Buffer
 		for _, item := range c {
-			resolved := r.Resolve(item)
-			if s, ok := resolved.(*Stream); ok {
-				buf.Write(s.Data)
+			data, err := r.contentStream(item)
+			if err != nil {
+				return nil, err
+			}
+			if data != nil {
+				buf.Write(data)
 				buf.WriteByte('\n')
 			}
 		}
 		return buf.Bytes(), nil
 	default:
+		return r.contentStream(contents)
+	}
+}
+
+// contentStream reads one content stream. Null, or a reference to an object
+// the file does not define, is no content; an object it defines but that cannot
+// be read is an error, not an empty page.
+func (r *Reader) contentStream(obj any) ([]byte, error) {
+	switch c := r.Resolve(obj).(type) {
+	case *Stream:
+		return c.Data, nil
+	case nil:
+		if ref, ok := obj.(Ref); ok && r.defines(ref) {
+			return nil, fmt.Errorf("content stream %d %d R cannot be read", ref.Num, ref.Gen)
+		}
+		return nil, nil
+	default:
 		return nil, fmt.Errorf("unexpected Contents type: %T", c)
 	}
+}
+
+// defines reports whether the xref has an in-use entry for ref.
+func (r *Reader) defines(ref Ref) bool {
+	_, inFile := r.xref[ref.Num]
+	_, inObjStm := r.compressed[ref.Num]
+	return inFile || inObjStm
 }
 
 // PageFonts returns the font dictionary for a page (from Resources).

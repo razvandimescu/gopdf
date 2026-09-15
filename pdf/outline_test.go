@@ -325,17 +325,32 @@ func TestOutlineHint(t *testing.T) {
 	}
 }
 
-// A page whose content cannot be read is an error, not an empty hint.
-func TestOutlineHintReportsUnreadableContent(t *testing.T) {
-	data := buildRawPDF(t, func(w *Writer, pagesRef Ref) Dict {
-		return Dict{"Type": Name("Page"), "Parent": pagesRef, "MediaBox": Array{0, 0, 612, 792}, "Contents": 7}
-	})
-	doc, err := OpenBytes(data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := doc.Page(0).OutlineHint(); err == nil {
-		t.Error("got no error for a page whose Contents is not a stream")
+// A page whose content cannot be read is an error, not an empty result, and
+// text and outline hints agree on which pages those are. A Contents that
+// resolves to null is no content, not unreadable content.
+func TestUnreadableContentIsReportedAlike(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		contents any
+		wantErr  bool
+	}{
+		{"not a stream", 7, true},
+		{"missing object", Ref{Num: 99}, false},
+	} {
+		data := buildRawPDF(t, func(w *Writer, pagesRef Ref) Dict {
+			return Dict{"Type": Name("Page"), "Parent": pagesRef, "MediaBox": Array{0, 0, 612, 792}, "Contents": c.contents}
+		})
+		doc, err := OpenBytes(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		page := doc.Page(0)
+		if _, err := page.OutlineHint(); (err != nil) != c.wantErr {
+			t.Errorf("%s: OutlineHint error = %v, want error %v", c.name, err, c.wantErr)
+		}
+		if _, err := page.TextSpans(); (err != nil) != c.wantErr {
+			t.Errorf("%s: TextSpans error = %v, want error %v", c.name, err, c.wantErr)
+		}
 	}
 }
 

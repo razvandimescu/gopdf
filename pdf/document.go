@@ -97,8 +97,7 @@ type Page struct {
 
 // TextSpans returns the raw positioned text spans on this page.
 func (p *Page) TextSpans() ([]TextSpan, error) {
-	spans := ExtractPageText(p.dict, p.reader)
-	return spans, nil
+	return extractPage(p.dict, p.reader, nil)
 }
 
 // TextLines returns text grouped into spatial lines (sorted top-to-bottom).

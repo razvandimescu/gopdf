@@ -897,6 +897,8 @@ func (r *Reader) PageContent(page Dict) ([]byte, error) {
 	}
 
 	switch c := r.Resolve(contents).(type) {
+	case nil: // null, or a reference to a missing object: no content
+		return nil, nil
 	case *Stream:
 		return c.Data, nil
 	case Array:

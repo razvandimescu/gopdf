@@ -3,6 +3,7 @@ package pdf
 import (
 	"fmt"
 	"os"
+	"strings"
 )
 
 // Document represents an opened PDF file.
@@ -118,14 +119,11 @@ func (p *Page) Text() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var result string
+	texts := make([]string, len(lines))
 	for i, line := range lines {
-		if i > 0 {
-			result += "\n"
-		}
-		result += line.Text
+		texts[i] = line.Text
 	}
-	return result, nil
+	return strings.Join(texts, "\n"), nil
 }
 
 // Tables auto-detects all tables on this page.

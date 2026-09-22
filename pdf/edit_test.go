@@ -612,3 +612,48 @@ func TestOverlayAndRedactCombined(t *testing.T) {
 		t.Error("overlay text not found")
 	}
 }
+
+// A match is placed by the glyphs that drew it, once, whatever angle the text
+// runs at, so a region taken from Search removes the match and nothing else.
+func TestSearchPlacesTheGlyphs(t *testing.T) {
+	// Helvetica at 12pt: "Hello" is 27.336 wide, the kern 3.6, "World" 31.332.
+	for _, tc := range []struct {
+		name, tm string
+		want     Rect
+	}{
+		{"level", "1 0 0 1 72 700 Tm", Rect{X: 102.936, Y: 697.6, Width: 31.332, Height: 14.4}},
+		{"up the page", "0 1 -1 0 300 100 Tm", Rect{X: 288, Y: 130.936, Width: 14.4, Height: 31.332}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := contentPDF(t, "BT /F1 12 Tf "+tc.tm+" [(Hello) -300 (World)] TJ ET")
+			doc, err := OpenBytes(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			hits := doc.Search("World")
+			if len(hits) != 1 {
+				t.Fatalf("got %d results, want 1: %+v", len(hits), hits)
+			}
+			got := hits[0].Rect
+			for _, d := range []float64{got.X - tc.want.X, got.Y - tc.want.Y, got.Width - tc.want.Width, got.Height - tc.want.Height} {
+				if math.Abs(d) > 0.01 {
+					t.Fatalf("rect %+v, want %+v", got, tc.want)
+				}
+			}
+
+			ed := NewEditor(data)
+			ed.RemoveRegion(0, got)
+			out, err := ed.Apply()
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := OpenBytes(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if text := strings.TrimSpace(docText(t, result)); text != "Hello" {
+				t.Errorf("removing the region left %q, want %q", text, "Hello")
+			}
+		})
+	}
+}

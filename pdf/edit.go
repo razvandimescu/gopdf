@@ -83,7 +83,7 @@ func glyphBounds(from []source) (Rect, float64, bool) {
 		if size == 0 {
 			size = fs
 		}
-		sin, cos := math.Sincos(float64(src.run.angle) * math.Pi / 180)
+		sin, cos := math.Sincos(src.run.angle * math.Pi / 180)
 		for _, g := range src.glyphs {
 			for _, pen := range [][2]float64{{g.x0, g.y0}, {g.x1, g.y1}} {
 				for _, up := range []float64{-0.2 * fs, fs} {

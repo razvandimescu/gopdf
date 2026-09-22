@@ -1,6 +1,7 @@
 package pdf
 
 import (
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -223,5 +224,25 @@ func TestRotatedTextReadsAlongItsBaseline(t *testing.T) {
 				t.Errorf("removal assembled the page differently and left %q", text)
 			}
 		})
+	}
+}
+
+// A long baseline between whole degrees is still one line: 40 glyphs drawn
+// one at a time at 30.49° climb 2pt off a 30° baseline, twice the tolerance.
+func TestSlantedBaselineIsOneLine(t *testing.T) {
+	cos, sin := math.Cos(30.49*math.Pi/180), math.Sin(30.49*math.Pi/180)
+	var tj, want strings.Builder
+	for i := range 40 {
+		c := string(rune('A' + i%26))
+		tj.WriteString("(" + c + ")")
+		want.WriteString(c)
+	}
+	data := contentPDF(t, fmt.Sprintf("BT /F1 10 Tf %.5f %.5f %.5f %.5f 100 100 Tm [%s] TJ ET", cos, sin, -sin, cos, tj.String()))
+	doc, err := OpenBytes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := strings.TrimSpace(docText(t, doc)); text != want.String() {
+		t.Errorf("got %q, want %q", text, want.String())
 	}
 }

@@ -215,14 +215,15 @@ func (r *showRecorder) assembleText() (string, []source) {
 	for i, run := range r.runs {
 		spans[i] = run.TextSpan
 	}
-	for n, line := range readLines(spans) {
+	lines, up := readLines(spans)
+	for n, line := range lines {
 		if n > 0 {
 			spell("\n", source{})
 		}
 		for i, index := range line {
 			run := &r.runs[index]
 			if i > 0 {
-				spell(spanGap(spans[line[i-1]], run.TextSpan), source{})
+				spell(spanGap(up[line[i-1]], up[index]), source{})
 			}
 			runes := utf8.RuneCountInString(run.Text)
 			for at, j := 0, 0; at < len(run.Text); j++ {

@@ -21,10 +21,11 @@ type TextSpan struct {
 	// FontSize. Zero on spans built outside the extractor.
 	emWidth float64
 
-	// angle is the direction the baseline runs in, in whole degrees
-	// anticlockwise from left to right; endY pairs with EndX. Both are zero on
-	// spans built outside the extractor, which read left to right.
-	angle int
+	// angle is the direction the baseline runs in, in degrees anticlockwise
+	// from left to right, in [-135, 225): no common direction sits at the
+	// wrap. endY pairs with EndX. Both are zero on spans built outside the
+	// extractor, which read left to right.
+	angle float64
 	endY  float64
 }
 
@@ -381,12 +382,15 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 
 	// drawnEm is the em as drawn on the page: its height, its width along the
 	// baseline, and the baseline's direction.
-	drawnEm := func() (height, width float64, angle int) {
+	drawnEm := func() (height, width, angle float64) {
 		trm := matMul6(tm, ctm)
-		degrees := math.Round(math.Atan2(trm[1], trm[0]) * 180 / math.Pi)
+		angle = math.Atan2(trm[1], trm[0]) * 180 / math.Pi
+		if angle < -135 {
+			angle += 360
+		}
 		return fontSize * math.Hypot(trm[2], trm[3]),
 			fontSize * th / 100 * math.Hypot(trm[0], trm[1]),
-			(int(degrees) + 360) % 360
+			angle
 	}
 
 	showString := func(s string) {
@@ -922,14 +926,14 @@ const lineYTolerance = 1.0
 
 // spanGap is the whitespace that stands in for the horizontal distance between
 // two spans on one line. PDF draws words where it wants them and says nothing
-// about the spaces between; the gap is all there is to go on.
+// about the spaces between; the gap is all there is to go on. The spans are
+// as readLines turned them, their baseline running left to right.
 //
 // Both the reader's view of a page and redaction's view of it are assembled
 // with this rule. They have to agree: removal locates text by searching what
 // the page says, so a space one of them inserts and the other does not is a
 // query that Page.Search answers and RemoveText silently does not.
 func spanGap(prev, cur TextSpan) string {
-	prev, cur = prev.upright(), cur.upright()
 	gap, em := cur.X-prev.end(), cur.em()
 	spaceWidth := math.Max(em*0.25, 2)
 	if gap > spaceWidth {
@@ -955,13 +959,13 @@ func (s TextSpan) end() float64 {
 	return s.X + float64(utf8.RuneCountInString(s.Text))*s.em()*0.5
 }
 
-// upright is the span turned so its baseline runs left to right. Text drawn at
-// an angle is grouped and spaced in that frame, as level text is on the page.
-func (s TextSpan) upright() TextSpan {
-	if s.angle == 0 {
+// turned is the span turned clockwise by degrees, which lays a baseline
+// running in that direction left to right.
+func (s TextSpan) turned(degrees float64) TextSpan {
+	if degrees == 0 {
 		return s
 	}
-	sin, cos := math.Sincos(float64(s.angle) * math.Pi / 180)
+	sin, cos := math.Sincos(degrees * math.Pi / 180)
 	turn := func(x, y float64) (float64, float64) {
 		return x*cos + y*sin, y*cos - x*sin
 	}
@@ -970,56 +974,73 @@ func (s TextSpan) upright() TextSpan {
 	return s
 }
 
+// angleTolerance is how far apart, in degrees, two baselines may run and
+// still be read as running the same way.
+const angleTolerance = 1.0
+
 // readLines groups spans into lines, as indexes into spans, in reading order:
 // lines down the page, and each line's spans along its baseline. Spans are
 // grouped by the direction they run in before their baseline, so a label drawn
 // up the side of a drawing is one line rather than a column of one-glyph
-// lines. Redaction assembles its view of the page with this too, so the two
-// views read the page in the same order.
-func readLines(spans []TextSpan) [][]int {
-	up := make([]TextSpan, len(spans))
+// lines. Each direction is turned level before its lines are found, and up
+// holds the spans as turned: word gaps are measured in that frame. Redaction
+// and Page.Search assemble their view of the page with this too, so all of
+// them read the page the same way.
+func readLines(spans []TextSpan) (lines [][]int, up []TextSpan) {
 	order := make([]int, len(spans))
-	for i, s := range spans {
-		up[i], order[i] = s.upright(), i
+	for i := range order {
+		order[i] = i
 	}
-	sort.SliceStable(order, func(a, b int) bool {
-		sa, sb := up[order[a]], up[order[b]]
-		if sa.angle != sb.angle {
-			return sa.angle < sb.angle
-		}
-		return sa.Y > sb.Y
-	})
+	sort.SliceStable(order, func(a, b int) bool { return spans[order[a]].angle < spans[order[b]].angle })
 
-	// Measured against the first span of the line rather than the previous
-	// one, so a drifting baseline does not walk a line apart one span at a
-	// time. Kept tight so overlapping text layers stay apart.
-	var lines [][]int
-	for i, start := 1, 0; i <= len(order); i++ {
-		first := up[order[start]]
-		if i < len(order) && up[order[i]].angle == first.angle && math.Abs(up[order[i]].Y-first.Y) <= lineYTolerance {
-			continue
+	up = make([]TextSpan, len(spans))
+	for start := 0; start < len(order); {
+		end := start + 1
+		for end < len(order) && spans[order[end]].angle-spans[order[start]].angle <= angleTolerance {
+			end++
 		}
-		line := order[start:i:i]
-		sort.SliceStable(line, func(a, b int) bool { return up[line[a]].X < up[line[b]].X })
-		lines = append(lines, line)
-		start = i
+		// Turned by the direction the middle of them runs in, not a rounded
+		// one: a long baseline turned by a fraction of a degree too little
+		// climbs out of its own line. A level page with a few skewed spans
+		// stays level.
+		group := order[start:end]
+		turn := spans[group[len(group)/2]].angle
+		for _, i := range group {
+			up[i] = spans[i].turned(turn)
+		}
+		sort.SliceStable(group, func(a, b int) bool { return up[group[a]].Y > up[group[b]].Y })
+
+		// Measured against the first span of the line rather than the
+		// previous one, so a drifting baseline does not walk a line apart one
+		// span at a time. Kept tight so overlapping text layers stay apart.
+		for i, first := 1, 0; i <= len(group); i++ {
+			if i < len(group) && math.Abs(up[group[i]].Y-up[group[first]].Y) <= lineYTolerance {
+				continue
+			}
+			line := group[first:i:i]
+			sort.SliceStable(line, func(a, b int) bool { return up[line[a]].X < up[line[b]].X })
+			lines = append(lines, line)
+			first = i
+		}
+		start = end
 	}
 	sort.SliceStable(lines, func(a, b int) bool {
 		return spans[lines[a][0]].Y > spans[lines[b][0]].Y
 	})
-	return lines
+	return lines, up
 }
 
 // BuildLines groups text spans into lines and reconstructs text. A line's Y
 // is where its first span starts.
 func BuildLines(spans []TextSpan) []TextLine {
 	var lines []TextLine
-	for _, indexes := range readLines(spans) {
+	found, up := readLines(spans)
+	for _, indexes := range found {
 		line := TextLine{Y: spans[indexes[0]].Y}
 		var buf strings.Builder
 		for j, i := range indexes {
 			if j > 0 {
-				buf.WriteString(spanGap(spans[indexes[j-1]], spans[i]))
+				buf.WriteString(spanGap(up[indexes[j-1]], up[i]))
 			}
 			buf.WriteString(spans[i].Text)
 			line.Spans = append(line.Spans, spans[i])

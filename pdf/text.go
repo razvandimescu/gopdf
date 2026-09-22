@@ -2,6 +2,7 @@ package pdf
 
 import (
 	"cmp"
+	"maps"
 	"math"
 	"slices"
 	"strconv"
@@ -983,6 +984,14 @@ type placed struct {
 	gap  string
 }
 
+// readLine is one line in reading order. main is the span of the text the
+// line is set in, its largest: where a superscript or subscript sits is no
+// guide to where the line is.
+type readLine struct {
+	main  int
+	spans []placed
+}
+
 // readLines groups spans into lines in reading order: lines down the page,
 // and each line's spans along its baseline. Spans are grouped by the direction
 // they run in before their baseline, so a label drawn up the side of a drawing
@@ -990,7 +999,7 @@ type placed struct {
 // turned level before its lines are found, and its gaps measured. The reader,
 // redaction and Page.Search all read the page through this, so they read it
 // the same way.
-func readLines(spans []TextSpan) [][]placed {
+func readLines(spans []TextSpan) []readLine {
 	order := make([]int, len(spans))
 	for i := range order {
 		order[i] = i
@@ -998,7 +1007,7 @@ func readLines(spans []TextSpan) [][]placed {
 	slices.SortStableFunc(order, func(a, b int) int { return cmp.Compare(spans[a].angle, spans[b].angle) })
 
 	up := make([]TextSpan, len(spans))
-	var lines [][]placed
+	var lines []readLine
 	for start := 0; start < len(order); {
 		end := start + 1
 		for end < len(order) && spans[order[end]].angle-spans[order[start]].angle <= angleTolerance {
@@ -1018,38 +1027,161 @@ func readLines(spans []TextSpan) [][]placed {
 		// Measured against the first span of the line rather than the
 		// previous one, so a drifting baseline does not walk a line apart one
 		// span at a time. Kept tight so overlapping text layers stay apart.
+		var found [][]int
 		for i, first := 1, 0; i <= len(group); i++ {
 			if i < len(group) && math.Abs(up[group[i]].Y-up[group[first]].Y) <= lineYTolerance {
 				continue
 			}
-			line := group[first:i]
+			found = append(found, group[first:i:i])
+			first = i
+		}
+
+		for _, line := range attachRaised(found, up) {
+			if len(line) == 0 {
+				continue
+			}
 			slices.SortStableFunc(line, func(a, b int) int { return cmp.Compare(up[a].X, up[b].X) })
-			read := make([]placed, len(line))
+			read := readLine{main: line[0], spans: make([]placed, len(line))}
 			for k, span := range line {
-				read[k].span = span
+				read.spans[k].span = span
 				if k > 0 {
-					read[k].gap = spanGap(up[line[k-1]], up[span])
+					read.spans[k].gap = spanGap(up[line[k-1]], up[span])
+				}
+				if up[span].FontSize > up[read.main].FontSize {
+					read.main = span
 				}
 			}
 			lines = append(lines, read)
-			first = i
 		}
 		start = end
 	}
-	slices.SortStableFunc(lines, func(a, b []placed) int {
-		return cmp.Compare(spans[b[0].span].Y, spans[a[0].span].Y)
+	slices.SortStableFunc(lines, func(a, b readLine) int {
+		return cmp.Compare(spans[b.main].Y, spans[a.main].Y)
 	})
 	return lines
 }
 
+// A span set at most raisedSize of a line's text size, and no more than
+// raisedAbove of that size above the line's baseline or raisedBelow below it,
+// is a superscript or subscript on the line.
+const (
+	raisedSize  = 0.8
+	raisedAbove = 0.7
+	raisedBelow = 0.35
+	raisedGap   = 0.3 // at most this far after the text, in ems of it
+)
+
+// attachRaised moves each superscript and subscript into the line it is set
+// on. They sit further off the baseline than a line may drift, but never at
+// the size of the text they belong to, which is what tells them from a line
+// of their own: same-sized text stays apart however close. They also follow
+// the line's text, so smaller text elsewhere at a similar height stays where
+// it is. Touching text moves or stays together, so a word is not taken apart
+// for a glyph at its end, and a line moves only when all of it does. lines run
+// down the page; text that fits two lines goes to the nearer baseline.
+func attachRaised(lines [][]int, up []TextSpan) [][]int {
+	type text struct{ y, size float64 }
+	main := make([]text, len(lines))
+	var largest float64
+	for i, line := range lines {
+		for _, s := range line {
+			if up[s].FontSize > main[i].size {
+				main[i] = text{up[s].Y, up[s].FontSize}
+			}
+		}
+		largest = max(largest, main[i].size)
+	}
+	// follows is whether run is set against the end of one of line's spans,
+	// less than a space after it, and clear of all of them: where an exponent,
+	// an index or a footnote mark goes. Smaller text in a column beside the
+	// line starts before any of it, a caption beside a heading is spaced off
+	// it, and text drawn across the line overlaps it.
+	follows := func(run, line []int, size float64) bool {
+		after, overlap := false, 0.1*size
+		for _, t := range line {
+			for _, s := range run {
+				if up[s].X < up[t].end()-overlap && up[s].end() > up[t].X+overlap {
+					return false
+				}
+			}
+			after = after || up[run[0]].X >= up[t].X && up[run[0]].X <= up[t].end()+raisedGap*size
+		}
+		return after
+	}
+
+	// hostOf is the line run, from line i, is a superscript or subscript
+	// on, or -1.
+	hostOf := func(run []int, i int) int {
+		var size float64
+		for _, s := range run {
+			size = max(size, up[s].FontSize)
+		}
+		if size <= 0 || size > raisedSize*largest || size <= raisedSize*main[i].size {
+			return -1
+		}
+		best, nearest := -1, math.Inf(1)
+		for _, step := range [2]int{-1, 1} {
+			for j := i + step; j >= 0 && j < len(lines); j += step {
+				dy := up[run[0]].Y - main[j].y
+				if math.Abs(dy) > raisedAbove*largest+lineYTolerance {
+					break
+				}
+				host := main[j].size
+				if size <= raisedSize*host && dy <= raisedAbove*host && dy >= -raisedBelow*host &&
+					math.Abs(dy) < nearest && follows(run, lines[j], host) {
+					best, nearest = j, math.Abs(dy)
+				}
+			}
+		}
+		return best
+	}
+
+	dest := make(map[int]int)
+	for i, line := range lines {
+		slices.SortStableFunc(line, func(a, b int) int { return cmp.Compare(up[a].X, up[b].X) })
+		hosts := make(map[int]int, len(line))
+		for start := 0; start < len(line); {
+			end := start + 1
+			for end < len(line) && up[line[end]].X-up[line[end-1]].end() <= up[line[end-1]].FontSize {
+				end++
+			}
+			h := hostOf(line[start:end], i)
+			if h < 0 {
+				// A line of text in its own right keeps what it has.
+				clear(hosts)
+				break
+			}
+			for _, s := range line[start:end] {
+				hosts[s] = h
+			}
+			start = end
+		}
+		maps.Copy(dest, hosts)
+	}
+	if len(dest) == 0 {
+		return lines
+	}
+	moved := make([][]int, len(lines))
+	for i, line := range lines {
+		for _, s := range line {
+			j, ok := dest[s]
+			if !ok {
+				j = i
+			}
+			moved[j] = append(moved[j], s)
+		}
+	}
+	return moved
+}
+
 // BuildLines groups text spans into lines and reconstructs text. A line's Y
-// is where its first span starts.
+// is the baseline of the text it is set in, its largest.
 func BuildLines(spans []TextSpan) []TextLine {
 	var lines []TextLine
 	for _, read := range readLines(spans) {
-		line := TextLine{Y: spans[read[0].span].Y, Spans: make([]TextSpan, 0, len(read))}
+		line := TextLine{Y: spans[read.main].Y, Spans: make([]TextSpan, 0, len(read.spans))}
 		var text strings.Builder
-		for _, p := range read {
+		for _, p := range read.spans {
 			text.WriteString(p.gap)
 			text.WriteString(spans[p.span].Text)
 			line.Spans = append(line.Spans, spans[p.span])

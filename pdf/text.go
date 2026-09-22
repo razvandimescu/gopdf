@@ -1,8 +1,9 @@
 package pdf
 
 import (
+	"cmp"
 	"math"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -21,8 +22,8 @@ type TextSpan struct {
 	// FontSize. Zero on spans built outside the extractor.
 	emWidth float64
 
-	// angle is the direction the baseline runs in, in degrees anticlockwise
-	// from left to right, in [-135, 225): no common direction sits at the
+	// angle is the direction the baseline runs in, in radians anticlockwise
+	// from left to right, in [-3π/4, 5π/4): no common direction sits at the
 	// wrap. endY pairs with EndX. Both are zero on spans built outside the
 	// extractor, which read left to right.
 	angle float64
@@ -384,9 +385,9 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 	// baseline, and the baseline's direction.
 	drawnEm := func() (height, width, angle float64) {
 		trm := matMul6(tm, ctm)
-		angle = math.Atan2(trm[1], trm[0]) * 180 / math.Pi
-		if angle < -135 {
-			angle += 360
+		angle = math.Atan2(trm[1], trm[0])
+		if angle < -3*math.Pi/4 {
+			angle += 2 * math.Pi
 		}
 		return fontSize * math.Hypot(trm[2], trm[3]),
 			fontSize * th / 100 * math.Hypot(trm[0], trm[1]),
@@ -959,13 +960,10 @@ func (s TextSpan) end() float64 {
 	return s.X + float64(utf8.RuneCountInString(s.Text))*s.em()*0.5
 }
 
-// turned is the span turned clockwise by degrees, which lays a baseline
-// running in that direction left to right.
-func (s TextSpan) turned(degrees float64) TextSpan {
-	if degrees == 0 {
-		return s
-	}
-	sin, cos := math.Sincos(degrees * math.Pi / 180)
+// turned is the span turned clockwise by angle, which lays a baseline running
+// in that direction left to right.
+func (s TextSpan) turned(angle float64) TextSpan {
+	sin, cos := math.Sincos(angle)
 	turn := func(x, y float64) (float64, float64) {
 		return x*cos + y*sin, y*cos - x*sin
 	}
@@ -974,26 +972,33 @@ func (s TextSpan) turned(degrees float64) TextSpan {
 	return s
 }
 
-// angleTolerance is how far apart, in degrees, two baselines may run and
+// angleTolerance is how far apart two baselines may run, in radians, and
 // still be read as running the same way.
-const angleTolerance = 1.0
+const angleTolerance = math.Pi / 180
 
-// readLines groups spans into lines, as indexes into spans, in reading order:
-// lines down the page, and each line's spans along its baseline. Spans are
-// grouped by the direction they run in before their baseline, so a label drawn
-// up the side of a drawing is one line rather than a column of one-glyph
-// lines. Each direction is turned level before its lines are found, and up
-// holds the spans as turned: word gaps are measured in that frame. Redaction
-// and Page.Search assemble their view of the page with this too, so all of
-// them read the page the same way.
-func readLines(spans []TextSpan) (lines [][]int, up []TextSpan) {
+// placed is a span's place in reading order: its index, and the whitespace
+// between it and the span before it on the line.
+type placed struct {
+	span int
+	gap  string
+}
+
+// readLines groups spans into lines in reading order: lines down the page,
+// and each line's spans along its baseline. Spans are grouped by the direction
+// they run in before their baseline, so a label drawn up the side of a drawing
+// is one line rather than a column of one-glyph lines; each direction is
+// turned level before its lines are found, and its gaps measured. The reader,
+// redaction and Page.Search all read the page through this, so they read it
+// the same way.
+func readLines(spans []TextSpan) [][]placed {
 	order := make([]int, len(spans))
 	for i := range order {
 		order[i] = i
 	}
-	sort.SliceStable(order, func(a, b int) bool { return spans[order[a]].angle < spans[order[b]].angle })
+	slices.SortStableFunc(order, func(a, b int) int { return cmp.Compare(spans[a].angle, spans[b].angle) })
 
-	up = make([]TextSpan, len(spans))
+	up := make([]TextSpan, len(spans))
+	var lines [][]placed
 	for start := 0; start < len(order); {
 		end := start + 1
 		for end < len(order) && spans[order[end]].angle-spans[order[start]].angle <= angleTolerance {
@@ -1008,7 +1013,7 @@ func readLines(spans []TextSpan) (lines [][]int, up []TextSpan) {
 		for _, i := range group {
 			up[i] = spans[i].turned(turn)
 		}
-		sort.SliceStable(group, func(a, b int) bool { return up[group[a]].Y > up[group[b]].Y })
+		slices.SortStableFunc(group, func(a, b int) int { return cmp.Compare(up[b].Y, up[a].Y) })
 
 		// Measured against the first span of the line rather than the
 		// previous one, so a drifting baseline does not walk a line apart one
@@ -1017,35 +1022,39 @@ func readLines(spans []TextSpan) (lines [][]int, up []TextSpan) {
 			if i < len(group) && math.Abs(up[group[i]].Y-up[group[first]].Y) <= lineYTolerance {
 				continue
 			}
-			line := group[first:i:i]
-			sort.SliceStable(line, func(a, b int) bool { return up[line[a]].X < up[line[b]].X })
-			lines = append(lines, line)
+			line := group[first:i]
+			slices.SortStableFunc(line, func(a, b int) int { return cmp.Compare(up[a].X, up[b].X) })
+			read := make([]placed, len(line))
+			for k, span := range line {
+				read[k].span = span
+				if k > 0 {
+					read[k].gap = spanGap(up[line[k-1]], up[span])
+				}
+			}
+			lines = append(lines, read)
 			first = i
 		}
 		start = end
 	}
-	sort.SliceStable(lines, func(a, b int) bool {
-		return spans[lines[a][0]].Y > spans[lines[b][0]].Y
+	slices.SortStableFunc(lines, func(a, b []placed) int {
+		return cmp.Compare(spans[b[0].span].Y, spans[a[0].span].Y)
 	})
-	return lines, up
+	return lines
 }
 
 // BuildLines groups text spans into lines and reconstructs text. A line's Y
 // is where its first span starts.
 func BuildLines(spans []TextSpan) []TextLine {
 	var lines []TextLine
-	found, up := readLines(spans)
-	for _, indexes := range found {
-		line := TextLine{Y: spans[indexes[0]].Y}
-		var buf strings.Builder
-		for j, i := range indexes {
-			if j > 0 {
-				buf.WriteString(spanGap(up[indexes[j-1]], up[i]))
-			}
-			buf.WriteString(spans[i].Text)
-			line.Spans = append(line.Spans, spans[i])
+	for _, read := range readLines(spans) {
+		line := TextLine{Y: spans[read[0].span].Y, Spans: make([]TextSpan, 0, len(read))}
+		var text strings.Builder
+		for _, p := range read {
+			text.WriteString(p.gap)
+			text.WriteString(spans[p.span].Text)
+			line.Spans = append(line.Spans, spans[p.span])
 		}
-		line.Text = buf.String()
+		line.Text = text.String()
 		lines = append(lines, line)
 	}
 	return lines

@@ -54,6 +54,9 @@ func (d *Document) Search(query string) []SearchResult {
 // reads, and places each by the glyphs that drew it: the ones RemoveText
 // deletes for the same query.
 func (p *Page) Search(query string) []SearchResult {
+	if query == "" {
+		return nil
+	}
 	rec, _ := recordPage(p.reader, p.dict)
 	if rec == nil {
 		return nil
@@ -74,27 +77,32 @@ func (p *Page) Search(query string) []SearchResult {
 func glyphBounds(from []source) (Rect, float64, bool) {
 	minX, minY := math.Inf(1), math.Inf(1)
 	maxX, maxY := math.Inf(-1), math.Inf(-1)
-	var size float64
+	extend := func(x, y float64) {
+		minX, maxX = min(minX, x), max(maxX, x)
+		minY, maxY = min(minY, y), max(maxY, y)
+	}
+	var run *textRun
+	var size, upX, upY float64 // upX, upY: an em up from the baseline
 	for _, src := range from {
 		if src.run == nil {
 			continue
 		}
-		fs := src.run.FontSize
-		if size == 0 {
-			size = fs
+		if src.run != run {
+			run = src.run
+			if size == 0 {
+				size = run.FontSize
+			}
+			sin, cos := math.Sincos(run.angle)
+			upX, upY = -sin*run.FontSize, cos*run.FontSize
 		}
-		sin, cos := math.Sincos(src.run.angle * math.Pi / 180)
 		for _, g := range src.glyphs {
-			for _, pen := range [][2]float64{{g.x0, g.y0}, {g.x1, g.y1}} {
-				for _, up := range []float64{-0.2 * fs, fs} {
-					x, y := pen[0]-sin*up, pen[1]+cos*up
-					minX, maxX = min(minX, x), max(maxX, x)
-					minY, maxY = min(minY, y), max(maxY, y)
-				}
+			for _, t := range [2]float64{-0.2, 1} {
+				extend(g.x0+t*upX, g.y0+t*upY)
+				extend(g.x1+t*upX, g.y1+t*upY)
 			}
 		}
 	}
-	if minX > maxX {
+	if run == nil {
 		return Rect{}, 0, false
 	}
 	return Rect{X: minX, Y: minY, Width: maxX - minX, Height: maxY - minY}, size, true

@@ -268,6 +268,11 @@ func TestRaisedTextJoinsItsLine(t *testing.T) {
 		{"same size, close",
 			"BT /F1 11 Tf 72 700 Td (Alpha) Tj ET BT /F1 11 Tf 72 704 Td (Beta) Tj ET",
 			"Beta\nAlpha"},
+		// "Alpha" at 11pt runs from 72 to 100.1: the note is drawn across it.
+		// The line far below is out of the note's reach.
+		{"drawn across the line",
+			"BT /F1 11 Tf 72 700 Td (Alpha) Tj ET BT /F1 7 Tf 80 703 Td (note) Tj ET BT /F1 11 Tf 72 600 Td (Far) Tj ET",
+			"note\nAlpha\nFar"},
 		{"caption spaced off a heading",
 			"BT /F1 15 Tf 72 700 Td (Kit) Tj ET BT /F1 10 Tf 96.5 697.2 Td (Sensor) Tj ET",
 			"Kit\nSensor"},
@@ -294,5 +299,17 @@ func TestRaisedTextJoinsItsLine(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A line's Y is the baseline of the text it is set in, not of smaller text
+// that shares it.
+func TestLineYIsItsTextsBaseline(t *testing.T) {
+	lines := BuildLines([]TextSpan{
+		{X: 72, Y: 700.8, EndX: 76, FontSize: 7, Text: "a"},
+		{X: 76, Y: 700, EndX: 100, FontSize: 11, Text: "Big"},
+	})
+	if len(lines) != 1 || lines[0].Y != 700 {
+		t.Fatalf("got %+v, want one line at 700", lines)
 	}
 }

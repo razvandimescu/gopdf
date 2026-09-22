@@ -2,6 +2,7 @@ package pdf
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -45,6 +46,7 @@ type showOp struct {
 	tc, tw     float64
 	scale      float64 // font size times horizontal scaling: TJ's unit
 	items      []showItem
+	section    string // for a BDC: the operator again, without its replacement text
 }
 
 // showFrame is the stream being recorded.
@@ -69,6 +71,64 @@ type showRecorder struct {
 	cur     showFrame
 	pending []showItem
 	runs    []textRun
+	open    []*section
+}
+
+// section is a marked-content section whose property list carries text that
+// readers show, copy or speak in place of its glyphs: ActualText, or an
+// alternate description or expansion. Removing a glyph drawn inside it has to
+// remove that text too, or the section still reads what was removed.
+type section struct {
+	stream int
+	op     showOp
+}
+
+var replacementText = []Name{"ActualText", "Alt", "E"}
+
+// beginSection opens a section for a BMC or BDC operator spanning start:end,
+// or returns nil when it carries no replacement text.
+func (r *showRecorder) beginSection(start, end int, operands []any, resources Dict, reader *Reader) *section {
+	if r == nil || !r.cur.recordable || len(operands) != 2 {
+		return nil
+	}
+	tag, _ := operands[0].(Name)
+	props, inline := operands[1].(Dict)
+	if name, ok := operands[1].(Name); ok && reader != nil {
+		list, _ := reader.ResolveDict(resources["Properties"])
+		props, _ = reader.ResolveDict(list[name])
+	}
+	if !slices.ContainsFunc(replacementText, func(k Name) bool { return props[k] != nil }) {
+		return nil
+	}
+
+	// The rest of the list stays: MCID ties the section to the structure tree.
+	// A named list is shared with whatever else names it, so it is written
+	// inline rather than edited, less the references a content stream cannot
+	// hold.
+	kept := Dict{}
+	for k, v := range props {
+		if _, ref := v.(Ref); !slices.Contains(replacementText, k) && (inline || !ref) {
+			kept[k] = v
+		}
+	}
+	var b strings.Builder
+	b.WriteString("\n")
+	writeValue(&b, tag)
+	b.WriteByte(' ')
+	writeValue(&b, kept)
+	b.WriteString(" BDC")
+
+	s := &section{stream: r.cur.stream, op: showOp{start: start, end: end, op: "BDC", section: b.String()}}
+	r.open = append(r.open, s)
+	return s
+}
+
+func (r *showRecorder) endSection(s *section) {
+	if s == nil {
+		return
+	}
+	r.open = slices.DeleteFunc(r.open, func(o *section) bool { return o == s })
+	r.streams[s.stream] = append(r.streams[s.stream], s.op)
 }
 
 func newShowRecorder(content []byte) *showRecorder {
@@ -96,6 +156,9 @@ func (r *showRecorder) show(span TextSpan, glyphs []glyph) {
 		r.runs = append(r.runs, textRun{TextSpan: span, glyphs: glyphs})
 	}
 	r.pending = append(r.pending, showItem{glyphs: glyphs})
+	for _, s := range r.open {
+		s.op.items = append(s.op.items, showItem{glyphs: glyphs})
+	}
 }
 
 func (r *showRecorder) kern(v float64) {
@@ -338,6 +401,9 @@ func rewriteShowOp(group []showOp) (string, bool) {
 	}
 	if !any {
 		return "", false
+	}
+	if op.section != "" {
+		return op.section, true
 	}
 
 	var b strings.Builder

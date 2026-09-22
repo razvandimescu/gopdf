@@ -244,3 +244,34 @@ func runReader(t *testing.T, args []string) []byte {
 	}
 	return out
 }
+
+// MuPDF reads a section's ActualText in place of its glyphs, so removal that
+// leaves it behind leaves the text readable there and nowhere else.
+func TestIntegration_MuPDFReadsNoReplacementTextAfterRemoval(t *testing.T) {
+	if _, err := exec.LookPath("mutool"); err != nil {
+		t.Skip("mutool is not installed")
+	}
+	data := contentPDF(t, "BT /F1 12 Tf 72 700 Td /Span <</ActualText (Secret)>> BDC (Secret) Tj EMC ( public) Tj ET")
+	ed := NewEditor(data)
+	ed.RemoveText("Secret")
+	out, err := ed.Apply()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	for _, file := range []struct {
+		name string
+		data []byte
+		want int
+	}{{"original.pdf", data, 1}, {"removed.pdf", out, 0}} {
+		path := filepath.Join(dir, file.name)
+		if err := os.WriteFile(path, file.data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		text := runReader(t, []string{"mutool", "draw", "-F", "txt", "-o", "-", path})
+		if n := bytes.Count(text, []byte("Secret")); n != file.want {
+			t.Errorf("%s: mutool reads %q %d times, want %d", file.name, "Secret", n, file.want)
+		}
+	}
+}

@@ -685,3 +685,114 @@ func TestRemoveTextTakesWholeCodes(t *testing.T) {
 		t.Errorf("half the code was left in the stream:\n%s", content)
 	}
 }
+
+// A marked-content section can carry text that readers show, copy or speak
+// instead of its glyphs. Removing the glyphs and leaving that text would leave
+// the removed string readable to every reader that honours it.
+func TestRemoveTextTakesTheReplacementTextWithIt(t *testing.T) {
+	for _, tc := range []struct{ name, content string }{
+		{"actual text", "/Span <</ActualText (Secret) /MCID 3>> BDC (Secret) Tj EMC"},
+		{"alternate description and expansion, nested",
+			"/Span <</E (Secret) /MCID 3>> BDC /Span <</Alt (Secret)>> BDC (Secret) Tj EMC EMC"},
+		{"never closed", "/Span <</ActualText (Secret) /MCID 3>> BDC (Secret) Tj"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := contentPDF(t, "BT /F1 12 Tf 72 700 Td "+tc.content+" ( public) Tj ET")
+
+			doc := removeText(t, data, "Secret")
+			content := string(mustContent(t, doc.reader, doc.pages[0]))
+			if strings.Contains(content, "Secret") {
+				t.Errorf("the replacement text survived:\n%s", content)
+			}
+			if !strings.Contains(content, "/MCID 3") {
+				t.Errorf("the section lost its tie to the structure tree:\n%s", content)
+			}
+		})
+	}
+}
+
+// Replacement text belongs to its glyphs: a section whose glyphs all stay
+// keeps its bytes as they were.
+func TestRemoveTextLeavesOtherSectionsAlone(t *testing.T) {
+	const kept = "/Span <</ActualText (Kept)>> BDC"
+	data := contentPDF(t, "BT /F1 12 Tf 72 700 Td "+kept+" (Kept) Tj EMC ( Secret) Tj ET")
+
+	doc := removeText(t, data, "Secret")
+	if content := string(mustContent(t, doc.reader, doc.pages[0])); !strings.Contains(content, kept) {
+		t.Errorf("an untouched section was rewritten:\n%s", content)
+	}
+}
+
+// A named property list lives in the page's resources, where other sections
+// may name it too, so the section is given its own copy without the text.
+func TestRemoveTextTakesTheReplacementTextOfANamedList(t *testing.T) {
+	data := buildRawPDF(t, func(w *Writer, pagesRef Ref) Dict {
+		fontRef, contentRef := w.AllocRef(), w.AllocRef()
+		w.WriteObject(fontRef, Dict{"Type": Name("Font"), "Subtype": Name("Type1"), "BaseFont": Name("Helvetica")})
+		w.WriteStream(contentRef, Dict{}, []byte(
+			"BT /F1 12 Tf 72 700 Td /Span /MC0 BDC (Secret) Tj EMC ( public) Tj ET"))
+		page := fontPage(pagesRef, fontRef, contentRef)
+		page["Resources"].(Dict)["Properties"] = Dict{Name("MC0"): Dict{"ActualText": "Secret", "MCID": 3}}
+		return page
+	})
+
+	doc := removeText(t, data, "Secret")
+	content := string(mustContent(t, doc.reader, doc.pages[0]))
+	if strings.Contains(content, "/MC0") || !strings.Contains(content, "/MCID 3") {
+		t.Errorf("the section still names the list that holds the text:\n%s", content)
+	}
+}
+
+// Glyphs drawn by a form belong to the section that draws the form, and a
+// form drawn on two pages loses its glyphs, and its sections' text, if either
+// drawing asks.
+func TestRemoveTextTakesTheReplacementTextAcrossForms(t *testing.T) {
+	t.Run("section around the form", func(t *testing.T) {
+		data := buildRawPDF(t, func(w *Writer, pagesRef Ref) Dict {
+			fontRef, formRef, contentRef := w.AllocRef(), w.AllocRef(), w.AllocRef()
+			w.WriteObject(fontRef, Dict{"Type": Name("Font"), "Subtype": Name("Type1"), "BaseFont": Name("Helvetica")})
+			fonts := Dict{"Font": Dict{Name("F1"): fontRef}}
+			w.WriteStream(formRef, Dict{"Type": Name("XObject"), "Subtype": Name("Form"),
+				"BBox": Array{0, 0, 300, 50}, "Resources": fonts},
+				[]byte("BT /F1 12 Tf 0 0 Td (Secret) Tj ET"))
+			w.WriteStream(contentRef, Dict{}, []byte("/Span <</ActualText (Secret)>> BDC /Fm Do EMC"))
+			page := fontPage(pagesRef, fontRef, contentRef)
+			page["Resources"].(Dict)["XObject"] = Dict{Name("Fm"): formRef}
+			return page
+		})
+		doc := removeText(t, data, "Secret")
+		if content := string(mustContent(t, doc.reader, doc.pages[0])); strings.Contains(content, "Secret") {
+			t.Errorf("the replacement text survived:\n%s", content)
+		}
+	})
+
+	t.Run("section inside a form drawn twice", func(t *testing.T) {
+		data := formPDF(t, "BT /F1 12 Tf 0 0 Td /Span <</ActualText (Secret)>> BDC (Secret) Tj EMC ET",
+			[2]float64{72, 700}, [2]float64{72, 700})
+		ed := NewEditor(data)
+		ed.RemoveRegion(1, Rect{X: 60, Y: 690, Width: 100, Height: 30})
+		out, err := ed.Apply()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n := objectsHolding(t, out, "Secret"); len(n) > 0 {
+			t.Errorf("objects %v still hold the removed text", n)
+		}
+	})
+}
+
+// objectsHolding returns the streams of data that still hold s.
+func objectsHolding(t *testing.T, data []byte, s string) []int {
+	t.Helper()
+	reader, err := Open(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found []int
+	for num := range reader.XRef() {
+		if stream, ok := reader.Resolve(Ref{Num: num}).(*Stream); ok && strings.Contains(string(stream.Data), s) {
+			found = append(found, num)
+		}
+	}
+	return found
+}

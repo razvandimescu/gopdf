@@ -66,6 +66,15 @@ func TestBaseEncodingGlyphNamesAreListed(t *testing.T) {
 	}
 }
 
+// A property list that does not parse is skipped whole: what it holds must not
+// read as operators.
+func TestBrokenPropertyListIsSkipped(t *testing.T) {
+	data := contentPDF(t, "BT /F1 12 Tf 72 700 Td /Span <<1 (inside) Tj>> BDC (after) Tj EMC ET")
+	if got := soleSpan(t, data); got.Text != "after" {
+		t.Errorf("got %q", got.Text)
+	}
+}
+
 // Image data is binary and holds EI by chance. Taking a false EI for the
 // image's end sends the lexer into the data, and refusing a true one sends the
 // rest of the stream into the image; either way the page's text after it was

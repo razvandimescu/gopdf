@@ -246,3 +246,70 @@ func TestSlantedBaselineIsOneLine(t *testing.T) {
 		t.Errorf("got %q, want %q", text, want.String())
 	}
 }
+
+// Superscripts and subscripts are set on their line, however far off its
+// baseline, and removal reads them there too. Text of the same size stays
+// apart however close, and so does smaller text that does not sit against
+// the line's own.
+func TestRaisedTextJoinsItsLine(t *testing.T) {
+	// Helvetica: "3m" at 11pt is 15.279 wide, "3" at 7pt 3.892, "H" at 11pt
+	// 7.942, "Kit" at 15pt 17.505, "Ref" at 10pt 15.56.
+	for _, tc := range []struct{ name, content, want string }{
+		{"superscript",
+			"BT /F1 11 Tf 72 700 Td (3m) Tj ET BT /F1 7 Tf 87.28 704 Td (3) Tj ET BT /F1 11 Tf 91.17 700 Td (/hr) Tj ET",
+			"3m3/hr"},
+		{"subscript",
+			"BT /F1 11 Tf 72 700 Td (H) Tj ET BT /F1 7 Tf 79.95 697 Td (2) Tj ET BT /F1 11 Tf 83.85 700 Td (O) Tj ET",
+			"H2O"},
+		// "x" at 12pt is 6 wide, "2" at 8pt 4.448; the 3 is set on the 2.
+		{"nested superscripts",
+			"BT /F1 12 Tf 72 700 Td (x) Tj ET BT /F1 8 Tf 78 704 Td (2) Tj ET BT /F1 5 Tf 82.45 707 Td (3) Tj ET",
+			"x23"},
+		{"same size, close",
+			"BT /F1 11 Tf 72 700 Td (Alpha) Tj ET BT /F1 11 Tf 72 704 Td (Beta) Tj ET",
+			"Beta\nAlpha"},
+		// "Alpha" at 11pt runs from 72 to 100.1: the note is drawn across it.
+		// The line far below is out of the note's reach.
+		{"drawn across the line",
+			"BT /F1 11 Tf 72 700 Td (Alpha) Tj ET BT /F1 7 Tf 80 703 Td (note) Tj ET BT /F1 11 Tf 72 600 Td (Far) Tj ET",
+			"note\nAlpha\nFar"},
+		{"caption spaced off a heading",
+			"BT /F1 15 Tf 72 700 Td (Kit) Tj ET BT /F1 10 Tf 96.5 697.2 Td (Sensor) Tj ET",
+			"Kit\nSensor"},
+		{"a line of its own that ends against larger text",
+			"BT /F1 10 Tf 72 700 Td (Ref) Tj ET BT /F1 7 Tf 40 701.5 Td (the) Tj ET BT /F1 7 Tf 87.6 701.5 Td (about) Tj ET",
+			"the about\nRef"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := contentPDF(t, tc.content)
+			doc, err := OpenBytes(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var lines []string
+			for _, line := range strings.Split(strings.TrimSpace(docText(t, doc)), "\n") {
+				lines = append(lines, strings.Join(strings.Fields(line), " "))
+			}
+			if got := strings.Join(lines, "\n"); got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+			if !strings.Contains(tc.want, "\n") {
+				if text := docText(t, removeText(t, data, tc.want)); strings.TrimSpace(text) != "" {
+					t.Errorf("removal assembled the page differently and left %q", text)
+				}
+			}
+		})
+	}
+}
+
+// A line's Y is the baseline of the text it is set in, not of smaller text
+// that shares it.
+func TestLineYIsItsTextsBaseline(t *testing.T) {
+	lines := BuildLines([]TextSpan{
+		{X: 72, Y: 700.8, EndX: 76, FontSize: 7, Text: "a"},
+		{X: 76, Y: 700, EndX: 100, FontSize: 11, Text: "Big"},
+	})
+	if len(lines) != 1 || lines[0].Y != 700 {
+		t.Fatalf("got %+v, want one line at 700", lines)
+	}
+}

@@ -219,7 +219,7 @@ func (r *showRecorder) assembleText() (string, []source) {
 		if n > 0 {
 			spell("\n", source{})
 		}
-		for _, p := range read {
+		for _, p := range read.spans {
 			spell(p.gap, source{})
 			run := &r.runs[p.span]
 			runes := utf8.RuneCountInString(run.Text)

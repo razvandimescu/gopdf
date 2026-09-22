@@ -294,6 +294,17 @@ func TestRemoveRegionOnRotatedPage(t *testing.T) {
 	}
 }
 
+// Removal finds a query by reading the page as Page.Search does, so on a
+// rotated page it has to read in displayed space as well: a word drawn a glyph
+// at a time is one line there and a column of single letters in user space.
+func TestRemoveTextOnRotatedPage(t *testing.T) {
+	doc := removeText(t, glyphRunPDF(t), "Revision")
+
+	if text := docText(t, doc); strings.TrimSpace(text) != "" {
+		t.Errorf("the rotated word survived: %q", text)
+	}
+}
+
 func TestRemoveTextOnlyTouchesPagesThatMatch(t *testing.T) {
 	data := testMultiPagePDF(t, "page one keeps its text", "page two has a secret", "page three keeps its text")
 

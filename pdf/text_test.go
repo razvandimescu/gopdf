@@ -1,6 +1,9 @@
 package pdf
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // fontPDF builds a one-page PDF whose content stream is content, with font
 // available as /F1.
@@ -58,5 +61,46 @@ func TestBaseEncodingGlyphNamesAreListed(t *testing.T) {
 				t.Errorf("%s 0x%02X: %q is not in the glyph list", encoding, code, name)
 			}
 		}
+	}
+}
+
+// glyphRunPDF draws "Revision" one string per glyph, as generators that
+// position every glyph do, on a page with /Rotate 90: the text matrix turns
+// it back, so it reads left to right as displayed.
+func glyphRunPDF(t *testing.T) []byte {
+	t.Helper()
+	return buildRawPDF(t, func(w *Writer, pagesRef Ref) Dict {
+		fontRef, contentRef := w.AllocRef(), w.AllocRef()
+		w.WriteObject(fontRef, Dict{
+			"Type": Name("Font"), "Subtype": Name("Type1"), "BaseFont": Name("Helvetica"),
+		})
+		w.WriteStream(contentRef, Dict{}, []byte(
+			"BT /F1 12 Tf 0 1 -1 0 300 100 Tm [(R)(e)(v)(i)(s)(i)(o)(n)] TJ ET"))
+		page := fontPage(pagesRef, fontRef, contentRef)
+		page["Rotate"] = 90
+		return page
+	})
+}
+
+// A span ends where the pen left it, in the space it starts in. Carried out of
+// the space it was drawn in by its start alone, it ended where it began, and
+// a word drawn a glyph at a time read as "R e v i s i o n".
+func TestGlyphRunsEndWhereThePenLeft(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		data []byte
+	}{
+		{"rotated page", glyphRunPDF(t)},
+		{"form XObject", formPDF(t, "BT /F1 12 Tf 10 10 Td [(R)(e)(v)(i)(s)(i)(o)(n)] TJ ET", [2]float64{200, 0})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doc, err := OpenBytes(tc.data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if text := docText(t, doc); strings.TrimSpace(text) != "Revision" {
+				t.Errorf("got %q, want Revision", text)
+			}
+		})
 	}
 }

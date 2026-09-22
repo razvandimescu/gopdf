@@ -152,77 +152,87 @@ func (r *showRecorder) leave(outer showFrame) {
 // the text the page draws.
 //
 // Matching against the glyphs rather than against a rectangle is what makes
-// removal exact. Page.Search reports where text is by dividing a span's width
-// evenly among its characters, which is an estimate in any proportional font;
-// a rectangle built that way can be off by a character or more, and a
-// redaction that removes the wrong character while leaving the right one is
+// removal exact: a rectangle drawn around a match in a proportional font, or
+// at an angle, can take a neighbouring character or miss one of its own, and
+// a redaction that removes the wrong character while leaving the right one is
 // worse than none.
 func (r *showRecorder) matchQueries(queries []string) {
 	if len(queries) == 0 {
 		return
 	}
-	text, glyphAt := r.assembleText()
+	text, from := r.assembleText()
 	for _, query := range queries {
-		if query == "" {
-			continue
-		}
-		for at := 0; at < len(text); {
-			i := strings.Index(text[at:], query)
-			if i < 0 {
-				break
-			}
-			i += at
-			for b := i; b < i+len(query); b++ {
-				for g := range glyphAt[b] {
-					glyphAt[b][g].drop = true
+		eachMatch(text, query, func(i, j int) {
+			for _, src := range from[i:j] {
+				for g := range src.glyphs {
+					src.glyphs[g].drop = true
 				}
 			}
-			at = i + len(query)
-		}
+		})
 	}
 }
 
-// assembleText joins what the page draws into one string, alongside the glyphs
-// each byte of it came from (none, for the whitespace between runs). The
-// reading order and the spacing are the reader's, from BuildLines: a query
-// that Page.Search can find has to be findable here too, or removal would
-// quietly miss text that redaction covers.
-func (r *showRecorder) assembleText() (string, [][]glyph) {
-	var text strings.Builder
-	glyphAt := make([][]glyph, 0, 64)
+// eachMatch calls f with the byte range of every occurrence of query in text,
+// left to right and not overlapping.
+func eachMatch(text, query string, f func(i, j int)) {
+	if query == "" {
+		return
+	}
+	for at := 0; ; {
+		i := strings.Index(text[at:], query)
+		if i < 0 {
+			return
+		}
+		at += i + len(query)
+		f(at-len(query), at)
+	}
+}
 
-	spell := func(s string, glyphs []glyph) {
+// source is where one byte of the assembled text came from: the run, and the
+// glyphs of it that drew the byte. The whitespace between runs has none.
+type source struct {
+	run    *textRun
+	glyphs []glyph
+}
+
+// assembleText joins what the page draws into one string, alongside where
+// each byte of it came from. The reading order and the spacing are the
+// reader's, from BuildLines, so Page.Search and removal find exactly what the
+// page's text says. Generators draw out of reading order often enough — a
+// column at a time, or a word in pieces to kern it.
+func (r *showRecorder) assembleText() (string, []source) {
+	var text strings.Builder
+	from := make([]source, 0, 64)
+
+	spell := func(s string, src source) {
 		text.WriteString(s)
 		for range len(s) {
-			glyphAt = append(glyphAt, glyphs)
+			from = append(from, src)
 		}
 	}
 
-	// Generators draw out of reading order often enough — a column at a time,
-	// or a word in pieces to kern it — and Page.Search reports what BuildLines
-	// assembled, so removal assembles the same thing, the same way.
 	spans := make([]TextSpan, len(r.runs))
 	for i, run := range r.runs {
 		spans[i] = run.TextSpan
 	}
 	for n, line := range readLines(spans) {
 		if n > 0 {
-			spell("\n", nil)
+			spell("\n", source{})
 		}
 		for i, index := range line {
-			run := r.runs[index]
+			run := &r.runs[index]
 			if i > 0 {
-				spell(spanGap(spans[line[i-1]], run.TextSpan), nil)
+				spell(spanGap(spans[line[i-1]], run.TextSpan), source{})
 			}
 			runes := utf8.RuneCountInString(run.Text)
 			for at, j := 0, 0; at < len(run.Text); j++ {
 				_, size := utf8.DecodeRuneInString(run.Text[at:])
-				spell(run.Text[at:at+size], run.glyphsFor(j, runes))
+				spell(run.Text[at:at+size], source{run, run.glyphsFor(j, runes)})
 				at += size
 			}
 		}
 	}
-	return text.String(), glyphAt
+	return text.String(), from
 }
 
 // glyphsFor maps the j-th of runeCount characters back to the glyphs that drew
@@ -511,18 +521,25 @@ func (e *Editor) stripText(reader *Reader, pages []Dict) (map[int][]byte, map[in
 	return strippedPages, strippedForms, nil
 }
 
-// markPage records everything page draws and marks the glyphs that neither the
-// queries nor rects leave standing.
-func markPage(r *Reader, page Dict, queries []string, rects []Rect) (*showRecorder, error) {
+// recordPage records everything page draws, walked in displayed space: where
+// the reader sees the text, Page.Search places it, and rectangles are aimed.
+func recordPage(r *Reader, page Dict) (*showRecorder, error) {
 	content, err := r.PageContent(page)
 	if err != nil || len(content) == 0 {
 		return nil, err
 	}
-
-	// Walked in displayed space, where the reader saw the text and aimed the
-	// rectangles.
 	rec := newShowRecorder(content)
 	extractTextWithResources(content, r.PageFonts(page), r, r.PageResources(page), pageRotationMatrix(page), 0, rec, nil)
+	return rec, nil
+}
+
+// markPage records everything page draws and marks the glyphs that neither the
+// queries nor rects leave standing.
+func markPage(r *Reader, page Dict, queries []string, rects []Rect) (*showRecorder, error) {
+	rec, err := recordPage(r, page)
+	if rec == nil {
+		return nil, err
+	}
 
 	rec.matchQueries(queries)
 	if len(rects) == 0 {

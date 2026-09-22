@@ -50,140 +50,54 @@ func (d *Document) Search(query string) []SearchResult {
 	return results
 }
 
-// Search finds all occurrences of query on this page.
+// Search finds all occurrences of query on this page, in the text Text
+// reads, and places each by the glyphs that drew it: the ones RemoveText
+// deletes for the same query.
 func (p *Page) Search(query string) []SearchResult {
-	if query == "" {
+	rec, _ := recordPage(p.reader, p.dict)
+	if rec == nil {
 		return nil
 	}
-
-	spans, _ := p.TextSpans()
+	text, from := rec.assembleText()
 	var results []SearchResult
-
-	// Strategy 1: check individual spans for the query.
-	for _, span := range spans {
-		idx := 0
-		for {
-			pos := strings.Index(span.Text[idx:], query)
-			if pos < 0 {
-				break
-			}
-			// Estimate X position within span.
-			charWidth := (span.EndX - span.X)
-			if len(span.Text) > 0 {
-				charWidth /= float64(len([]rune(span.Text)))
-			}
-			matchX := span.X + float64(pos)*charWidth
-			matchEndX := matchX + float64(len([]rune(query)))*charWidth
-
-			results = append(results, SearchResult{
-				Page: p.num,
-				Text: query,
-				Rect: Rect{
-					X:      matchX,
-					Y:      span.Y - span.FontSize*0.2, // descender
-					Width:  matchEndX - matchX,
-					Height: span.FontSize * 1.2,
-				},
-				FontSize: span.FontSize,
-			})
-			idx += pos + len(query)
+	eachMatch(text, query, func(i, j int) {
+		if rect, size, ok := glyphBounds(from[i:j]); ok {
+			results = append(results, SearchResult{Page: p.num, Text: query, Rect: rect, FontSize: size})
 		}
-	}
-
-	// Strategy 2: check across adjacent spans on the same line.
-	lines := BuildLines(spans)
-	for _, line := range lines {
-		idx := 0
-		for {
-			pos := strings.Index(line.Text[idx:], query)
-			if pos < 0 {
-				break
-			}
-			// Check this wasn't already found in a single span.
-			absPos := idx + pos
-			// Find which spans cover this range.
-			r := rectForLineRange(line, absPos, absPos+len([]rune(query)))
-			if r != nil {
-				// Deduplicate: skip if we already have a result at this position.
-				dup := false
-				for _, existing := range results {
-					if existing.Page == p.num && math.Abs(existing.Rect.X-r.X) < 1 && math.Abs(existing.Rect.Y-r.Y) < 1 {
-						dup = true
-						break
-					}
-				}
-				if !dup {
-					results = append(results, SearchResult{
-						Page:     p.num,
-						Text:     query,
-						Rect:     *r,
-						FontSize: line.Spans[0].FontSize,
-					})
-				}
-			}
-			idx += pos + len(query)
-		}
-	}
-
+	})
 	return results
 }
 
-// rectForLineRange estimates the bounding rect for a character range in a TextLine.
-func rectForLineRange(line TextLine, startChar, endChar int) *Rect {
-	if len(line.Spans) == 0 {
-		return nil
-	}
-
-	// Walk through spans to find the start/end X positions.
-	charIdx := 0
-	var startX, endX float64
-	var fontSize float64
-	foundStart := false
-
-	for _, span := range line.Spans {
-		spanLen := len([]rune(span.Text))
-		spanStartChar := charIdx
-
-		// Account for space between spans in the line text.
-		// The line.Text has spaces inserted by BuildLines — we need to track that.
-		charIdx += spanLen
-
-		if !foundStart && startChar < charIdx {
-			offset := startChar - spanStartChar
-			cw := spanCharWidth(span)
-			startX = span.X + float64(offset)*cw
-			fontSize = span.FontSize
-			foundStart = true
+// glyphBounds is the rectangle around the glyphs behind a run of text, from a
+// descender below their baseline to an em above it, turned with the text; and
+// the size the text starts at. It is false for whitespace no glyph drew.
+func glyphBounds(from []source) (Rect, float64, bool) {
+	minX, minY := math.Inf(1), math.Inf(1)
+	maxX, maxY := math.Inf(-1), math.Inf(-1)
+	var size float64
+	for _, src := range from {
+		if src.run == nil {
+			continue
 		}
-		if foundStart && endChar <= charIdx {
-			offset := endChar - spanStartChar
-			cw := spanCharWidth(span)
-			endX = span.X + float64(offset)*cw
-			break
+		fs := src.run.FontSize
+		if size == 0 {
+			size = fs
 		}
-		if foundStart {
-			endX = span.EndX
+		sin, cos := math.Sincos(float64(src.run.angle) * math.Pi / 180)
+		for _, g := range src.glyphs {
+			for _, pen := range [][2]float64{{g.x0, g.y0}, {g.x1, g.y1}} {
+				for _, up := range []float64{-0.2 * fs, fs} {
+					x, y := pen[0]-sin*up, pen[1]+cos*up
+					minX, maxX = min(minX, x), max(maxX, x)
+					minY, maxY = min(minY, y), max(maxY, y)
+				}
+			}
 		}
 	}
-
-	if !foundStart || endX <= startX {
-		return nil
+	if minX > maxX {
+		return Rect{}, 0, false
 	}
-
-	return &Rect{
-		X:      startX,
-		Y:      line.Y - fontSize*0.2,
-		Width:  endX - startX,
-		Height: fontSize * 1.2,
-	}
-}
-
-func spanCharWidth(span TextSpan) float64 {
-	runeCount := float64(len([]rune(span.Text)))
-	if runeCount == 0 || span.EndX <= span.X {
-		return span.em() * 0.5
-	}
-	return (span.EndX - span.X) / runeCount
+	return Rect{X: minX, Y: minY, Width: maxX - minX, Height: maxY - minY}, size, true
 }
 
 // TextOverlay describes text to draw on a page.

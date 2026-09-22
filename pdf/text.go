@@ -741,8 +741,13 @@ func skipInlineDict(lex *Lexer) {
 	}
 }
 
+// skipInlineImage moves lex from just after BI to just after the image's EI.
+// Image data is binary and can hold EI by chance, so unfiltered data ends
+// where its dictionary says it does; filtered data has no length to compute,
+// and ends at the first EI the content stream carries on after.
 func skipInlineImage(lex *Lexer) {
-	// Parse the inline image dict until ID keyword.
+	dict := Dict{}
+	p := Parser{lex: lex}
 	for {
 		tok, err := lex.NextToken()
 		if err != nil || tok.Type == TEOF {
@@ -751,23 +756,125 @@ func skipInlineImage(lex *Lexer) {
 		if tok.Type == TKeyword && tok.Str == "ID" {
 			break
 		}
+		if tok.Type == TName {
+			if dict[Name(tok.Str)], err = p.ParseObject(); err != nil {
+				return
+			}
+		}
 	}
 	// Skip single whitespace byte after ID.
 	if !lex.AtEnd() {
 		lex.read()
 	}
-	// Scan raw bytes for whitespace + "EI" + (whitespace or delimiter or EOF).
-	for lex.pos < len(lex.data)-2 {
-		if isWhitespace(lex.data[lex.pos]) &&
-			lex.data[lex.pos+1] == 'E' && lex.data[lex.pos+2] == 'I' {
-			if lex.pos+3 >= len(lex.data) || isWhitespace(lex.data[lex.pos+3]) || isDelimiter(lex.data[lex.pos+3]) {
-				lex.pos += 3
-				return
-			}
+	data := lex.data
+	if n, ok := inlineImageLength(dict, len(data)-lex.pos); ok {
+		end := lex.pos + n
+		for end < len(data) && isWhitespace(data[end]) {
+			end++
+		}
+		if atEI(data, end) {
+			lex.pos = end + 2
+			return
+		}
+	}
+	for lex.pos < len(data)-2 {
+		if isWhitespace(data[lex.pos]) && atEI(data, lex.pos+1) && resumesContent(data[lex.pos+3:]) {
+			lex.pos += 3
+			return
 		}
 		lex.pos++
 	}
 }
+
+// inlineImageLength is the byte length of an unfiltered inline image's data,
+// rows padded to whole bytes, when its dictionary determines one that fits in
+// the avail bytes left. A colour space named in the page's resources does not.
+func inlineImageLength(d Dict, avail int) (int, bool) {
+	entry := func(abbrev, full Name) any {
+		if v, ok := d[abbrev]; ok {
+			return v
+		}
+		return d[full]
+	}
+	if entry("F", "Filter") != nil {
+		return 0, false
+	}
+	w, _ := entry("W", "Width").(int)
+	h, _ := entry("H", "Height").(int)
+	bpc, _ := entry("BPC", "BitsPerComponent").(int)
+	components := 1
+	if mask, _ := entry("IM", "ImageMask").(bool); mask {
+		bpc = 1
+	} else {
+		switch cs := entry("CS", "ColorSpace").(type) {
+		case Name:
+			components = map[Name]int{"G": 1, "DeviceGray": 1, "RGB": 3, "DeviceRGB": 3, "CMYK": 4, "DeviceCMYK": 4}[cs]
+		case Array:
+			if len(cs) == 0 || cs[0] != Name("I") && cs[0] != Name("Indexed") {
+				components = 0
+			}
+		default:
+			components = 0
+		}
+	}
+	if w <= 0 || h <= 0 || bpc <= 0 || bpc > 16 || components == 0 || w > avail*8 {
+		return 0, false
+	}
+	row := (w*components*bpc + 7) / 8
+	if h > avail/row {
+		return 0, false
+	}
+	return row * h, true
+}
+
+// atEI reports whether data holds the EI operator at i.
+func atEI(data []byte, i int) bool {
+	return i+2 <= len(data) && data[i] == 'E' && data[i+1] == 'I' &&
+		(i+2 == len(data) || isWhitespace(data[i+2]) || isDelimiter(data[i+2]))
+}
+
+// resumesContent reports whether rest, the bytes after a candidate EI, read as
+// the content stream carrying on: operands and known operators, lexed without
+// error, for three operators, up to the next inline image, or to the end.
+// Image data after a false EI soon lexes into an error, such as a literal
+// string left open, or into a word that is no operator. The look ahead stops
+// at window bytes, and a candidate still reading as content there is accepted:
+// content can hold a comment or string longer than any window.
+func resumesContent(rest []byte) bool {
+	const window = 256
+	lex := NewLexer(rest[:min(len(rest), window)])
+	for ops := 0; ops < 3; {
+		tok, err := lex.NextToken()
+		switch {
+		case lex.AtEnd() && len(rest) > window:
+			return true
+		case err != nil:
+			return false
+		case tok.Type == TEOF:
+			return true
+		case tok.Type != TKeyword:
+			continue
+		case tok.Str == "BI":
+			return true
+		case !contentOperators[tok.Str]:
+			return false
+		}
+		ops++
+	}
+	return true
+}
+
+// contentOperators are the content stream operators (PDF 32000-1, Annex A),
+// less ID and EI, which cannot follow the end of an inline image.
+var contentOperators = func() map[string]bool {
+	ops := make(map[string]bool)
+	for _, op := range strings.Fields(`b B b* B* BDC BI BMC BT BX c cm CS cs d d0 d1
+		Do DP EMC ET EX f F f* G g gs h i j J K k l m M MP n q Q re RG rg ri s S SC sc
+		SCN scn sh T* Tc Td TD Tf Tj TJ TL Tm Tr Ts Tw Tz v w W W* y ' "`) {
+		ops[op] = true
+	}
+	return ops
+}()
 
 // lineYTolerance is how far two baselines may sit apart and still be read as
 // one line.

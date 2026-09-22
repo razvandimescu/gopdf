@@ -95,6 +95,23 @@ func TestRemoveTextDeletesTheGlyphs(t *testing.T) {
 	}
 }
 
+// Removal walks the page as extraction does, inline images included. When a
+// true EI was refused, the text after it was swallowed into the image, and
+// RemoveText succeeded while removing nothing.
+func TestRemoveTextAfterInlineImage(t *testing.T) {
+	data := contentPDF(t, "q BI /F /Fl ID \x80 EI Q % \xe2\x80\x94 note\n"+
+		"BT /F1 12 Tf 72 700 Td (keep) Tj (secret) Tj ET")
+
+	doc := removeText(t, data, "secret")
+
+	if content := string(mustContent(t, doc.reader, doc.pages[0])); strings.Contains(content, "secret") {
+		t.Errorf("the removed codes are still in the content stream:\n%s", content)
+	}
+	if text := docText(t, doc); strings.TrimSpace(text) != "keep" {
+		t.Errorf("got %q, want keep", text)
+	}
+}
+
 // The surviving text must not reflow: a removed run leaves a kerning number
 // worth exactly the advance it had, so what follows stays where the reader
 // last saw it.

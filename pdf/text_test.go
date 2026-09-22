@@ -64,6 +64,36 @@ func TestBaseEncodingGlyphNamesAreListed(t *testing.T) {
 	}
 }
 
+// Image data is binary and holds EI by chance. Taking a false EI for the
+// image's end sends the lexer into the data, and refusing a true one sends the
+// rest of the stream into the image; either way the page's text after it was
+// lost.
+func TestInlineImageEnds(t *testing.T) {
+	// 15 bytes holding an EI that reads as content for three operators.
+	const falseEI = "\x01 EI Q q Q >\xff\xff\xff"
+	for _, tc := range []struct{ name, image string }{
+		{"unfiltered gray", "BI /W 15 /H 1 /BPC 8 /CS /G ID " + falseEI + " EI Q"},
+		{"unfiltered RGB", "BI /W 5 /H 1 /BPC 8 /CS /RGB ID " + falseEI + " EI Q"},
+		{"unfiltered mask, rows padded to bytes", "BI /IM true /W 20 /H 5 ID " + falseEI + " EI Q"},
+		{"filtered, binary after a false EI", "BI /F /Fl ID \x01\fEI\x00>\x96\x02 EI Q"},
+		{"filtered, an operator then binary after a false EI", "BI /F /Fl ID \x01 EI n >\x96 EI Q"},
+		{"filtered, a string after a false EI", "BI /F /Fl ID \x01 EI (\x96\x02 EI Q"},
+		{"filtered, a UTF-8 comment after EI", "BI /F /Fl ID \x80 EI Q % \xe2\x80\x94 note\n"},
+		{"filtered, a UTF-8 name after EI", "BI /F /Fl ID \x80 EI Q /Caf\xc3\xa9 BMC"},
+		{"filtered, another image after EI", "BI /F /Fl ID \x80 EI Q BI /F /Fl ID \x81 EI"},
+		{"filtered, a long comment after EI", "BI /F /Fl ID \x80 EI Q % " + strings.Repeat("x", 300) + "\n"},
+		{"filtered, a long property list after EI", "BI /F /Fl ID \x80 EI Q /Span <</ActualText (" + strings.Repeat("x", 300) + ")>> BDC"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The image sits in a scaled q…Q, so text read with the Q lost is misplaced.
+			data := contentPDF(t, "q 2 0 0 2 0 0 cm "+tc.image+"\nBT /F1 12 Tf 72 700 Td (after the image) Tj ET")
+			if got := soleSpan(t, data); got.Text != "after the image" || got.X != 72 {
+				t.Errorf("got %q at x=%g", got.Text, got.X)
+			}
+		})
+	}
+}
+
 // glyphRunPDF draws "Revision" one string per glyph, as generators that
 // position every glyph do, on a page with /Rotate 90: the text matrix turns
 // it back, so it reads left to right as displayed.

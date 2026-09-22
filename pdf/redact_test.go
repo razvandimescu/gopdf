@@ -14,20 +14,7 @@ import (
 // with Helvetica available as /F1.
 func contentPDF(t *testing.T, content string) []byte {
 	t.Helper()
-	return buildRawPDF(t, func(w *Writer, pagesRef Ref) Dict {
-		fontRef := w.AllocRef()
-		w.WriteObject(fontRef, Dict{
-			"Type": Name("Font"), "Subtype": Name("Type1"), "BaseFont": Name("Helvetica"),
-		})
-		contentRef := w.AllocRef()
-		w.WriteStream(contentRef, Dict{}, []byte(content))
-		return Dict{
-			"Type": Name("Page"), "Parent": pagesRef,
-			"MediaBox":  Array{0, 0, 612, 792},
-			"Resources": Dict{"Font": Dict{Name("F1"): fontRef}},
-			"Contents":  contentRef,
-		}
-	})
+	return fontPDF(t, Dict{"Type": Name("Font"), "Subtype": Name("Type1"), "BaseFont": Name("Helvetica")}, content)
 }
 
 // cmapPDF builds a one-page PDF whose /F1 carries a ToUnicode CMap with the

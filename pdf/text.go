@@ -3,6 +3,7 @@ package pdf
 import (
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -152,7 +153,7 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 
 	// Font-specific decoding.
 	toUnicodeMaps := make(map[string]map[uint16]string)
-	encodingDiffs := make(map[string]map[byte]string)
+	encodings := make(map[string]map[byte]string)
 	fontWidths := make(map[string]map[int]float64)
 	fontFirstChars := make(map[string]int)
 	fontMissingWidths := make(map[string]float64)
@@ -163,9 +164,7 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 		if umap := reader.ToUnicodeMap(fd); umap != nil {
 			toUnicodeMaps[sname] = umap
 		}
-		if diffs := reader.FontEncoding(fd); diffs != nil {
-			encodingDiffs[sname] = diffs
-		}
+		encodings[sname] = reader.FontEncoding(fd)
 
 		subtype, _ := fd.Name("Subtype")
 
@@ -261,57 +260,49 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 		return compositeFont[fontName]
 	}
 
+	// decodeByte reads one code of a simple font through its encoding, which
+	// names only the codes that are not ASCII: a code it leaves out is ASCII
+	// below 0x80, and above it is one the encoding does not define.
+	decodeByte := func(b byte) string {
+		if name, ok := encodings[fontName][b]; ok {
+			return glyphToString(name)
+		}
+		if b < 0x80 {
+			return string(rune(b))
+		}
+		return ""
+	}
+
 	decodeString := func(s string) string {
 		raw := []byte(s)
+		umap := toUnicodeMaps[fontName]
+		// For composite fonts, always use 2-byte.
+		// For simple fonts, detect based on map contents.
 		isTwoByte := isComposite()
-
-		// Try ToUnicode map first.
-		if umap, ok := toUnicodeMaps[fontName]; ok && umap != nil {
-			var result strings.Builder
-			// For composite fonts, always use 2-byte.
-			// For simple fonts, detect based on map contents.
-			if !isTwoByte && len(raw) >= 2 {
-				code := uint16(raw[0])<<8 | uint16(raw[1])
-				if _, ok := umap[code]; ok {
-					isTwoByte = true
-				}
-			}
-			if isTwoByte && len(raw)%2 == 0 {
-				for i := 0; i+1 < len(raw); i += 2 {
-					code := uint16(raw[i])<<8 | uint16(raw[i+1])
-					if u, ok := umap[code]; ok {
-						result.WriteString(u)
-					} else {
-						result.WriteRune(rune(code))
-					}
-				}
-			} else {
-				for _, b := range raw {
-					if u, ok := umap[uint16(b)]; ok {
-						result.WriteString(u)
-					} else {
-						result.WriteByte(b)
-					}
-				}
-			}
-			return result.String()
+		if !isTwoByte && len(raw) >= 2 {
+			_, isTwoByte = umap[uint16(raw[0])<<8|uint16(raw[1])]
 		}
 
-		// Try encoding differences.
-		if diffs, ok := encodingDiffs[fontName]; ok && diffs != nil {
-			var result strings.Builder
-			for _, b := range raw {
-				if name, ok := diffs[b]; ok {
-					result.WriteString(glyphToString(name))
+		var result strings.Builder
+		if umap != nil && isTwoByte && len(raw)%2 == 0 {
+			for i := 0; i+1 < len(raw); i += 2 {
+				code := uint16(raw[i])<<8 | uint16(raw[i+1])
+				if u, ok := umap[code]; ok {
+					result.WriteString(u)
 				} else {
-					result.WriteByte(b)
+					result.WriteRune(rune(code))
 				}
 			}
-			return result.String()
+		} else {
+			for _, b := range raw {
+				if u, ok := umap[uint16(b)]; ok {
+					result.WriteString(u)
+				} else {
+					result.WriteString(decodeByte(b))
+				}
+			}
 		}
-
-		// WinAnsiEncoding fallback (covers most modern PDFs).
-		return winansiDecode(s)
+		return result.String()
 	}
 
 	// codeAdvance is the pen's travel over the character code at s[i], in text
@@ -877,68 +868,51 @@ func BuildLines(spans []TextSpan) []TextLine {
 	return lines
 }
 
-// glyphToString converts a PostScript glyph name to its Unicode string.
+// glyphToString converts a PostScript glyph name to its Unicode string, by the
+// Adobe Glyph List's naming rules: what follows a period names a variant
+// (one.oldstyle), and underscores join the parts of a ligature (f_f_i). Each
+// part is a name in the list, uni and groups of four hex digits, or u and four
+// to six; a part that is none of these, such as g12 or .notdef, reads as
+// nothing.
 func glyphToString(name string) string {
-	// Common glyph names.
-	if r, ok := glyphMap[name]; ok {
-		return string(r)
+	base, _, _ := strings.Cut(name, ".")
+	var s strings.Builder
+	for _, part := range strings.Split(base, "_") {
+		s.WriteString(glyphPartToString(part))
 	}
-	// If it looks like "uniXXXX", decode hex.
-	if strings.HasPrefix(name, "uni") && len(name) == 7 {
-		v, err := parseHexRune(name[3:])
-		if err == nil {
-			return string(v)
-		}
-	}
-	if len(name) == 1 {
-		return name
-	}
-	return name
+	return s.String()
 }
 
-func parseHexRune(s string) (rune, error) {
-	var v rune
-	for _, c := range s {
-		v <<= 4
-		switch {
-		case c >= '0' && c <= '9':
-			v |= c - '0'
-		case c >= 'a' && c <= 'f':
-			v |= c - 'a' + 10
-		case c >= 'A' && c <= 'F':
-			v |= c - 'A' + 10
-		default:
-			return 0, nil
+func glyphPartToString(part string) string {
+	if r, ok := glyphMap[part]; ok {
+		return string(r)
+	}
+	if hex, ok := strings.CutPrefix(part, "uni"); ok && len(hex)%4 == 0 {
+		runes := make([]rune, 0, len(hex)/4)
+		for i := 0; i < len(hex); i += 4 {
+			r, ok := hexScalar(hex[i : i+4])
+			if !ok {
+				return ""
+			}
+			runes = append(runes, r)
+		}
+		return string(runes)
+	}
+	if hex, ok := strings.CutPrefix(part, "u"); ok && len(hex) >= 4 && len(hex) <= 6 {
+		if r, ok := hexScalar(hex); ok {
+			return string(r)
 		}
 	}
-	return v, nil
+	return ""
+}
+
+// hexScalar reads hex digits as a Unicode scalar value: never a surrogate.
+func hexScalar(hex string) (rune, bool) {
+	v, err := strconv.ParseUint(hex, 16, 32)
+	return rune(v), err == nil && utf8.ValidRune(rune(v))
 }
 
 // glyphMap is defined in glyphlist.go (generated from Adobe Glyph List).
-
-// winansiDecode converts a WinAnsiEncoding string to UTF-8.
-func winansiDecode(s string) string {
-	var buf strings.Builder
-	for _, b := range []byte(s) {
-		if r, ok := winansiMap[b]; ok {
-			buf.WriteRune(r)
-		} else {
-			buf.WriteByte(b)
-		}
-	}
-	return buf.String()
-}
-
-// WinAnsiEncoding special mappings (0x80-0x9F differ from Latin-1).
-var winansiMap = map[byte]rune{
-	0x80: '\u20AC', 0x82: '\u201A', 0x83: '\u0192', 0x84: '\u201E',
-	0x85: '\u2026', 0x86: '\u2020', 0x87: '\u2021', 0x88: '\u02C6',
-	0x89: '\u2030', 0x8A: '\u0160', 0x8B: '\u2039', 0x8C: '\u0152',
-	0x8E: '\u017D', 0x91: '\u2018', 0x92: '\u2019', 0x93: '\u201C',
-	0x94: '\u201D', 0x95: '\u2022', 0x96: '\u2013', 0x97: '\u2014',
-	0x98: '\u02DC', 0x99: '\u2122', 0x9A: '\u0161', 0x9B: '\u203A',
-	0x9C: '\u0153', 0x9E: '\u017E', 0x9F: '\u0178',
-}
 
 // parseCIDWidths parses a CIDFont /W array into a cid→width map.
 // Format: [ cid_start [w1 w2 ...] ] or [ cid_start cid_end w ]

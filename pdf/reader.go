@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"strconv"
 	"strings"
 )
@@ -1167,84 +1168,122 @@ func hexToUnicode(hex string) string {
 	return string(runes)
 }
 
-// FontEncoding returns the byte→glyph-name mapping for a font.
-// Handles /Encoding as a Name or as a Dict with /BaseEncoding + /Differences.
+// FontEncoding returns the byte→glyph-name map of a simple font: its base
+// encoding with /Differences laid over it. The base tables list only the codes
+// where an encoding departs from ASCII.
 func (r *Reader) FontEncoding(font Dict) map[byte]string {
-	encObj, ok := font["Encoding"]
+	var base Name
+	var differences Array
+	switch enc := r.Resolve(font["Encoding"]).(type) {
+	case Name:
+		base = enc
+	case Dict:
+		base, _ = enc.Name("BaseEncoding")
+		differences, _ = r.ResolveArray(enc["Differences"])
+	}
+	table, ok := baseEncodings[base]
 	if !ok {
-		return nil
+		table = baseEncodings[implicitEncoding(font)]
 	}
 
-	// Case 1: /Encoding is a Name (e.g. /WinAnsiEncoding).
-	resolved := r.Resolve(encObj)
-	if encName, ok := resolved.(Name); ok {
-		return predefinedEncoding(string(encName))
-	}
-
-	// Case 2: /Encoding is a Dict with optional /BaseEncoding and /Differences.
-	encDict, ok := resolved.(Dict)
-	if !ok {
-		return nil
-	}
-
-	// Start from base encoding if specified.
-	var diffs map[byte]string
-	if baseName, ok := encDict.Name("BaseEncoding"); ok {
-		diffs = predefinedEncoding(string(baseName))
-	}
-	if diffs == nil {
-		diffs = make(map[byte]string)
-	}
-
-	// Apply /Differences overlay.
-	diffArr, ok := r.ResolveArray(encDict["Differences"])
-	if !ok {
-		return diffs
-	}
+	names := make(map[byte]string, len(table)+len(differences))
+	maps.Copy(names, table)
 	var code byte
-	for _, item := range diffArr {
+	for _, item := range differences {
 		switch v := item.(type) {
 		case int:
 			code = byte(v)
 		case float64:
 			code = byte(v)
 		case Name:
-			diffs[code] = string(v)
+			names[code] = string(v)
 			code++
 		}
 	}
-	return diffs
+	return names
 }
 
-// predefinedEncoding returns the byte→glyph-name map for a named encoding.
-func predefinedEncoding(name string) map[byte]string {
-	switch name {
-	case "WinAnsiEncoding":
-		return copyMap(winansiGlyphNames)
-	case "MacRomanEncoding":
-		return copyMap(macRomanGlyphNames)
-	default:
-		return nil
+// implicitEncoding names the base encoding of a font whose /Encoding names
+// none. For an embedded font program that is its built-in encoding, which is
+// not read here, so StandardEncoding stands in for it as it does for a
+// nonsymbolic font that is not embedded (PDF 32000-1, 9.6.6.1). TrueType fonts
+// are read as WinAnsi, as other readers do; Symbol and ZapfDingbats have
+// encodings of their own, which are not tabled, and composite fonts have none.
+func implicitEncoding(font Dict) Name {
+	subtype, _ := font.Name("Subtype")
+	baseFont, _ := font.Name("BaseFont")
+	switch {
+	case subtype == "Type0" || baseFont == "Symbol" || baseFont == "ZapfDingbats":
+		return ""
+	case subtype == "TrueType":
+		return "WinAnsiEncoding"
 	}
+	return "StandardEncoding"
 }
 
-func copyMap(m map[byte]string) map[byte]string {
-	c := make(map[byte]string, len(m))
-	for k, v := range m {
-		c[k] = v
-	}
-	return c
+var baseEncodings = map[Name]map[byte]string{
+	"StandardEncoding": standardGlyphNames,
+	"WinAnsiEncoding":  winansiGlyphNames,
+	"MacRomanEncoding": macRomanGlyphNames,
 }
 
-// winansiGlyphNames maps WinAnsiEncoding byte values (0x80-0x9F) to glyph names.
+// standardGlyphNames maps StandardEncoding codes to glyph names where they
+// are not ASCII (PDF 32000-1, Annex D).
+var standardGlyphNames = map[byte]string{
+	0x27: "quoteright", 0x60: "quoteleft",
+	0xA1: "exclamdown", 0xA2: "cent", 0xA3: "sterling", 0xA4: "fraction",
+	0xA5: "yen", 0xA6: "florin", 0xA7: "section", 0xA8: "currency",
+	0xA9: "quotesingle", 0xAA: "quotedblleft", 0xAB: "guillemotleft", 0xAC: "guilsinglleft",
+	0xAD: "guilsinglright", 0xAE: "fi", 0xAF: "fl",
+	0xB1: "endash", 0xB2: "dagger", 0xB3: "daggerdbl", 0xB4: "periodcentered",
+	0xB6: "paragraph", 0xB7: "bullet", 0xB8: "quotesinglbase", 0xB9: "quotedblbase",
+	0xBA: "quotedblright", 0xBB: "guillemotright", 0xBC: "ellipsis", 0xBD: "perthousand",
+	0xBF: "questiondown",
+	0xC1: "grave", 0xC2: "acute", 0xC3: "circumflex", 0xC4: "tilde",
+	0xC5: "macron", 0xC6: "breve", 0xC7: "dotaccent", 0xC8: "dieresis",
+	0xCA: "ring", 0xCB: "cedilla", 0xCD: "hungarumlaut", 0xCE: "ogonek", 0xCF: "caron",
+	0xD0: "emdash",
+	0xE1: "AE", 0xE3: "ordfeminine", 0xE8: "Lslash", 0xE9: "Oslash", 0xEA: "OE", 0xEB: "ordmasculine",
+	0xF1: "ae", 0xF5: "dotlessi", 0xF8: "lslash", 0xF9: "oslash", 0xFA: "oe", 0xFB: "germandbls",
+}
+
+// winansiGlyphNames maps WinAnsiEncoding codes to glyph names where they are
+// not ASCII (PDF 32000-1, Annex D). The codes it leaves unused draw the bullet,
+// as the annex notes; 0xA0 and 0xAD are its second space and hyphen.
 var winansiGlyphNames = map[byte]string{
-	0x80: "Euro", 0x82: "quotesinglbase", 0x83: "florin", 0x84: "quotedblbase",
-	0x85: "ellipsis", 0x86: "dagger", 0x87: "daggerdbl", 0x88: "circumflex",
-	0x89: "perthousand", 0x8A: "Scaron", 0x8B: "guilsinglleft", 0x8C: "OE",
-	0x8E: "Zcaron", 0x91: "quoteleft", 0x92: "quoteright", 0x93: "quotedblleft",
+	0x7F: "bullet",
+	0x80: "Euro", 0x81: "bullet", 0x82: "quotesinglbase", 0x83: "florin",
+	0x84: "quotedblbase", 0x85: "ellipsis", 0x86: "dagger", 0x87: "daggerdbl",
+	0x88: "circumflex", 0x89: "perthousand", 0x8A: "Scaron", 0x8B: "guilsinglleft",
+	0x8C: "OE", 0x8D: "bullet", 0x8E: "Zcaron", 0x8F: "bullet",
+	0x90: "bullet", 0x91: "quoteleft", 0x92: "quoteright", 0x93: "quotedblleft",
 	0x94: "quotedblright", 0x95: "bullet", 0x96: "endash", 0x97: "emdash",
 	0x98: "tilde", 0x99: "trademark", 0x9A: "scaron", 0x9B: "guilsinglright",
-	0x9C: "oe", 0x9E: "zcaron", 0x9F: "Ydieresis",
+	0x9C: "oe", 0x9D: "bullet", 0x9E: "zcaron", 0x9F: "Ydieresis",
+	0xA0: "space", 0xA1: "exclamdown", 0xA2: "cent", 0xA3: "sterling",
+	0xA4: "currency", 0xA5: "yen", 0xA6: "brokenbar", 0xA7: "section",
+	0xA8: "dieresis", 0xA9: "copyright", 0xAA: "ordfeminine", 0xAB: "guillemotleft",
+	0xAC: "logicalnot", 0xAD: "hyphen", 0xAE: "registered", 0xAF: "macron",
+	0xB0: "degree", 0xB1: "plusminus", 0xB2: "twosuperior", 0xB3: "threesuperior",
+	0xB4: "acute", 0xB5: "mu", 0xB6: "paragraph", 0xB7: "periodcentered",
+	0xB8: "cedilla", 0xB9: "onesuperior", 0xBA: "ordmasculine", 0xBB: "guillemotright",
+	0xBC: "onequarter", 0xBD: "onehalf", 0xBE: "threequarters", 0xBF: "questiondown",
+	0xC0: "Agrave", 0xC1: "Aacute", 0xC2: "Acircumflex", 0xC3: "Atilde",
+	0xC4: "Adieresis", 0xC5: "Aring", 0xC6: "AE", 0xC7: "Ccedilla",
+	0xC8: "Egrave", 0xC9: "Eacute", 0xCA: "Ecircumflex", 0xCB: "Edieresis",
+	0xCC: "Igrave", 0xCD: "Iacute", 0xCE: "Icircumflex", 0xCF: "Idieresis",
+	0xD0: "Eth", 0xD1: "Ntilde", 0xD2: "Ograve", 0xD3: "Oacute",
+	0xD4: "Ocircumflex", 0xD5: "Otilde", 0xD6: "Odieresis", 0xD7: "multiply",
+	0xD8: "Oslash", 0xD9: "Ugrave", 0xDA: "Uacute", 0xDB: "Ucircumflex",
+	0xDC: "Udieresis", 0xDD: "Yacute", 0xDE: "Thorn", 0xDF: "germandbls",
+	0xE0: "agrave", 0xE1: "aacute", 0xE2: "acircumflex", 0xE3: "atilde",
+	0xE4: "adieresis", 0xE5: "aring", 0xE6: "ae", 0xE7: "ccedilla",
+	0xE8: "egrave", 0xE9: "eacute", 0xEA: "ecircumflex", 0xEB: "edieresis",
+	0xEC: "igrave", 0xED: "iacute", 0xEE: "icircumflex", 0xEF: "idieresis",
+	0xF0: "eth", 0xF1: "ntilde", 0xF2: "ograve", 0xF3: "oacute",
+	0xF4: "ocircumflex", 0xF5: "otilde", 0xF6: "odieresis", 0xF7: "divide",
+	0xF8: "oslash", 0xF9: "ugrave", 0xFA: "uacute", 0xFB: "ucircumflex",
+	0xFC: "udieresis", 0xFD: "yacute", 0xFE: "thorn", 0xFF: "ydieresis",
 }
 
 // macRomanGlyphNames maps MacRomanEncoding byte values (0x80-0xFF) to glyph names.
@@ -1260,24 +1299,25 @@ var macRomanGlyphNames = map[byte]string{
 	0xA0: "dagger", 0xA1: "degree", 0xA2: "cent", 0xA3: "sterling",
 	0xA4: "section", 0xA5: "bullet", 0xA6: "paragraph", 0xA7: "germandbls",
 	0xA8: "registered", 0xA9: "copyright", 0xAA: "trademark", 0xAB: "acute",
-	0xAC: "dieresis", 0xAE: "AE", 0xAF: "Oslash",
-	0xB1: "plusminus", 0xB5: "mu", 0xB6: "partialdiff",
+	0xAC: "dieresis", 0xAD: "notequal", 0xAE: "AE", 0xAF: "Oslash",
+	0xB0: "infinity", 0xB1: "plusminus", 0xB2: "lessequal", 0xB3: "greaterequal",
+	0xB4: "yen", 0xB5: "mu", 0xB6: "partialdiff",
 	0xB7: "summation", 0xB8: "product", 0xB9: "pi", 0xBA: "integral",
-	0xBB: "ordfeminine", 0xBC: "ordmasculine", 0xBE: "ae", 0xBF: "oslash",
+	0xBB: "ordfeminine", 0xBC: "ordmasculine", 0xBD: "Omega", 0xBE: "ae", 0xBF: "oslash",
 	0xC0: "questiondown", 0xC1: "exclamdown", 0xC2: "logicalnot",
 	0xC3: "radical", 0xC4: "florin", 0xC5: "approxequal", 0xC6: "Delta",
 	0xC7: "guillemotleft", 0xC8: "guillemotright", 0xC9: "ellipsis",
 	0xCA: "space", 0xCB: "Agrave", 0xCC: "Atilde", 0xCD: "Otilde",
 	0xCE: "OE", 0xCF: "oe", 0xD0: "endash", 0xD1: "emdash",
 	0xD2: "quotedblleft", 0xD3: "quotedblright", 0xD4: "quoteleft",
-	0xD5: "quoteright", 0xD6: "divide", 0xD8: "ydieresis",
+	0xD5: "quoteright", 0xD6: "divide", 0xD7: "lozenge", 0xD8: "ydieresis",
 	0xD9: "Ydieresis", 0xDA: "fraction", 0xDB: "Euro",
 	0xDC: "guilsinglleft", 0xDD: "guilsinglright", 0xDE: "fi", 0xDF: "fl",
 	0xE0: "daggerdbl", 0xE1: "periodcentered", 0xE2: "quotesinglbase",
 	0xE3: "quotedblbase", 0xE4: "perthousand", 0xE5: "Acircumflex",
 	0xE6: "Ecircumflex", 0xE7: "Aacute", 0xE8: "Edieresis", 0xE9: "Egrave",
 	0xEA: "Iacute", 0xEB: "Icircumflex", 0xEC: "Idieresis", 0xED: "Igrave",
-	0xEE: "Oacute", 0xEF: "Ocircumflex", 0xF1: "Ograve",
+	0xEE: "Oacute", 0xEF: "Ocircumflex", 0xF0: "apple", 0xF1: "Ograve",
 	0xF2: "Uacute", 0xF3: "Ucircumflex", 0xF4: "Ugrave",
 	0xF5: "dotlessi", 0xF6: "circumflex", 0xF7: "tilde",
 	0xF8: "macron", 0xF9: "breve", 0xFA: "dotaccent", 0xFB: "ring",

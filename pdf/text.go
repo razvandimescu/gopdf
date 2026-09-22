@@ -1036,10 +1036,12 @@ func readLines(spans []TextSpan) []readLine {
 			first = i
 		}
 
-		for _, line := range attachRaised(found, up) {
-			if len(line) == 0 {
-				continue
-			}
+		// A superscript can carry one of its own; each pass settles one
+		// level, and every move empties a line, so the passes end.
+		for moved := attachRaised(found, up); moved != nil; moved = attachRaised(found, up) {
+			found = slices.DeleteFunc(moved, func(line []int) bool { return len(line) == 0 })
+		}
+		for _, line := range found {
 			slices.SortStableFunc(line, func(a, b int) int { return cmp.Compare(up[a].X, up[b].X) })
 			read := readLine{main: line[0], spans: make([]placed, len(line))}
 			for k, span := range line {
@@ -1078,7 +1080,8 @@ const (
 // the line's text, so smaller text elsewhere at a similar height stays where
 // it is. Touching text moves or stays together, so a word is not taken apart
 // for a glyph at its end, and a line moves only when all of it does. lines run
-// down the page; text that fits two lines goes to the nearer baseline.
+// down the page; text that fits two lines goes to the nearer baseline. It
+// returns nil when nothing moves.
 func attachRaised(lines [][]int, up []TextSpan) [][]int {
 	type text struct{ y, size float64 }
 	main := make([]text, len(lines))
@@ -1159,7 +1162,7 @@ func attachRaised(lines [][]int, up []TextSpan) [][]int {
 		maps.Copy(dest, hosts)
 	}
 	if len(dest) == 0 {
-		return lines
+		return nil
 	}
 	moved := make([][]int, len(lines))
 	for i, line := range lines {

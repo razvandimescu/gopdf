@@ -261,6 +261,10 @@ func TestRaisedTextJoinsItsLine(t *testing.T) {
 		{"subscript",
 			"BT /F1 11 Tf 72 700 Td (H) Tj ET BT /F1 7 Tf 79.95 697 Td (2) Tj ET BT /F1 11 Tf 83.85 700 Td (O) Tj ET",
 			"H2O"},
+		// "x" at 12pt is 6 wide, "2" at 8pt 4.448; the 3 is set on the 2.
+		{"nested superscripts",
+			"BT /F1 12 Tf 72 700 Td (x) Tj ET BT /F1 8 Tf 78 704 Td (2) Tj ET BT /F1 5 Tf 82.45 707 Td (3) Tj ET",
+			"x23"},
 		{"same size, close",
 			"BT /F1 11 Tf 72 700 Td (Alpha) Tj ET BT /F1 11 Tf 72 704 Td (Beta) Tj ET",
 			"Beta\nAlpha"},

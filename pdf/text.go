@@ -2,7 +2,6 @@ package pdf
 
 import (
 	"cmp"
-	"maps"
 	"math"
 	"slices"
 	"strconv"
@@ -1139,10 +1138,11 @@ func attachRaised(lines [][]int, up []TextSpan) [][]int {
 		return best
 	}
 
-	dest := make(map[int]int)
+	moved, changed := make([][]int, len(lines)), false
+next:
 	for i, line := range lines {
 		slices.SortStableFunc(line, func(a, b int) int { return cmp.Compare(up[a].X, up[b].X) })
-		hosts := make(map[int]int, len(line))
+		hosts := make([]int, len(line))
 		for start := 0; start < len(line); {
 			end := start + 1
 			for end < len(line) && up[line[end]].X-up[line[end-1]].end() <= up[line[end-1]].FontSize {
@@ -1151,28 +1151,21 @@ func attachRaised(lines [][]int, up []TextSpan) [][]int {
 			h := hostOf(line[start:end], i)
 			if h < 0 {
 				// A line of text in its own right keeps what it has.
-				clear(hosts)
-				break
+				moved[i] = append(moved[i], line...)
+				continue next
 			}
-			for _, s := range line[start:end] {
-				hosts[s] = h
+			for k := start; k < end; k++ {
+				hosts[k] = h
 			}
 			start = end
 		}
-		maps.Copy(dest, hosts)
-	}
-	if len(dest) == 0 {
-		return nil
-	}
-	moved := make([][]int, len(lines))
-	for i, line := range lines {
-		for _, s := range line {
-			j, ok := dest[s]
-			if !ok {
-				j = i
-			}
-			moved[j] = append(moved[j], s)
+		for k, s := range line {
+			moved[hosts[k]] = append(moved[hosts[k]], s)
 		}
+		changed = true
+	}
+	if !changed {
+		return nil
 	}
 	return moved
 }

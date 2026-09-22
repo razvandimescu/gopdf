@@ -589,7 +589,7 @@ Full reference on [pkg.go.dev](https://pkg.go.dev/github.com/razvandimescu/gopdf
 type TextSpan struct {
     X, Y     float64 // position on page
     EndX     float64 // X position after this span
-    FontSize float64
+    FontSize float64 // em height as drawn on the page, not the Tf operand
     Font     string
     Text     string
 }

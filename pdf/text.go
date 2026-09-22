@@ -12,7 +12,7 @@ import (
 type TextSpan struct {
 	X, Y     float64
 	EndX     float64 // X position after this span (for accurate gap detection)
-	FontSize float64
+	FontSize float64 // em height as drawn on the page, not the Tf operand
 	Font     string
 	Text     string
 }
@@ -359,13 +359,22 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 		tm[5] += d * tm[1]
 	}
 
+	// drawnSize is the height of the em on the page. The Tf operand is only
+	// one factor of it: a document can set 327.68 and scale it down to 9.36
+	// through the text matrix and the CTM.
+	drawnSize := func() float64 {
+		trm := matMul6(tm, ctm)
+		return fontSize * math.Hypot(trm[2], trm[3])
+	}
+
 	showString := func(s string) {
 		// The pen advances over every code, whether or not the font gives it a
 		// Unicode meaning: a string that decodes to nothing still occupies its
 		// width, and still has glyphs redaction may need to remove.
 		x, y := applyMatrix6(ctm, tm[4], tm[5])
+		size := drawnSize()
 		decoded := decodeString(s)
-		rec.show(decoded, fontSize, advanceTextMatrix(s))
+		rec.show(decoded, size, advanceTextMatrix(s))
 		if decoded == "" {
 			return
 		}
@@ -381,7 +390,7 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 			X:        x,
 			Y:        y,
 			EndX:     endX,
-			FontSize: fontSize,
+			FontSize: size,
 			Font:     fontName,
 			Text:     decoded,
 		})
@@ -646,7 +655,7 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 						X:        x,
 						Y:        y,
 						EndX:     x, // approximate
-						FontSize: fontSize,
+						FontSize: drawnSize(),
 						Font:     fontName,
 						Text:     top.actualText,
 					})
@@ -896,7 +905,9 @@ func spanGap(gap, fontSize float64) string {
 		const spaces = "          "
 		return spaces[:min(int(gap/spaceWidth), len(spaces))]
 	}
-	if gap > 0.5 {
+	// Relative to the size, so letter-spacing is not taken for word breaks:
+	// tracking of 0.7pt at 8pt is still one word.
+	if gap > math.Max(fontSize*0.15, 0.5) {
 		return " "
 	}
 	return ""
@@ -939,9 +950,9 @@ func BuildLines(spans []TextSpan) []TextLine {
 		sortSpansByX(lines[i].Spans)
 
 		var buf strings.Builder
-		prevEnd := -1.0
-		for _, span := range lines[i].Spans {
-			if prevEnd >= 0 {
+		var prevEnd float64
+		for j, span := range lines[i].Spans {
+			if j > 0 {
 				buf.WriteString(spanGap(span.X-prevEnd, span.FontSize))
 			}
 			buf.WriteString(span.Text)

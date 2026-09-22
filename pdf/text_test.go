@@ -136,8 +136,9 @@ func TestGlyphRunsEndWhereThePenLeft(t *testing.T) {
 	}
 }
 
-// Spacing is judged against the size a font is drawn at, and redaction has to
-// judge it the same way, or Page.Search finds a phrase RemoveText cannot.
+// A word gap is judged against the em as drawn along the baseline, and
+// redaction has to judge it the same way, or Page.Search finds a phrase
+// RemoveText cannot.
 func TestWordGapsFollowTheDrawnSize(t *testing.T) {
 	centredOrigin := func(content string) []byte {
 		return buildRawPDF(t, func(w *Writer, pagesRef Ref) Dict {
@@ -166,6 +167,14 @@ func TestWordGapsFollowTheDrawnSize(t *testing.T) {
 			"q 0.75 0 0 0.75 0 0 cm 0.038086 0 0 0.038086 0 0 cm "+
 				"BT /F1 327.68 Tf 1 0 0 1 2520 24500 Tm [(1.) -300 (System)] TJ ET Q"),
 			"1. System"},
+		// A 3pt gap on a 12pt-wide em, which is 24pt tall.
+		{"stretched vertically", contentPDF(t,
+			"q 1 0 0 2 0 0 cm BT /F1 12 Tf 72 300 Td [(Hello) -250 (World)] TJ ET Q"),
+			"Hello World"},
+		// A 1.5pt gap on an em condensed to 6pt wide.
+		{"condensed by Tz", contentPDF(t,
+			"BT /F1 12 Tf 50 Tz 72 700 Td [(Hello) -250 (World)] TJ ET"),
+			"Hello World"},
 		{"left of the origin", centredOrigin(
 			"BT /F1 12 Tf -500 0 Td [(RAI981) -300 (WCH981)] TJ ET"),
 			"RAI981 WCH981"},

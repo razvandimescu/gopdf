@@ -33,7 +33,7 @@ type showItem struct {
 type textRun struct {
 	text           string
 	glyphs         []glyph
-	fontSize       float64
+	emWidth        float64
 	startX, startY float64
 	endX           float64
 }
@@ -85,7 +85,7 @@ func newShowRecorder(content []byte) *showRecorder {
 // The recorder's methods are nil-safe: extraction passes a nil recorder when
 // nobody is redacting, which is every call but this file's.
 
-func (r *showRecorder) show(text string, fontSize float64, glyphs []glyph) {
+func (r *showRecorder) show(text string, emWidth float64, glyphs []glyph) {
 	if r == nil {
 		return
 	}
@@ -97,7 +97,7 @@ func (r *showRecorder) show(text string, fontSize float64, glyphs []glyph) {
 	// apart if one ever starts to.
 	if text != "" && len(glyphs) > 0 {
 		r.runs = append(r.runs, textRun{
-			text: text, glyphs: glyphs, fontSize: fontSize,
+			text: text, glyphs: glyphs, emWidth: emWidth,
 			startX: glyphs[0].x0, startY: glyphs[0].y0,
 			endX: glyphs[len(glyphs)-1].x1,
 		})
@@ -273,8 +273,8 @@ func runSeparator(prev, cur textRun) string {
 	if math.Abs(cur.startY-prev.startY) > lineYTolerance {
 		return "\n"
 	}
-	end := spanEnd(prev.startX, prev.endX, prev.fontSize, prev.text)
-	return spanGap(cur.startX-end, cur.fontSize)
+	end := spanEnd(prev.startX, prev.endX, prev.emWidth, prev.text)
+	return spanGap(cur.startX-end, cur.emWidth)
 }
 
 // mark marks the glyphs a rectangle takes. Marking and rewriting are separate

@@ -1424,7 +1424,7 @@ func spanEndX(sp TextSpan) float64 {
 	if sp.EndX > sp.X {
 		return sp.EndX
 	}
-	return sp.X + float64(len([]rune(sp.Text)))*sp.FontSize*0.5
+	return sp.X + float64(len([]rune(sp.Text)))*sp.em()*0.5
 }
 
 func cellTexts(cells []Cell) []string {

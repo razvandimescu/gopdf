@@ -266,16 +266,6 @@ func TestPaethPredictor(t *testing.T) {
 	}
 }
 
-func TestDecodeActualText(t *testing.T) {
-	if decodeActualText("hello") != "hello" {
-		t.Error("plain text passthrough failed")
-	}
-	utf16 := string([]byte{0xFE, 0xFF, 0x00, 0x41, 0x00, 0x42})
-	if decodeActualText(utf16) != "AB" {
-		t.Errorf("UTF-16BE: got %q, want AB", decodeActualText(utf16))
-	}
-}
-
 // Glyph names follow the Adobe Glyph List's rules; a part they cannot read
 // reads as nothing, never as the name itself.
 func TestGlyphToString(t *testing.T) {

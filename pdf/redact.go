@@ -2,6 +2,7 @@ package pdf
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -45,6 +46,7 @@ type showOp struct {
 	tc, tw     float64
 	scale      float64 // font size times horizontal scaling: TJ's unit
 	items      []showItem
+	section    string // for a BDC: the operator again, without its replacement text
 }
 
 // showFrame is the stream being recorded.
@@ -69,6 +71,80 @@ type showRecorder struct {
 	cur     showFrame
 	pending []showItem
 	runs    []textRun
+	open    []*section
+}
+
+// section is a marked-content section whose property list carries text that
+// readers show, copy or speak in place of its glyphs: ActualText, or an
+// alternate description or expansion. Removing a glyph drawn inside it has to
+// remove that text too, or the section still reads what was removed.
+type section struct {
+	stream int
+	op     showOp
+}
+
+var replacementText = []Name{"ActualText", "Alt", "E"}
+
+// beginSection opens a section for a BMC or BDC operator spanning start:end,
+// or returns nil when it carries no replacement text.
+func (r *showRecorder) beginSection(start, end int, operands []any, resources Dict, reader *Reader) *section {
+	if r == nil || !r.cur.recordable || len(operands) != 2 {
+		return nil
+	}
+	tag, _ := operands[0].(Name)
+	props, _ := operands[1].(Dict)
+	if name, ok := operands[1].(Name); ok && reader != nil {
+		list, _ := reader.ResolveDict(resources["Properties"])
+		props, _ = reader.ResolveDict(list[name])
+	}
+	if !slices.ContainsFunc(replacementText, func(k Name) bool { return props[k] != nil }) {
+		return nil
+	}
+
+	// The rest of the list stays: MCID ties the section to the structure tree.
+	// A named list is shared with whatever else names it, so it is written
+	// inline rather than edited, less the references a content stream cannot
+	// hold.
+	kept := Dict{}
+	for k, v := range props {
+		if !slices.Contains(replacementText, k) && !holdsRef(v) {
+			kept[k] = v
+		}
+	}
+	var b strings.Builder
+	b.WriteString("\n")
+	writeValue(&b, tag)
+	b.WriteByte(' ')
+	writeValue(&b, kept)
+	b.WriteString(" BDC")
+
+	s := &section{stream: r.cur.stream, op: showOp{start: start, end: end, op: "BDC", section: b.String()}}
+	r.open = append(r.open, s)
+	return s
+}
+
+func holdsRef(v any) bool {
+	switch v := v.(type) {
+	case Ref:
+		return true
+	case Dict:
+		for _, e := range v {
+			if holdsRef(e) {
+				return true
+			}
+		}
+	case Array:
+		return slices.ContainsFunc(v, holdsRef)
+	}
+	return false
+}
+
+func (r *showRecorder) endSection(s *section) {
+	if s == nil {
+		return
+	}
+	r.open = slices.DeleteFunc(r.open, func(o *section) bool { return o == s })
+	r.streams[s.stream] = append(r.streams[s.stream], s.op)
 }
 
 func newShowRecorder(content []byte) *showRecorder {
@@ -96,6 +172,9 @@ func (r *showRecorder) show(span TextSpan, glyphs []glyph) {
 		r.runs = append(r.runs, textRun{TextSpan: span, glyphs: glyphs})
 	}
 	r.pending = append(r.pending, showItem{glyphs: glyphs})
+	for _, s := range r.open {
+		s.op.items = append(s.op.items, showItem{glyphs: glyphs})
+	}
 }
 
 func (r *showRecorder) kern(v float64) {
@@ -275,8 +354,8 @@ func rewriteShowOps(content []byte, ops []showOp) ([]byte, bool) {
 		// A stream drawn more than once is walked once per drawing, so the
 		// same operation appears repeatedly, at the same offsets but at
 		// different places on the page — or on a different page altogether.
-		// One set of bytes can only have one fate: a glyph goes if any of
-		// those drawings put it under a rectangle.
+		// One set of bytes can only have one fate, which shareDrops has
+		// already given every drawing, so the first stands for them all.
 		j := i
 		for j < len(ops) && ops[j].start == ops[i].start && ops[j].end == ops[i].end {
 			j++
@@ -289,7 +368,7 @@ func rewriteShowOps(content []byte, ops []showOp) ([]byte, bool) {
 		if group[0].start < copied {
 			continue
 		}
-		replacement, ok := rewriteShowOp(group)
+		replacement, ok := rewriteShowOp(group[0])
 		if !ok {
 			continue
 		}
@@ -312,24 +391,7 @@ func rewriteShowOps(content []byte, ops []showOp) ([]byte, bool) {
 // original operator was, the replacement is a TJ: surviving glyphs keep their
 // positions because each removed run leaves behind a kerning number worth
 // exactly the advance it had.
-func rewriteShowOp(group []showOp) (string, bool) {
-	op := group[0]
-
-	// Every drawing of these bytes read the same codes, so the others' marks
-	// gather onto the first's glyphs.
-	for _, other := range group[1:] {
-		for i := range other.items {
-			if i >= len(op.items) {
-				break
-			}
-			for g := range other.items[i].glyphs {
-				if other.items[i].glyphs[g].drop && g < len(op.items[i].glyphs) {
-					op.items[i].glyphs[g].drop = true
-				}
-			}
-		}
-	}
-
+func rewriteShowOp(op showOp) (string, bool) {
 	any := false
 	for _, item := range op.items {
 		for _, g := range item.glyphs {
@@ -338,6 +400,9 @@ func rewriteShowOp(group []showOp) (string, bool) {
 	}
 	if !any {
 		return "", false
+	}
+	if op.section != "" {
+		return op.section, true
 	}
 
 	var b strings.Builder
@@ -483,10 +548,7 @@ func (e *Editor) stripText(reader *Reader, pages []Dict) (map[int][]byte, map[in
 		regions[rm.page] = append(regions[rm.page], rm.rect)
 	}
 
-	strippedPages := make(map[int][]byte)
-	formOps := make(map[int][]showOp)
-	formData := make(map[int][]byte)
-
+	recs := make(map[int]*showRecorder)
 	for i, page := range pages {
 		if len(e.removeQueries) == 0 && len(regions[i]) == 0 {
 			continue
@@ -495,9 +557,16 @@ func (e *Editor) stripText(reader *Reader, pages []Dict) (map[int][]byte, map[in
 		if err != nil {
 			return nil, nil, fmt.Errorf("removing text from page %d: %w", i, err)
 		}
-		if rec == nil {
-			continue
+		if rec != nil {
+			recs[i] = rec
 		}
+	}
+	shareDrops(recs)
+
+	strippedPages := make(map[int][]byte)
+	formOps := make(map[int][]showOp)
+	formData := make(map[int][]byte)
+	for i, rec := range recs {
 		for stream, ops := range rec.streams {
 			if stream == 0 {
 				if content, changed := rewriteShowOps(rec.data[0], ops); changed {
@@ -517,6 +586,36 @@ func (e *Editor) stripText(reader *Reader, pages []Dict) (map[int][]byte, map[in
 		}
 	}
 	return strippedPages, strippedForms, nil
+}
+
+// shareDrops gives every drawing of a form the drops of all of them. The form
+// is one set of bytes, so a glyph removed from any drawing is gone from each,
+// and a section around another drawing has to see that before it is written.
+func shareDrops(recs map[int]*showRecorder) {
+	type at struct{ stream, start, item, glyph int }
+	each := func(f func(at, *glyph)) {
+		for _, rec := range recs {
+			for stream, ops := range rec.streams {
+				for _, op := range ops {
+					if stream == 0 || op.section != "" {
+						continue
+					}
+					for i, item := range op.items {
+						for j := range item.glyphs {
+							f(at{stream, op.start, i, j}, &item.glyphs[j])
+						}
+					}
+				}
+			}
+		}
+	}
+	dropped := make(map[at]bool)
+	each(func(k at, g *glyph) {
+		if g.drop {
+			dropped[k] = true
+		}
+	})
+	each(func(k at, g *glyph) { g.drop = g.drop || dropped[k] })
 }
 
 // recordPage records everything page draws, walked in displayed space: where

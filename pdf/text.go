@@ -150,15 +150,7 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 		gsStack  []graphicsState
 	)
 
-	// Marked content state for ActualText extraction.
-	type markedEntry struct {
-		actualText string
-		hasActual  bool
-		startX     float64
-		startY     float64
-		suppress   bool // suppress glyph output when ActualText active
-	}
-	var markedStack []markedEntry
+	var sections []*section // marked-content sections open in this stream
 
 	// Font-specific decoding.
 	toUnicodeMaps := make(map[string]map[uint16]string)
@@ -415,17 +407,9 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 			endY:     endY,
 		}
 		rec.show(span, glyphs)
-		if decoded == "" {
-			return
+		if decoded != "" {
+			spans = append(spans, span)
 		}
-		// Suppress glyph output when ActualText is active — the EMC handler
-		// will emit the ActualText string instead.
-		for _, m := range markedStack {
-			if m.suppress {
-				return
-			}
-		}
-		spans = append(spans, span)
 	}
 
 	// Byte offset of the first operand since the last operator: an operator
@@ -461,8 +445,15 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 			stack = append(stack, arr)
 			continue
 		case TDictStart:
-			// Skip inline dicts (inline images etc).
-			skipInlineDict(lex)
+			// A property list, for BDC or DP. One that does not parse is
+			// skipped whole, so what follows it still reads as operators.
+			start := lex.Pos()
+			if dict, err := (&Parser{lex: lex}).parseDict(); err == nil {
+				stack = append(stack, dict)
+			} else {
+				lex.SetPos(start)
+				skipInlineDict(lex)
+			}
 			continue
 		}
 
@@ -656,46 +647,13 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 				}
 			}
 
-		case "BMC":
-			// Begin marked content (no properties).
-			markedStack = append(markedStack, markedEntry{})
-
-		case "BDC":
-			// Begin marked content with properties dict.
-			entry := markedEntry{}
-			if len(stack) >= 2 {
-				if props, ok := stack[len(stack)-1].(Dict); ok {
-					if at, ok := props.String("ActualText"); ok {
-						entry.actualText = decodeActualText(at)
-						entry.hasActual = true
-						entry.suppress = true
-						entry.startX = tm[4]
-						entry.startY = tm[5]
-					}
-				}
-			}
-			markedStack = append(markedStack, entry)
+		case "BMC", "BDC":
+			sections = append(sections, rec.beginSection(operandStart, lex.Pos(), stack, resources, reader))
 
 		case "EMC":
-			// End marked content.
-			if len(markedStack) > 0 {
-				top := markedStack[len(markedStack)-1]
-				markedStack = markedStack[:len(markedStack)-1]
-				if top.hasActual && top.actualText != "" {
-					x, y := applyMatrix6(ctm, top.startX, top.startY)
-					height, width, angle := drawnEm()
-					spans = append(spans, TextSpan{
-						X:        x,
-						Y:        y,
-						EndX:     x, // approximate
-						FontSize: height,
-						Font:     fontName,
-						Text:     top.actualText,
-						emWidth:  width,
-						angle:    angle,
-						endY:     y,
-					})
-				}
+			if n := len(sections); n > 0 {
+				rec.endSection(sections[n-1])
+				sections = sections[:n-1]
 			}
 
 		case "BI":
@@ -719,6 +677,10 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 		operandStart = lex.Pos()
 	}
 
+	// A section the stream never closes runs to its end.
+	for _, open := range sections {
+		rec.endSection(open)
+	}
 	return spans
 }
 
@@ -745,29 +707,6 @@ func parseInlineArray(lex *Lexer) Array {
 		}
 	}
 	return arr
-}
-
-// decodeActualText handles ActualText strings which may be UTF-16BE with BOM.
-func decodeActualText(s string) string {
-	raw := []byte(s)
-	if len(raw) >= 2 && raw[0] == 0xFE && raw[1] == 0xFF {
-		// UTF-16BE with BOM.
-		var runes []rune
-		for i := 2; i+1 < len(raw); i += 2 {
-			u := rune(raw[i])<<8 | rune(raw[i+1])
-			// Handle surrogate pairs.
-			if u >= 0xD800 && u <= 0xDBFF && i+3 < len(raw) {
-				lo := rune(raw[i+2])<<8 | rune(raw[i+3])
-				if lo >= 0xDC00 && lo <= 0xDFFF {
-					u = 0x10000 + (u-0xD800)*0x400 + (lo - 0xDC00)
-					i += 2
-				}
-			}
-			runes = append(runes, u)
-		}
-		return string(runes)
-	}
-	return s
 }
 
 func skipInlineDict(lex *Lexer) {

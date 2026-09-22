@@ -523,6 +523,8 @@ What removal reaches, and what it leaves alone:
 |---|---|
 | Page content stream glyphs | Yes |
 | Text inside Form XObjects | Yes |
+| Replacement text (ActualText, Alt, E) of marked content whose glyphs are removed | Yes; a named property list keeps its entry in the resources, which the section stops naming |
+| Replacement text in the structure tree of a tagged PDF | No |
 | Image XObjects | No |
 | Annotation text and appearance streams | No |
 | AcroForm / XFA field values | No |
@@ -644,7 +646,6 @@ type Rect struct {
 | **Page features** | Resource inheritance from page tree, rotation (0/90/180/270), MediaBox/CropBox |
 | **Content streams** | All text operators (BT/ET/Tf/Tm/Td/TD/T\*/TJ/Tj/'/"), graphics state stack (q/Q), CTM (cm) |
 | **XObjects** | Recursive text extraction from Form XObjects via Do operator |
-| **Marked content** | ActualText extraction (BMC/BDC/EMC) with UTF-16BE support |
 | **Encryption** | Standard security handler: RC4 40/128-bit (R2/R3), AES-128 (R4), AES-256 (R5/R6), crypt filters, /EncryptMetadata |
 | **Structure** | Linearized PDFs, incremental updates, indirect Length references |
 

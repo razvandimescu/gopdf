@@ -216,7 +216,7 @@ for _, r := range results {
 // Page 0 at (206, 691) size 70x12
 ```
 
-### Text drawn as outlines (experimental)
+### Text drawn as outlines
 
 Some producers draw every glyph as a filled path, and such a page extracts as
 empty. `Page.OutlineHint` says when a page's fills repeat like glyphs, so an
@@ -230,15 +230,6 @@ if hint.Possible() {
 ```
 
 It is a hint, not a verdict: a page of varied repeated symbols satisfies it too.
-
-Reading the words back — clustering the outlines into distinct shapes, having a
-labeller name each one, then placing the labelled glyphs on baselines and
-splitting words — is implemented but deliberately not exported. Naming the
-shapes takes a model, which does not belong inside a library whose point is to
-be deterministic and offline, and the placement and spacing rules were measured
-on a single producer. How it reaches callers — a CLI verb that takes the labels
-as a file, or something else — is undecided; it will not be public API before
-1.0.
 
 ### Encrypted PDFs
 
@@ -666,7 +657,7 @@ type Rect struct {
   candidates whose headings read as fragments rather than words. A real table
   whose columns are named in one or two characters therefore needs `-headers`
   (or `TableOpts.Headers`) to be found.
-- **Text drawn as filled outlines is not extracted by default.** Some producers (virtual printers re-printing a PDF, "convert text to outlines") draw every glyph as a path, and such a page extracts as empty. `Page.OutlineHint` reports when a page's fills repeat like glyphs; it is a hint, and repeated icons can trigger it too. Reading the text back is implemented but not exported, since naming the shapes takes a model and the delivery vehicle is undecided (see [Text drawn as outlines](#text-drawn-as-outlines-experimental)).
+- **Text drawn as filled outlines is not extracted.** Some producers (virtual printers re-printing a PDF, "convert text to outlines") draw every glyph as a path, and such a page extracts as empty. `Page.OutlineHint` reports when a page's fills repeat like glyphs, so an empty result can be told apart from an empty page. It is a hint: repeated icons can trigger it too (see [Text drawn as outlines](#text-drawn-as-outlines)).
 - No image extraction
 - **Images read as PNG, JPEG and GIF only** — what the standard library decodes. HEIC and AVIF need an HEVC or AV1 decoder, available only through CGo or copyleft code; WebP and TIFF would need `golang.org/x/image`. Neither fits a CGo-free MIT library with no dependencies. Unsupported formats are named in the error.
 - PDF creation supports standard 14 fonts only (no font embedding)
@@ -686,8 +677,6 @@ pdf/
   edit.go       Text search, text overlay, image overlay, visual redaction
   redact.go     Text removal: glyph-level content stream rewriting
   outline.go    Filled-path capture and clustering; OutlineHint
-  recover.go    Labelling outlined glyphs and reading their text (internal)
-  assemble.go   Labelled glyphs -> baselines, runs, words
   image.go      Image decoding (PNG/JPEG/GIF) → RGB + grayscale SMask streams
   creator.go    PDF creation from scratch (text, shapes, images, fonts)
   lexer.go      PDF byte stream tokenizer

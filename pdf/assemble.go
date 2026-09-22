@@ -343,9 +343,6 @@ func transferOffsets(glyphs []*outlineGlyph, own map[int]float64) map[int]transf
 		byKey[o.key] = append(byKey[o.key], s)
 	}
 	same := func(a, b outline) bool {
-		if a.key != b.key {
-			return false
-		}
 		small := math.Min(a.size, b.size)
 		for k := range a.coords {
 			if math.Abs(a.coords[k]*small/a.size-b.coords[k]*small/b.size) > shapeTolerance {
@@ -805,8 +802,7 @@ func wordSpan(w []*outlineGlyph, r *run, report *recoveryReport) TextSpan {
 		case g.isLookAlike():
 			var by labelEvidence
 			label, by = lookAlike(w, i)
-			alt := slices.DeleteFunc(slices.Clone(lookAlikes), func(a string) bool { return a == label })
-			report.Guessed = append(report.Guessed, guessedGlyph{g.occurrence(), label, alt, by})
+			report.Guessed = append(report.Guessed, guessedGlyph{g.occurrence(), label, by})
 		}
 		b.WriteString(label)
 	}

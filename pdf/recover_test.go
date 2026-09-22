@@ -134,13 +134,28 @@ func synthDoc(t *testing.T, glyphs []string, extra string) *Document {
 	return doc
 }
 
-func recoverText(t *testing.T, doc *Document, label glyphLabeler) (string, recoveryReport) {
+// recoverSpans recovers a one-page document's outlined text.
+func recoverSpans(t *testing.T, doc *Document, label glyphLabeler) ([]TextSpan, recoveryReport) {
 	t.Helper()
-	report, err := doc.recoverOutlines(context.Background(), label)
+	a, report, err := doc.computeRecovery(context.Background(), label)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return docText(t, doc), report
+	return a.spans[0], report
+}
+
+func recoverText(t *testing.T, doc *Document, label glyphLabeler) (string, recoveryReport) {
+	t.Helper()
+	spans, report := recoverSpans(t, doc, label)
+	return spansText(spans), report
+}
+
+func spansText(spans []TextSpan) string {
+	var lines []string
+	for _, l := range BuildLines(spans) {
+		lines = append(lines, l.Text)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func TestRecoverOutlinesReadsText(t *testing.T) {
@@ -165,9 +180,6 @@ func TestRecoverOutlinesReadsText(t *testing.T) {
 	var chosen []string
 	for _, g := range report.Guessed {
 		chosen = append(chosen, g.Chosen)
-		if len(g.Alternatives) != 2 {
-			t.Errorf("guess %+v: want the other two look-alikes as alternatives", g)
-		}
 	}
 	if want := []string{"l", "l", "l", "I", "l", "l"}; !reflect.DeepEqual(chosen, want) {
 		t.Errorf("guessed %q, want %q in document order", chosen, want)
@@ -201,8 +213,8 @@ func TestRecoverOutlinesTransfersOffsetsAcrossSizes(t *testing.T) {
 		}
 		return labels, nil
 	}
-	doc := synthDoc(t, glyphs, "")
-	text, report := recoverText(t, doc, capitalsWhenLarge)
+	spans, report := recoverSpans(t, synthDoc(t, glyphs, ""), capitalsWhenLarge)
+	text := spansText(spans)
 
 	if first, _, _ := strings.Cut(text, "\n"); first != "PALE" {
 		t.Errorf("first line %q, want the heading PALE; text:\n%s", first, text)
@@ -212,7 +224,6 @@ func TestRecoverOutlinesTransfersOffsetsAcrossSizes(t *testing.T) {
 		t.Errorf("%d transfer-placed, %d omitted; want p, a and e placed by transfer, none omitted",
 			len(report.TransferPlaced), len(report.Omitted))
 	}
-	spans, _ := doc.Page(0).TextSpans()
 	for _, s := range spans {
 		if s.Text == "PALE" && math.Abs(s.Y-790) > baselineTolerance {
 			t.Errorf("heading baseline %v, want 790", s.Y)
@@ -235,9 +246,8 @@ func synthWord(s string, k, x, y float64) ([]string, float64) {
 	return out, x
 }
 
-func spanNamed(t *testing.T, doc *Document, text string) TextSpan {
+func spanNamed(t *testing.T, spans []TextSpan, text string) TextSpan {
 	t.Helper()
-	spans, _ := doc.Page(0).TextSpans()
 	for _, s := range spans {
 		if s.Text == text {
 			return s
@@ -325,10 +335,9 @@ func TestRecoverOutlinesLeavesAnAmbiguousGlyphAlone(t *testing.T) {
 		return labels, nil
 	}
 
-	doc := synthDoc(t, glyphs, "")
-	_, report := recoverText(t, doc, barsWhenLarge)
+	spans, report := recoverSpans(t, synthDoc(t, glyphs, ""), barsWhenLarge)
 
-	if s := spanNamed(t, doc, ","); math.Abs(s.Y-505.6) > baselineTolerance {
+	if s := spanNamed(t, spans, ","); math.Abs(s.Y-505.6) > baselineTolerance {
 		t.Errorf("ambiguous glyph moved to baseline %v, want the line pass 1 gave it, 505.6", s.Y)
 	}
 	if len(report.Rehomed) != 1 {
@@ -364,13 +373,12 @@ func TestRecoverOutlinesKeepsLinesThatBelong(t *testing.T) {
 	// row's body.
 	add("OOO", 1, 52, 380)
 
-	doc := synthDoc(t, glyphs, "")
-	_, report := recoverText(t, doc, synthLabeller)
+	spans, report := recoverSpans(t, synthDoc(t, glyphs, ""), synthLabeller)
 	for _, c := range []struct {
 		text     string
 		baseline float64
 	}{{"O", 499.2}, {"e", 463.2}, {"OO", 425.8}, {"OOO", 380}} {
-		if s := spanNamed(t, doc, c.text); math.Abs(s.Y-c.baseline) > baselineTolerance {
+		if s := spanNamed(t, spans, c.text); math.Abs(s.Y-c.baseline) > baselineTolerance {
 			t.Errorf("%q moved to baseline %v, want %v", c.text, s.Y, c.baseline)
 		}
 	}
@@ -379,24 +387,27 @@ func TestRecoverOutlinesKeepsLinesThatBelong(t *testing.T) {
 	}
 }
 
-func TestRecoverOutlinesMergesWithRealText(t *testing.T) {
+func TestRecoverOutlinesLinesUpWithRealText(t *testing.T) {
 	doc := synthDoc(t, synthGlyphs(synthText), "BT /F1 9.72 Tf 300 740 Td (Total) Tj ET")
-	text, _ := recoverText(t, doc, synthLabeller)
-	if first, _, _ := strings.Cut(text, "\n"); first != "HELLO WORLD, TAKE ONE DEAL"+strings.Repeat(" ", 10)+"Total" {
+	written, err := doc.Page(0).TextSpans()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, _ := recoverSpans(t, doc, synthLabeller)
+	if first, _, _ := strings.Cut(spansText(append(written, recovered...)), "\n"); first != "HELLO WORLD, TAKE ONE DEAL"+strings.Repeat(" ", 10)+"Total" {
 		t.Errorf("first line %q: want the recovered words and the real one together", first)
 	}
 }
 
 func TestRecoverOutlinesFeedsTables(t *testing.T) {
-	doc := synthDoc(t, synthGlyphs([]string{"HEAD\tAREA", "OAK\tTEN", "ELK\tONE", "DEER\tTWO", "HARE\tNONE"}), "")
-	_, report := recoverText(t, doc, synthLabeller)
+	spans, report := recoverSpans(t, synthDoc(t, synthGlyphs([]string{"HEAD\tAREA", "OAK\tTEN", "ELK\tONE", "DEER\tTWO", "HARE\tNONE"}), ""), synthLabeller)
 	// One word per cell leaves no word spaces to find a valley between.
 	if !report.SpacingFallback {
 		t.Error("spacing found a valley among intra-word gaps alone")
 	}
-	table, err := doc.Page(0).FindTable(&TableOpts{Headers: []string{"HEAD", "AREA"}})
-	if err != nil || table == nil {
-		t.Fatalf("no table: %v", err)
+	table := FindTable(spans, &TableOpts{Headers: []string{"HEAD", "AREA"}})
+	if table == nil {
+		t.Fatal("no table")
 	}
 	var rows [][]string
 	for _, r := range table.Rows {
@@ -414,7 +425,7 @@ func TestRecoverOutlinesFeedsTables(t *testing.T) {
 func TestRecoverOutlinesAccountsForEveryGlyph(t *testing.T) {
 	// A stray hyphen far from any line has nowhere to go.
 	doc := synthDoc(t, synthGlyphs(synthText), synthGlyph('-', 400, 300, false))
-	report, err := doc.recoverOutlines(context.Background(), func(ctx context.Context, shapes []glyphShape) (map[int]string, error) {
+	spans, report := recoverSpans(t, doc, func(ctx context.Context, shapes []glyphShape) (map[int]string, error) {
 		labels, _ := synthLabeller(ctx, shapes)
 		for id, l := range labels {
 			switch l {
@@ -426,17 +437,11 @@ func TestRecoverOutlinesAccountsForEveryGlyph(t *testing.T) {
 		}
 		return labels, nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	all := strings.Join(synthText, "")
 	unlabeled := strings.Count(all, "K")
 	placed := 0
-	for p := range doc.NumPages() {
-		spans, _ := doc.Page(p).TextSpans()
-		for _, s := range spans {
-			placed += len([]rune(strings.ReplaceAll(s.Text, " ", "")))
-		}
+	for _, s := range spans {
+		placed += len([]rune(strings.ReplaceAll(s.Text, " ", "")))
 	}
 	if report.Rejected != strings.Count(all, "W") || len(report.Unlabeled) != 1 {
 		t.Errorf("rejected %d glyphs and left %v unlabelled; want %d rejected and one shape unlabelled",
@@ -449,105 +454,39 @@ func TestRecoverOutlinesAccountsForEveryGlyph(t *testing.T) {
 		t.Errorf("%d placed + %d rejected + %d unlabelled + %d omitted != %d glyphs",
 			placed, report.Rejected, unlabeled, len(report.Omitted), report.Glyphs)
 	}
-	if text := docText(t, doc); strings.ContainsAny(text, "WK") {
+	if text := spansText(spans); strings.ContainsAny(text, "WK") {
 		t.Errorf("rejected or unlabelled glyphs reached the text:\n%s", text)
 	}
 }
 
-func TestRecoverOutlinesIsAllOrNothing(t *testing.T) {
-	doc := synthDoc(t, synthGlyphs(synthText), "BT /F1 12 Tf 72 100 Td (real) Tj ET")
-	before := docText(t, doc)
+func TestRecoverOutlinesReturnsLabellerErrors(t *testing.T) {
+	doc := synthDoc(t, synthGlyphs(synthText), "")
 
 	failing := errors.New("labeller down")
-	if _, err := doc.recoverOutlines(context.Background(), func(context.Context, []glyphShape) (map[int]string, error) {
+	if _, _, err := doc.computeRecovery(context.Background(), func(context.Context, []glyphShape) (map[int]string, error) {
 		return nil, failing
 	}); !errors.Is(err, failing) {
 		t.Errorf("labeller error: got %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := doc.recoverOutlines(ctx, synthLabeller); !errors.Is(err, context.Canceled) {
+	if _, _, err := doc.computeRecovery(ctx, synthLabeller); !errors.Is(err, context.Canceled) {
 		t.Errorf("cancelled context: got %v", err)
 	}
-	if _, err := doc.recoverOutlines(context.Background(), func(context.Context, []glyphShape) (map[int]string, error) {
+	if _, _, err := doc.computeRecovery(context.Background(), func(context.Context, []glyphShape) (map[int]string, error) {
 		return map[int]string{999: "x"}, nil
 	}); err == nil {
 		t.Error("a label for a shape that does not exist was accepted")
-	}
-	if text := docText(t, doc); text != before {
-		t.Errorf("failed recovery changed the text:\n%s\nwant\n%s", text, before)
-	}
-
-	first, r1 := recoverText(t, doc, synthLabeller)
-	second, r2 := recoverText(t, doc, synthLabeller)
-	if second != first || !reflect.DeepEqual(r1, r2) {
-		t.Errorf("a second recovery differs from the first:\n%s\nwant\n%s", second, first)
 	}
 }
 
 func TestRecoverOutlinesWithoutCandidates(t *testing.T) {
 	doc := synthDoc(t, nil, "BT /F1 12 Tf 72 700 Td (Only text) Tj ET")
-	text, report := recoverText(t, doc, func(context.Context, []glyphShape) (map[int]string, error) {
+	spans, report := recoverSpans(t, doc, func(context.Context, []glyphShape) (map[int]string, error) {
 		t.Error("labeller called with no candidates")
 		return nil, nil
 	})
-	if text != "Only text" || report.Glyphs != 0 {
-		t.Errorf("text %q, report %+v", text, report)
-	}
-}
-
-func TestRemovalNeverSeesRecoveredText(t *testing.T) {
-	data := contentPDF(t, strings.Join(synthGlyphs(synthText), "\n"))
-	ed := NewEditor(data)
-	doc, err := ed.Document()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := doc.recoverOutlines(context.Background(), synthLabeller); err != nil {
-		t.Fatal(err)
-	}
-	if len(doc.Search("HELLO")) == 0 {
-		t.Fatal("recovered text is not searchable")
-	}
-	ed.RemoveText("HELLO")
-	out, err := ed.Apply()
-	if err != nil {
-		t.Fatal(err)
-	}
-	after, err := OpenBytes(out)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := string(mustContent(t, after.reader, after.pages[0])), string(mustContent(t, doc.reader, doc.pages[0])); got != want {
-		t.Errorf("removal changed outlines it cannot delete:\n%s", got)
-	}
-}
-
-func TestGlyphSheet(t *testing.T) {
-	doc := synthDoc(t, synthGlyphs(synthText), "")
-	_, shapes, err := doc.outlineGlyphs()
-	if err != nil {
-		t.Fatal(err)
-	}
-	sheet, err := glyphSheet(shapes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	drawn, err := OpenBytes(sheet)
-	if err != nil {
-		t.Fatal(err)
-	}
-	h, err := drawn.Page(0).OutlineHint()
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := docText(t, drawn)
-	for _, s := range shapes {
-		if !strings.Contains(text, fmt.Sprint(s.ID)) {
-			t.Errorf("sheet does not name shape %d:\n%s", s.ID, text)
-		}
-	}
-	if h.Candidates != len(shapes) || h.Shapes != len(shapes) {
-		t.Errorf("sheet draws %d glyphs in %d shapes, want each of the %d shapes once", h.Candidates, h.Shapes, len(shapes))
+	if len(spans) != 0 || report.Glyphs != 0 {
+		t.Errorf("recovered %v, report %+v", spans, report)
 	}
 }

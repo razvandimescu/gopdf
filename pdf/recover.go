@@ -3,7 +3,6 @@ package pdf
 import (
 	"context"
 	"fmt"
-	"strconv"
 )
 
 // glyphShape is one distinct outline, standing for every glyph drawn with it.
@@ -19,7 +18,7 @@ type glyphShape struct {
 // the map is unlabelled.
 type glyphLabeler func(ctx context.Context, shapes []glyphShape) (map[int]string, error)
 
-// recoveryReport accounts for every glyph recoverOutlines found:
+// recoveryReport accounts for every glyph computeRecovery found:
 // Glyphs = placed + Rejected + the Count of each Unlabeled shape + len(Omitted),
 // where placed includes FallbackPlaced, TransferPlaced and Rehomed. A glyph
 // that could belong to two lines is decided by the fallback, and appears in
@@ -47,9 +46,8 @@ type glyphRef struct {
 // one bare rectangle), and what chose it.
 type guessedGlyph struct {
 	glyphRef
-	Chosen       string
-	Alternatives []string
-	By           labelEvidence
+	Chosen string
+	By     labelEvidence
 }
 
 // labelEvidence is what decided a guessedGlyph.
@@ -64,11 +62,9 @@ const (
 	evidenceByCase
 )
 
-// recoverOutlines labels the document's outlined glyphs and, on success,
-// installs the recovered text: TextSpans, TextLines, Text, Tables and Search
-// include it from then on, merged with any real text on the page. The
-// recovered spans are words, positioned at their ink extent, with an estimated
-// FontSize and no Font.
+// computeRecovery labels the document's outlined glyphs and assembles them
+// into words: per page, spans positioned at their ink extent, with an
+// estimated FontSize and no Font. The document is not changed.
 //
 // Recovery is experimental. Its placement and spacing rules were measured on
 // one producer (Microsoft Print to PDF), and table structure built over
@@ -76,24 +72,7 @@ const (
 // read as one.
 //
 // The labeller is called once, with ctx, and only when there are candidates.
-// Shapes reach it without order or position. A labeller error or a cancelled
-// ctx leaves the document as it was. A successful call replaces any earlier
-// recovery. recoverOutlines must not run concurrently with extraction on the
-// same Document.
-//
-// Removal never sees recovered text: [Editor.RemoveText] and
-// [Editor.RemoveRegion] delete only glyphs drawn with text operators, and
-// outlines are paths.
-func (d *Document) recoverOutlines(ctx context.Context, label glyphLabeler) (recoveryReport, error) {
-	a, report, err := d.computeRecovery(ctx, label)
-	if err != nil {
-		return recoveryReport{}, err
-	}
-	d.recovered = a.spans
-	return report, nil
-}
-
-// computeRecovery does all of recoverOutlines but install the result.
+// Shapes reach it without order or position.
 func (d *Document) computeRecovery(ctx context.Context, label glyphLabeler) (assembly, recoveryReport, error) {
 	glyphs, shapes, err := d.outlineGlyphs()
 	if err != nil {
@@ -181,24 +160,4 @@ func (d *Document) outlineGlyphs() ([]*outlineGlyph, []glyphShape, error) {
 		glyphs[i].shape, glyphs[i].rect = id, rects[id]
 	}
 	return glyphs, shapes, nil
-}
-
-// glyphSheet draws shapes as a one-page PDF grid, each cell tagged with its
-// shape's ID, for a labeller that reads images: pass it to a vision model that
-// accepts PDF, or rasterise it first.
-func glyphSheet(shapes []glyphShape) ([]byte, error) {
-	const cols, cell, scale = 12, 50.0, 2.0
-	rows := max(1, (len(shapes)+cols-1)/cols)
-	c := NewCreator()
-	pb := c.NewPage(cols*cell, float64(rows)*cell)
-	pb.SetFont("Helvetica", 7)
-	pb.SetColor(0, 0, 1)
-	for i, s := range shapes {
-		x, y := float64(i%cols)*cell, float64(rows-1-i/cols)*cell
-		pb.DrawText(x+2, y+cell-9, strconv.Itoa(s.ID))
-		k := min(scale, (cell-14)/max(s.Width, s.Height))
-		fmt.Fprintf(&pb.buf, "q 0 g %[1]s 0 0 %[1]s %s %s cm %s Q\n",
-			formatOperand(k), formatOperand(x+(cell-k*s.Width)/2), formatOperand(y+4), s.Path)
-	}
-	return c.Build()
 }

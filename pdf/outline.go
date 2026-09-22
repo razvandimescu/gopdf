@@ -376,7 +376,7 @@ func (h OutlineHint) Possible() bool {
 // OutlineHint measures the page's glyph-sized fills. Text extraction is
 // unaffected: this reads the page separately.
 func (p *Page) OutlineHint() (OutlineHint, error) {
-	fills, err := pageFills(p.dict(), p.doc.reader)
+	fills, err := pageFills(p.dict, p.reader)
 	if err != nil {
 		return OutlineHint{}, err
 	}

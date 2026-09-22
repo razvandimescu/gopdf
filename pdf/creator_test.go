@@ -44,7 +44,7 @@ func testMultiPagePDF(t *testing.T, pageTexts ...string) []byte {
 }
 
 func TestCreatorSinglePage(t *testing.T) {
-	data := testPDF(t, "Hello World", "Second line")
+	data := testPDF(t, "Hello World", "Second line's `quotes`")
 
 	doc, err := OpenBytes(data)
 	if err != nil {
@@ -62,8 +62,10 @@ func TestCreatorSinglePage(t *testing.T) {
 	if !strings.Contains(text, "Hello World") {
 		t.Errorf("text missing 'Hello World', got: %s", text)
 	}
-	if !strings.Contains(text, "Second line") {
-		t.Errorf("text missing 'Second line', got: %s", text)
+	// The creator's fonts name WinAnsi: Helvetica's own encoding draws ' and `
+	// as ’ and ‘.
+	if !strings.Contains(text, "Second line's `quotes`") {
+		t.Errorf("text missing \"Second line's `quotes`\", got: %s", text)
 	}
 }
 

@@ -1074,13 +1074,10 @@ const (
 
 // attachRaised moves each superscript and subscript into the line it is set
 // on. They sit further off the baseline than a line may drift, but never at
-// the size of the text they belong to, which is what tells them from a line
-// of their own: same-sized text stays apart however close. They also follow
-// the line's text, so smaller text elsewhere at a similar height stays where
-// it is. Touching text moves or stays together, so a word is not taken apart
-// for a glyph at its end, and a line moves only when all of it does. lines run
-// down the page; text that fits two lines goes to the nearer baseline. It
-// returns nil when nothing moves.
+// the size of the text they belong to: same-sized text stays apart however
+// close. Touching text moves together, so a word is not taken apart for a
+// glyph at its end. lines run down the page; text that fits two lines goes to
+// the nearer baseline. It returns nil when nothing moves.
 func attachRaised(lines [][]int, up []TextSpan) [][]int {
 	type text struct{ y, size float64 }
 	main := make([]text, len(lines))
@@ -1111,8 +1108,6 @@ func attachRaised(lines [][]int, up []TextSpan) [][]int {
 		return after
 	}
 
-	// hostOf is the line run, from line i, is a superscript or subscript
-	// on, or -1.
 	hostOf := func(run []int, i int) int {
 		var size float64
 		for _, s := range run {

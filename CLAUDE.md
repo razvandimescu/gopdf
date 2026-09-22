@@ -44,7 +44,7 @@ Key design decisions:
 - Object resolution is cached in `Reader.cache` to avoid re-parsing
 - Compressed objects (ObjStm) and xref streams (PDF 1.5+) are fully supported
 - Resource inheritance propagates `Resources`/`MediaBox`/`CropBox`/`Rotate` down the page tree during `collectPages`
-- Font encoding chain: ToUnicode CMap → Encoding Differences → WinAnsi/MacRoman fallback
+- Font encoding chain: ToUnicode CMap → the font's encoding (base encoding with Differences over it; a font naming no base gets StandardEncoding, or WinAnsi if TrueType) → Adobe Glyph List
 
 ## Constraints
 

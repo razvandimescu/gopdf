@@ -14,20 +14,7 @@ import (
 // with Helvetica available as /F1.
 func contentPDF(t *testing.T, content string) []byte {
 	t.Helper()
-	return buildRawPDF(t, func(w *Writer, pagesRef Ref) Dict {
-		fontRef := w.AllocRef()
-		w.WriteObject(fontRef, Dict{
-			"Type": Name("Font"), "Subtype": Name("Type1"), "BaseFont": Name("Helvetica"),
-		})
-		contentRef := w.AllocRef()
-		w.WriteStream(contentRef, Dict{}, []byte(content))
-		return Dict{
-			"Type": Name("Page"), "Parent": pagesRef,
-			"MediaBox":  Array{0, 0, 612, 792},
-			"Resources": Dict{"Font": Dict{Name("F1"): fontRef}},
-			"Contents":  contentRef,
-		}
-	})
+	return fontPDF(t, Dict{"Type": Name("Font"), "Subtype": Name("Type1"), "BaseFont": Name("Helvetica")}, content)
 }
 
 // cmapPDF builds a one-page PDF whose /F1 carries a ToUnicode CMap with the
@@ -105,6 +92,23 @@ func TestRemoveTextDeletesTheGlyphs(t *testing.T) {
 
 	if text := docText(t, doc); !strings.Contains(text, "Jane Doe") || !strings.Contains(text, "on file") {
 		t.Errorf("removal took surrounding text with it: %q", text)
+	}
+}
+
+// Removal walks the page as extraction does, inline images included. When a
+// true EI was refused, the text after it was swallowed into the image, and
+// RemoveText succeeded while removing nothing.
+func TestRemoveTextAfterInlineImage(t *testing.T) {
+	data := contentPDF(t, "q BI /F /Fl ID \x80 EI Q % \xe2\x80\x94 note\n"+
+		"BT /F1 12 Tf 72 700 Td (keep) Tj (secret) Tj ET")
+
+	doc := removeText(t, data, "secret")
+
+	if content := string(mustContent(t, doc.reader, doc.pages[0])); strings.Contains(content, "secret") {
+		t.Errorf("the removed codes are still in the content stream:\n%s", content)
+	}
+	if text := docText(t, doc); strings.TrimSpace(text) != "keep" {
+		t.Errorf("got %q, want keep", text)
 	}
 }
 
@@ -304,6 +308,17 @@ func TestRemoveRegionOnRotatedPage(t *testing.T) {
 	}
 	if !strings.Contains(text, "elsewhere") {
 		t.Errorf("the rectangle reached a second baseline: %q", text)
+	}
+}
+
+// Removal finds a query by reading the page as Page.Search does, so on a
+// rotated page it has to read in displayed space as well: a word drawn a glyph
+// at a time is one line there and a column of single letters in user space.
+func TestRemoveTextOnRotatedPage(t *testing.T) {
+	doc := removeText(t, glyphRunPDF(t), "Revision")
+
+	if text := docText(t, doc); strings.TrimSpace(text) != "" {
+		t.Errorf("the rotated word survived: %q", text)
 	}
 }
 

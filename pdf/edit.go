@@ -731,6 +731,7 @@ func ensureOverlayFont(page Dict, fontName Name) {
 			"Type":     Name("Font"),
 			"Subtype":  Name("Type1"),
 			"BaseFont": Name("Helvetica"),
+			"Encoding": Name("WinAnsiEncoding"),
 		}
 	}
 }

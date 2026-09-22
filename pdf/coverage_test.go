@@ -276,18 +276,27 @@ func TestDecodeActualText(t *testing.T) {
 	}
 }
 
+// Glyph names follow the Adobe Glyph List's rules; a part they cannot read
+// reads as nothing, never as the name itself.
 func TestGlyphToString(t *testing.T) {
-	if glyphToString("space") != " " {
-		t.Errorf("space glyph: got %q", glyphToString("space"))
-	}
-	if glyphToString("uni0041") != "A" {
-		t.Errorf("uni0041: got %q", glyphToString("uni0041"))
-	}
-	if glyphToString("X") != "X" {
-		t.Errorf("single char: got %q", glyphToString("X"))
-	}
-	if glyphToString("unknownglyph") != "unknownglyph" {
-		t.Errorf("unknown: got %q", glyphToString("unknownglyph"))
+	for name, want := range map[string]string{
+		"space":        " ",
+		"X":            "X",
+		"uni0041":      "A",
+		"f_f_i":        "ffi",
+		"one.oldstyle": "1",
+		"uni00660069":  "fi",
+		"u1F600":       "\U0001F600",
+		"f_g12":        "f",
+		"g12":          "",
+		".notdef":      "",
+		"uniD835":      "",
+		"uni00410":     "",
+		"uni0041D835":  "",
+	} {
+		if got := glyphToString(name); got != want {
+			t.Errorf("%s: got %q, want %q", name, got, want)
+		}
 	}
 }
 

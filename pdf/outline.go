@@ -180,25 +180,6 @@ func (c *pathCollector) discard() {
 	c.closed = false
 }
 
-// mark and transformSince bracket a Form XObject: its fills are recorded in
-// the form's own space and carried out through the form's CTM afterwards, as
-// its text spans are.
-func (c *pathCollector) mark() int {
-	if c == nil {
-		return 0
-	}
-	return len(c.fills)
-}
-
-func (c *pathCollector) transformSince(from int, m [6]float64) {
-	if c == nil {
-		return
-	}
-	for i := from; i < len(c.fills); i++ {
-		c.fills[i].transform(m)
-	}
-}
-
 func (f *filledPath) transform(m [6]float64) {
 	for i := range f.segs {
 		for k := range f.segs[i].points() {

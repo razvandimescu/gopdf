@@ -49,6 +49,7 @@ func (c *Creator) Build() ([]byte, error) {
 				"Type":     Name("Font"),
 				"Subtype":  Name("Type1"),
 				"BaseFont": Name(baseFont),
+				"Encoding": Name("WinAnsiEncoding"),
 			}
 		}
 

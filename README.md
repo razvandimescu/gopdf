@@ -638,7 +638,7 @@ type Rect struct {
 | Category | Details |
 |---|---|
 | **PDF versions** | 1.0–1.7, including xref streams (1.5+) and compressed object streams |
-| **Text encodings** | ToUnicode CMaps (bfchar + bfrange), WinAnsi, MacRoman, encoding differences, Adobe Glyph List (4200 names) |
+| **Text encodings** | ToUnicode CMaps (bfchar + bfrange), WinAnsi, MacRoman, Standard, encoding differences, Adobe Glyph List (4200 names) |
 | **Font types** | Type1, TrueType, CIDFont/Type0 composite fonts, standard 14 fonts with built-in width tables |
 | **Compression** | FlateDecode, LZWDecode, ASCII85Decode, ASCIIHexDecode, PNG predictors, filter chains |
 | **Page features** | Resource inheritance from page tree, rotation (0/90/180/270), MediaBox/CropBox |

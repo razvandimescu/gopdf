@@ -3,6 +3,7 @@ package pdf
 import (
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -31,7 +32,7 @@ func ExtractText(content []byte, fonts map[Name]Dict, reader *Reader) []TextSpan
 // ExtractTextWithResources extracts text with access to full page resources
 // (needed for Form XObject extraction via the Do operator).
 func ExtractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reader, resources Dict) []TextSpan {
-	return extractTextWithResources(content, fonts, reader, resources, 0, nil, nil)
+	return extractTextWithResources(content, fonts, reader, resources, identity, 0, nil, nil)
 }
 
 // ExtractPageText extracts text from a page, handling rotation and resources automatically.
@@ -40,8 +41,8 @@ func ExtractPageText(page Dict, reader *Reader) []TextSpan {
 	return spans
 }
 
-// extractPage walks a page's content once. When paths is not nil it also
-// collects the page's fills, carried into displayed space as the spans are.
+// extractPage walks a page's content once, in displayed space. When paths is
+// not nil it also collects the page's fills.
 func extractPage(page Dict, reader *Reader, paths *pathCollector) ([]TextSpan, error) {
 	content, err := reader.PageContent(page)
 	if err != nil || content == nil {
@@ -49,38 +50,23 @@ func extractPage(page Dict, reader *Reader, paths *pathCollector) ([]TextSpan, e
 	}
 	fonts := reader.PageFonts(page)
 	resources := reader.PageResources(page)
-	spans := extractTextWithResources(content, fonts, reader, resources, 0, nil, paths)
-
-	rotM, rotated := pageRotationMatrix(page)
-	if !rotated {
-		return spans, nil
-	}
-	paths.transformSince(0, rotM)
-	for i := range spans {
-		x, y := applyMatrix6(rotM, spans[i].X, spans[i].Y)
-		if spans[i].EndX != 0 {
-			spans[i].EndX, _ = applyMatrix6(rotM, spans[i].EndX, spans[i].Y)
-		}
-		spans[i].X = x
-		spans[i].Y = y
-	}
-
-	return spans, nil
+	return extractTextWithResources(content, fonts, reader, resources, pageRotationMatrix(page), 0, nil, paths), nil
 }
+
+var identity = [6]float64{1, 0, 0, 1, 0, 0}
 
 // pageRotationMatrix returns the map from unrotated user space — the space page
 // content is drawn in — to the page's displayed space, which is what a viewer
-// shows and what Page.Search reports matches in. The second result is false
-// when /Rotate leaves the two spaces identical, so callers can skip the walk.
+// shows and what Page.Search reports matches in.
 //
 // The origin (x0, y0) is carried through so rotated positions stay about the
 // page's true origin — the inverse of the map rotateOverlaySpace applies to
 // overlays, so the two round-trip exactly.
-func pageRotationMatrix(page Dict) ([6]float64, bool) {
+func pageRotationMatrix(page Dict) [6]float64 {
 	rotate, _ := page.Int("Rotate")
 	rotate = ((rotate % 360) + 360) % 360
 	if rotate == 0 {
-		return [6]float64{1, 0, 0, 1, 0, 0}, false
+		return identity
 	}
 
 	// MediaBox is [llx lly urx ury].
@@ -94,13 +80,13 @@ func pageRotationMatrix(page Dict) ([6]float64, bool) {
 
 	switch rotate {
 	case 90:
-		return [6]float64{0, -1, 1, 0, x0 - y0, width + x0 + y0}, true
+		return [6]float64{0, -1, 1, 0, x0 - y0, width + x0 + y0}
 	case 180:
-		return [6]float64{-1, 0, 0, -1, width + 2*x0, height + 2*y0}, true
+		return [6]float64{-1, 0, 0, -1, width + 2*x0, height + 2*y0}
 	case 270:
-		return [6]float64{0, 1, -1, 0, height + x0 + y0, y0 - x0}, true
+		return [6]float64{0, 1, -1, 0, height + x0 + y0, y0 - x0}
 	}
-	return [6]float64{1, 0, 0, 1, 0, 0}, false
+	return identity
 }
 
 // applyMatrix6 maps a point through an affine transform.
@@ -108,7 +94,10 @@ func applyMatrix6(m [6]float64, x, y float64) (float64, float64) {
 	return m[0]*x + m[2]*y + m[4], m[1]*x + m[3]*y + m[5]
 }
 
-func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reader, resources Dict, depth int, rec *showRecorder, paths *pathCollector) []TextSpan {
+// extractTextWithResources walks content with ctm as the transformation matrix
+// it starts from, so every span, glyph and fill it records is in the space ctm
+// maps to: a form's content is walked from the transform that places the form.
+func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reader, resources Dict, ctm [6]float64, depth int, rec *showRecorder, paths *pathCollector) []TextSpan {
 	const maxDepth = 10
 	if depth > maxDepth {
 		return nil
@@ -128,9 +117,8 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 	}
 
 	var (
-		ctm      = [6]float64{1, 0, 0, 1, 0, 0} // current transformation matrix
-		tm       [6]float64                     // text matrix
-		lm       [6]float64                     // line matrix
+		tm       [6]float64 // text matrix
+		lm       [6]float64 // line matrix
 		fontSize float64
 		fontName string
 		tl       float64       // leading
@@ -152,7 +140,7 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 
 	// Font-specific decoding.
 	toUnicodeMaps := make(map[string]map[uint16]string)
-	encodingDiffs := make(map[string]map[byte]string)
+	encodings := make(map[string]map[byte]string)
 	fontWidths := make(map[string]map[int]float64)
 	fontFirstChars := make(map[string]int)
 	fontMissingWidths := make(map[string]float64)
@@ -163,9 +151,7 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 		if umap := reader.ToUnicodeMap(fd); umap != nil {
 			toUnicodeMaps[sname] = umap
 		}
-		if diffs := reader.FontEncoding(fd); diffs != nil {
-			encodingDiffs[sname] = diffs
-		}
+		encodings[sname] = reader.FontEncoding(fd)
 
 		subtype, _ := fd.Name("Subtype")
 
@@ -233,8 +219,6 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 		}
 	}
 
-	identity := [6]float64{1, 0, 0, 1, 0, 0}
-
 	// operand stack for content stream parsing.
 	var stack []any
 
@@ -261,57 +245,49 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 		return compositeFont[fontName]
 	}
 
+	// decodeByte reads one code of a simple font through its encoding, which
+	// names only the codes that are not ASCII: a code it leaves out is ASCII
+	// below 0x80, and above it is one the encoding does not define.
+	decodeByte := func(b byte) string {
+		if name, ok := encodings[fontName][b]; ok {
+			return glyphToString(name)
+		}
+		if b < 0x80 {
+			return string(rune(b))
+		}
+		return ""
+	}
+
 	decodeString := func(s string) string {
 		raw := []byte(s)
+		umap := toUnicodeMaps[fontName]
+		// For composite fonts, always use 2-byte.
+		// For simple fonts, detect based on map contents.
 		isTwoByte := isComposite()
-
-		// Try ToUnicode map first.
-		if umap, ok := toUnicodeMaps[fontName]; ok && umap != nil {
-			var result strings.Builder
-			// For composite fonts, always use 2-byte.
-			// For simple fonts, detect based on map contents.
-			if !isTwoByte && len(raw) >= 2 {
-				code := uint16(raw[0])<<8 | uint16(raw[1])
-				if _, ok := umap[code]; ok {
-					isTwoByte = true
-				}
-			}
-			if isTwoByte && len(raw)%2 == 0 {
-				for i := 0; i+1 < len(raw); i += 2 {
-					code := uint16(raw[i])<<8 | uint16(raw[i+1])
-					if u, ok := umap[code]; ok {
-						result.WriteString(u)
-					} else {
-						result.WriteRune(rune(code))
-					}
-				}
-			} else {
-				for _, b := range raw {
-					if u, ok := umap[uint16(b)]; ok {
-						result.WriteString(u)
-					} else {
-						result.WriteByte(b)
-					}
-				}
-			}
-			return result.String()
+		if !isTwoByte && len(raw) >= 2 {
+			_, isTwoByte = umap[uint16(raw[0])<<8|uint16(raw[1])]
 		}
 
-		// Try encoding differences.
-		if diffs, ok := encodingDiffs[fontName]; ok && diffs != nil {
-			var result strings.Builder
-			for _, b := range raw {
-				if name, ok := diffs[b]; ok {
-					result.WriteString(glyphToString(name))
+		var result strings.Builder
+		if umap != nil && isTwoByte && len(raw)%2 == 0 {
+			for i := 0; i+1 < len(raw); i += 2 {
+				code := uint16(raw[i])<<8 | uint16(raw[i+1])
+				if u, ok := umap[code]; ok {
+					result.WriteString(u)
 				} else {
-					result.WriteByte(b)
+					result.WriteRune(rune(code))
 				}
 			}
-			return result.String()
+		} else {
+			for _, b := range raw {
+				if u, ok := umap[uint16(b)]; ok {
+					result.WriteString(u)
+				} else {
+					result.WriteString(decodeByte(b))
+				}
+			}
 		}
-
-		// WinAnsiEncoding fallback (covers most modern PDFs).
-		return winansiDecode(s)
+		return result.String()
 	}
 
 	// codeAdvance is the pen's travel over the character code at s[i], in text
@@ -630,16 +606,9 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 									formCTM = matMul6(fm, ctm)
 								}
 								formResources, _ := reader.ResolveDict(stream.Dict["Resources"])
-								outer := rec.enter(xobjRef, stream.Data, formCTM)
-								formFills := paths.mark()
-								formSpans := extractTextWithResources(stream.Data, formFonts, reader, formResources, depth+1, rec, paths)
+								outer := rec.enter(xobjRef, stream.Data)
+								spans = append(spans, extractTextWithResources(stream.Data, formFonts, reader, formResources, formCTM, depth+1, rec, paths)...)
 								rec.leave(outer)
-								paths.transformSince(formFills, formCTM)
-								// Transform form spans through the form's CTM.
-								for i := range formSpans {
-									formSpans[i].X, formSpans[i].Y = applyMatrix6(formCTM, formSpans[i].X, formSpans[i].Y)
-								}
-								spans = append(spans, formSpans...)
 							}
 						}
 					}
@@ -772,8 +741,13 @@ func skipInlineDict(lex *Lexer) {
 	}
 }
 
+// skipInlineImage moves lex from just after BI to just after the image's EI.
+// Image data is binary and can hold EI by chance, so unfiltered data ends
+// where its dictionary says it does; filtered data has no length to compute,
+// and ends at the first EI the content stream carries on after.
 func skipInlineImage(lex *Lexer) {
-	// Parse the inline image dict until ID keyword.
+	dict := Dict{}
+	p := Parser{lex: lex}
 	for {
 		tok, err := lex.NextToken()
 		if err != nil || tok.Type == TEOF {
@@ -782,23 +756,125 @@ func skipInlineImage(lex *Lexer) {
 		if tok.Type == TKeyword && tok.Str == "ID" {
 			break
 		}
+		if tok.Type == TName {
+			if dict[Name(tok.Str)], err = p.ParseObject(); err != nil {
+				return
+			}
+		}
 	}
 	// Skip single whitespace byte after ID.
 	if !lex.AtEnd() {
 		lex.read()
 	}
-	// Scan raw bytes for whitespace + "EI" + (whitespace or delimiter or EOF).
-	for lex.pos < len(lex.data)-2 {
-		if isWhitespace(lex.data[lex.pos]) &&
-			lex.data[lex.pos+1] == 'E' && lex.data[lex.pos+2] == 'I' {
-			if lex.pos+3 >= len(lex.data) || isWhitespace(lex.data[lex.pos+3]) || isDelimiter(lex.data[lex.pos+3]) {
-				lex.pos += 3
-				return
-			}
+	data := lex.data
+	if n, ok := inlineImageLength(dict, len(data)-lex.pos); ok {
+		end := lex.pos + n
+		for end < len(data) && isWhitespace(data[end]) {
+			end++
+		}
+		if atEI(data, end) {
+			lex.pos = end + 2
+			return
+		}
+	}
+	for lex.pos < len(data)-2 {
+		if isWhitespace(data[lex.pos]) && atEI(data, lex.pos+1) && resumesContent(data[lex.pos+3:]) {
+			lex.pos += 3
+			return
 		}
 		lex.pos++
 	}
 }
+
+// inlineImageLength is the byte length of an unfiltered inline image's data,
+// rows padded to whole bytes, when its dictionary determines one that fits in
+// the avail bytes left. A colour space named in the page's resources does not.
+func inlineImageLength(d Dict, avail int) (int, bool) {
+	entry := func(abbrev, full Name) any {
+		if v, ok := d[abbrev]; ok {
+			return v
+		}
+		return d[full]
+	}
+	if entry("F", "Filter") != nil {
+		return 0, false
+	}
+	w, _ := entry("W", "Width").(int)
+	h, _ := entry("H", "Height").(int)
+	bpc, _ := entry("BPC", "BitsPerComponent").(int)
+	components := 1
+	if mask, _ := entry("IM", "ImageMask").(bool); mask {
+		bpc = 1
+	} else {
+		switch cs := entry("CS", "ColorSpace").(type) {
+		case Name:
+			components = map[Name]int{"G": 1, "DeviceGray": 1, "RGB": 3, "DeviceRGB": 3, "CMYK": 4, "DeviceCMYK": 4}[cs]
+		case Array:
+			if len(cs) == 0 || cs[0] != Name("I") && cs[0] != Name("Indexed") {
+				components = 0
+			}
+		default:
+			components = 0
+		}
+	}
+	if w <= 0 || h <= 0 || bpc <= 0 || bpc > 16 || components == 0 || w > avail*8 {
+		return 0, false
+	}
+	row := (w*components*bpc + 7) / 8
+	if h > avail/row {
+		return 0, false
+	}
+	return row * h, true
+}
+
+// atEI reports whether data holds the EI operator at i.
+func atEI(data []byte, i int) bool {
+	return i+2 <= len(data) && data[i] == 'E' && data[i+1] == 'I' &&
+		(i+2 == len(data) || isWhitespace(data[i+2]) || isDelimiter(data[i+2]))
+}
+
+// resumesContent reports whether rest, the bytes after a candidate EI, read as
+// the content stream carrying on: operands and known operators, lexed without
+// error, for three operators, up to the next inline image, or to the end.
+// Image data after a false EI soon lexes into an error, such as a literal
+// string left open, or into a word that is no operator. The look ahead stops
+// at window bytes, and a candidate still reading as content there is accepted:
+// content can hold a comment or string longer than any window.
+func resumesContent(rest []byte) bool {
+	const window = 256
+	lex := NewLexer(rest[:min(len(rest), window)])
+	for ops := 0; ops < 3; {
+		tok, err := lex.NextToken()
+		switch {
+		case lex.AtEnd() && len(rest) > window:
+			return true
+		case err != nil:
+			return false
+		case tok.Type == TEOF:
+			return true
+		case tok.Type != TKeyword:
+			continue
+		case tok.Str == "BI":
+			return true
+		case !contentOperators[tok.Str]:
+			return false
+		}
+		ops++
+	}
+	return true
+}
+
+// contentOperators are the content stream operators (PDF 32000-1, Annex A),
+// less ID and EI, which cannot follow the end of an inline image.
+var contentOperators = func() map[string]bool {
+	ops := make(map[string]bool)
+	for _, op := range strings.Fields(`b B b* B* BDC BI BMC BT BX c cm CS cs d d0 d1
+		Do DP EMC ET EX f F f* G g gs h i j J K k l m M MP n q Q re RG rg ri s S SC sc
+		SCN scn sh T* Tc Td TD Tf Tj TJ TL Tm Tr Ts Tw Tz v w W W* y ' "`) {
+		ops[op] = true
+	}
+	return ops
+}()
 
 // lineYTolerance is how far two baselines may sit apart and still be read as
 // one line.
@@ -877,68 +953,51 @@ func BuildLines(spans []TextSpan) []TextLine {
 	return lines
 }
 
-// glyphToString converts a PostScript glyph name to its Unicode string.
+// glyphToString converts a PostScript glyph name to its Unicode string, by the
+// Adobe Glyph List's naming rules: what follows a period names a variant
+// (one.oldstyle), and underscores join the parts of a ligature (f_f_i). Each
+// part is a name in the list, uni and groups of four hex digits, or u and four
+// to six; a part that is none of these, such as g12 or .notdef, reads as
+// nothing.
 func glyphToString(name string) string {
-	// Common glyph names.
-	if r, ok := glyphMap[name]; ok {
-		return string(r)
+	base, _, _ := strings.Cut(name, ".")
+	var s strings.Builder
+	for _, part := range strings.Split(base, "_") {
+		s.WriteString(glyphPartToString(part))
 	}
-	// If it looks like "uniXXXX", decode hex.
-	if strings.HasPrefix(name, "uni") && len(name) == 7 {
-		v, err := parseHexRune(name[3:])
-		if err == nil {
-			return string(v)
-		}
-	}
-	if len(name) == 1 {
-		return name
-	}
-	return name
+	return s.String()
 }
 
-func parseHexRune(s string) (rune, error) {
-	var v rune
-	for _, c := range s {
-		v <<= 4
-		switch {
-		case c >= '0' && c <= '9':
-			v |= c - '0'
-		case c >= 'a' && c <= 'f':
-			v |= c - 'a' + 10
-		case c >= 'A' && c <= 'F':
-			v |= c - 'A' + 10
-		default:
-			return 0, nil
+func glyphPartToString(part string) string {
+	if r, ok := glyphMap[part]; ok {
+		return string(r)
+	}
+	if hex, ok := strings.CutPrefix(part, "uni"); ok && len(hex)%4 == 0 {
+		runes := make([]rune, 0, len(hex)/4)
+		for i := 0; i < len(hex); i += 4 {
+			r, ok := hexScalar(hex[i : i+4])
+			if !ok {
+				return ""
+			}
+			runes = append(runes, r)
+		}
+		return string(runes)
+	}
+	if hex, ok := strings.CutPrefix(part, "u"); ok && len(hex) >= 4 && len(hex) <= 6 {
+		if r, ok := hexScalar(hex); ok {
+			return string(r)
 		}
 	}
-	return v, nil
+	return ""
+}
+
+// hexScalar reads hex digits as a Unicode scalar value: never a surrogate.
+func hexScalar(hex string) (rune, bool) {
+	v, err := strconv.ParseUint(hex, 16, 32)
+	return rune(v), err == nil && utf8.ValidRune(rune(v))
 }
 
 // glyphMap is defined in glyphlist.go (generated from Adobe Glyph List).
-
-// winansiDecode converts a WinAnsiEncoding string to UTF-8.
-func winansiDecode(s string) string {
-	var buf strings.Builder
-	for _, b := range []byte(s) {
-		if r, ok := winansiMap[b]; ok {
-			buf.WriteRune(r)
-		} else {
-			buf.WriteByte(b)
-		}
-	}
-	return buf.String()
-}
-
-// WinAnsiEncoding special mappings (0x80-0x9F differ from Latin-1).
-var winansiMap = map[byte]rune{
-	0x80: '\u20AC', 0x82: '\u201A', 0x83: '\u0192', 0x84: '\u201E',
-	0x85: '\u2026', 0x86: '\u2020', 0x87: '\u2021', 0x88: '\u02C6',
-	0x89: '\u2030', 0x8A: '\u0160', 0x8B: '\u2039', 0x8C: '\u0152',
-	0x8E: '\u017D', 0x91: '\u2018', 0x92: '\u2019', 0x93: '\u201C',
-	0x94: '\u201D', 0x95: '\u2022', 0x96: '\u2013', 0x97: '\u2014',
-	0x98: '\u02DC', 0x99: '\u2122', 0x9A: '\u0161', 0x9B: '\u203A',
-	0x9C: '\u0153', 0x9E: '\u017E', 0x9F: '\u0178',
-}
 
 // parseCIDWidths parses a CIDFont /W array into a cid→width map.
 // Format: [ cid_start [w1 w2 ...] ] or [ cid_start cid_end w ]

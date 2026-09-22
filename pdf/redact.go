@@ -10,7 +10,7 @@ import (
 )
 
 // glyph is one character code as it was drawn: the pen positions either side of
-// it in device space, and the text-space distance the pen travelled over it.
+// it in displayed space, and the text-space distance the pen travelled over it.
 type glyph struct {
 	code   []byte  // 1 or 2 bytes, exactly as written in the string
 	x0, y0 float64 // pen before the glyph
@@ -50,13 +50,9 @@ type showOp struct {
 	items      []showItem
 }
 
-// showFrame is the stream being recorded and the transform from its own
-// coordinates to the page's. A Form XObject draws in its own space, so the
-// glyphs it shows have to be carried out to the page before a rectangle
-// aimed at the page can be compared with them.
+// showFrame is the stream being recorded.
 type showFrame struct {
 	stream     int
-	ctm        [6]float64
 	recordable bool // false for a form no substitution can reach on write
 }
 
@@ -82,7 +78,7 @@ func newShowRecorder(content []byte) *showRecorder {
 	return &showRecorder{
 		streams: make(map[int][]showOp),
 		data:    map[int][]byte{0: content},
-		cur:     showFrame{ctm: [6]float64{1, 0, 0, 1, 0, 0}, recordable: true},
+		cur:     showFrame{recordable: true},
 	}
 }
 
@@ -92,10 +88,6 @@ func newShowRecorder(content []byte) *showRecorder {
 func (r *showRecorder) show(text string, fontSize float64, glyphs []glyph) {
 	if r == nil {
 		return
-	}
-	for i := range glyphs {
-		glyphs[i].x0, glyphs[i].y0 = applyMatrix6(r.cur.ctm, glyphs[i].x0, glyphs[i].y0)
-		glyphs[i].x1, glyphs[i].y1 = applyMatrix6(r.cur.ctm, glyphs[i].x1, glyphs[i].y1)
 	}
 	// Only what the reader's view of the page contains takes part in
 	// assembling it. A run of no glyphs has no position to be read in; a run
@@ -138,18 +130,17 @@ func (r *showRecorder) finish(op string, start, end int, fontSize, tc, tw, th fl
 	})
 }
 
-// enter switches recording to a Form XObject's own stream, composing the
-// transform that carries its coordinates out to the page, and returns the
+// enter switches recording to a Form XObject's own stream and returns the
 // frame to restore afterwards. A form reached by anything but an indirect
 // reference cannot be replaced on write, so its operations are dropped rather
 // than recorded and silently ignored.
-func (r *showRecorder) enter(ref any, data []byte, ctm [6]float64) showFrame {
+func (r *showRecorder) enter(ref any, data []byte) showFrame {
 	if r == nil {
 		return showFrame{}
 	}
 	outer := r.cur
 	if n, ok := ref.(Ref); ok {
-		r.cur = showFrame{stream: n.Num, ctm: matMul6(ctm, outer.ctm), recordable: true}
+		r.cur = showFrame{stream: n.Num, recordable: true}
 		r.data[n.Num] = data
 	} else {
 		r.cur = showFrame{}
@@ -565,22 +556,18 @@ func markPage(r *Reader, page Dict, queries []string, rects []Rect) (*showRecord
 		return nil, err
 	}
 
+	// Walked in displayed space, where the reader saw the text and aimed the
+	// rectangles.
 	rec := newShowRecorder(content)
-	extractTextWithResources(content, r.PageFonts(page), r, r.PageResources(page), 0, rec, nil)
+	extractTextWithResources(content, r.PageFonts(page), r, r.PageResources(page), pageRotationMatrix(page), 0, rec, nil)
 
 	rec.matchQueries(queries)
 	if len(rects) == 0 {
 		return rec, nil
 	}
 
-	// Glyph positions are in unrotated user space, where content is drawn;
-	// the rectangles are in displayed space, where the reader saw the text.
-	rotM, rotated := pageRotationMatrix(page)
 	rec.mark(func(g glyph) bool {
 		x, y := (g.x0+g.x1)/2, (g.y0+g.y1)/2
-		if rotated {
-			x, y = applyMatrix6(rotM, x, y)
-		}
 		for _, rect := range rects {
 			if x >= rect.X && x <= rect.X+rect.Width && y >= rect.Y && y <= rect.Y+rect.Height {
 				return true

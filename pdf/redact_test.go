@@ -732,7 +732,10 @@ func TestRemoveTextTakesTheReplacementTextOfANamedList(t *testing.T) {
 		w.WriteStream(contentRef, Dict{}, []byte(
 			"BT /F1 12 Tf 72 700 Td /Span /MC0 BDC (Secret) Tj EMC ( public) Tj ET"))
 		page := fontPage(pagesRef, fontRef, contentRef)
-		page["Resources"].(Dict)["Properties"] = Dict{Name("MC0"): Dict{"ActualText": "Secret", "MCID": 3}}
+		// References are not allowed in a content stream, nested ones included.
+		page["Resources"].(Dict)["Properties"] = Dict{Name("MC0"): Dict{
+			"ActualText": "Secret", "MCID": 3, "Refs": Dict{"Font": Array{fontRef}},
+		}}
 		return page
 	})
 
@@ -740,6 +743,9 @@ func TestRemoveTextTakesTheReplacementTextOfANamedList(t *testing.T) {
 	content := string(mustContent(t, doc.reader, doc.pages[0]))
 	if strings.Contains(content, "/MC0") || !strings.Contains(content, "/MCID 3") {
 		t.Errorf("the section still names the list that holds the text:\n%s", content)
+	}
+	if strings.Contains(content, " R") {
+		t.Errorf("the section's copy holds a reference:\n%s", content)
 	}
 }
 
@@ -763,6 +769,33 @@ func TestRemoveTextTakesTheReplacementTextAcrossForms(t *testing.T) {
 		doc := removeText(t, data, "Secret")
 		if content := string(mustContent(t, doc.reader, doc.pages[0])); strings.Contains(content, "Secret") {
 			t.Errorf("the replacement text survived:\n%s", content)
+		}
+	})
+
+	// The form is one set of bytes, so glyphs removed from the second drawing
+	// are gone from the first too, and so is the text of the section around it.
+	t.Run("section around one drawing, removal in another", func(t *testing.T) {
+		data := buildRawPDF(t, func(w *Writer, pagesRef Ref) Dict {
+			fontRef, formRef, contentRef := w.AllocRef(), w.AllocRef(), w.AllocRef()
+			w.WriteObject(fontRef, Dict{"Type": Name("Font"), "Subtype": Name("Type1"), "BaseFont": Name("Helvetica")})
+			fonts := Dict{"Font": Dict{Name("F1"): fontRef}}
+			w.WriteStream(formRef, Dict{"Type": Name("XObject"), "Subtype": Name("Form"),
+				"BBox": Array{0, 0, 300, 50}, "Resources": fonts},
+				[]byte("BT /F1 12 Tf 0 0 Td (Secret) Tj ET"))
+			w.WriteStream(contentRef, Dict{}, []byte(
+				"/Span <</ActualText (Secret)>> BDC q 1 0 0 1 72 700 cm /Fm Do Q EMC q 1 0 0 1 72 300 cm /Fm Do Q"))
+			page := fontPage(pagesRef, fontRef, contentRef)
+			page["Resources"].(Dict)["XObject"] = Dict{Name("Fm"): formRef}
+			return page
+		})
+		ed := NewEditor(data)
+		ed.RemoveRegion(0, Rect{X: 60, Y: 290, Width: 100, Height: 30})
+		out, err := ed.Apply()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n := objectsHolding(t, out, "Secret"); len(n) > 0 {
+			t.Errorf("objects %v still hold the removed text", n)
 		}
 	})
 

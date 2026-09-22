@@ -198,3 +198,30 @@ func TestFontSizeIsTheDrawnSize(t *testing.T) {
 		})
 	}
 }
+
+// Text drawn at an angle reads along its own baseline, a glyph at a time or
+// not, and removal assembles it the same way.
+func TestRotatedTextReadsAlongItsBaseline(t *testing.T) {
+	const level = "BT /F1 10 Tf 72 750 Td (Level) Tj ET "
+	const labels = "[(S)(A)(N)(-)(8)(6)(1) -300 (PP00-837)] TJ ET"
+	for _, tc := range []struct{ name, tm string }{
+		{"up the page", "0 1 -1 0 300 100 Tm "},
+		{"down the page", "0 -1 1 0 300 700 Tm "},
+		{"upside down", "-1 0 0 -1 500 400 Tm "},
+		{"slanted", "0.866 0.5 -0.5 0.866 100 100 Tm "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := contentPDF(t, level+"BT /F1 10 Tf "+tc.tm+labels)
+			doc, err := OpenBytes(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if text, want := docText(t, doc), "Level\nSAN-861 PP00-837"; strings.TrimSpace(text) != want {
+				t.Fatalf("got %q, want %q", text, want)
+			}
+			if text := docText(t, removeText(t, data, "SAN-861 PP00-837")); strings.TrimSpace(text) != "Level" {
+				t.Errorf("removal assembled the page differently and left %q", text)
+			}
+		})
+	}
+}

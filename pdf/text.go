@@ -20,6 +20,12 @@ type TextSpan struct {
 	// matrix that stretches one axis more than the other, sets it apart from
 	// FontSize. Zero on spans built outside the extractor.
 	emWidth float64
+
+	// angle is the direction the baseline runs in, in whole degrees
+	// anticlockwise from left to right; endY pairs with EndX. Both are zero on
+	// spans built outside the extractor, which read left to right.
+	angle int
+	endY  float64
 }
 
 // em is what horizontal distances along the span are judged against: word
@@ -373,12 +379,14 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 		tm[5] += d * tm[1]
 	}
 
-	// drawnEm is the em as drawn on the page: its height, and its width along
-	// the baseline.
-	drawnEm := func() (height, width float64) {
+	// drawnEm is the em as drawn on the page: its height, its width along the
+	// baseline, and the baseline's direction.
+	drawnEm := func() (height, width float64, angle int) {
 		trm := matMul6(tm, ctm)
+		degrees := math.Round(math.Atan2(trm[1], trm[0]) * 180 / math.Pi)
 		return fontSize * math.Hypot(trm[2], trm[3]),
-			fontSize * th / 100 * math.Hypot(trm[0], trm[1])
+			fontSize * th / 100 * math.Hypot(trm[0], trm[1]),
+			(int(degrees) + 360) % 360
 	}
 
 	showString := func(s string) {
@@ -386,10 +394,10 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 		// Unicode meaning: a string that decodes to nothing still occupies its
 		// width, and still has glyphs redaction may need to remove.
 		x, y := applyMatrix6(ctm, tm[4], tm[5])
-		height, width := drawnEm()
+		height, width, angle := drawnEm()
 		decoded := decodeString(s)
 		glyphs := advanceTextMatrix(s)
-		endX, _ := applyMatrix6(ctm, tm[4], tm[5])
+		endX, endY := applyMatrix6(ctm, tm[4], tm[5])
 		span := TextSpan{
 			X:        x,
 			Y:        y,
@@ -398,6 +406,8 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 			Font:     fontName,
 			Text:     decoded,
 			emWidth:  width,
+			angle:    angle,
+			endY:     endY,
 		}
 		rec.show(span, glyphs)
 		if decoded == "" {
@@ -668,7 +678,7 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 				markedStack = markedStack[:len(markedStack)-1]
 				if top.hasActual && top.actualText != "" {
 					x, y := applyMatrix6(ctm, top.startX, top.startY)
-					height, width := drawnEm()
+					height, width, angle := drawnEm()
 					spans = append(spans, TextSpan{
 						X:        x,
 						Y:        y,
@@ -677,6 +687,8 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 						Font:     fontName,
 						Text:     top.actualText,
 						emWidth:  width,
+						angle:    angle,
+						endY:     y,
 					})
 				}
 			}
@@ -917,6 +929,7 @@ const lineYTolerance = 1.0
 // the page says, so a space one of them inserts and the other does not is a
 // query that Page.Search answers and RemoveText silently does not.
 func spanGap(prev, cur TextSpan) string {
+	prev, cur = prev.upright(), cur.upright()
 	gap, em := cur.X-prev.end(), cur.em()
 	spaceWidth := math.Max(em*0.25, 2)
 	if gap > spaceWidth {
@@ -942,43 +955,78 @@ func (s TextSpan) end() float64 {
 	return s.X + float64(utf8.RuneCountInString(s.Text))*s.em()*0.5
 }
 
-// BuildLines groups text spans into lines and reconstructs text.
-func BuildLines(spans []TextSpan) []TextLine {
-	if len(spans) == 0 {
-		return nil
+// upright is the span turned so its baseline runs left to right. Text drawn at
+// an angle is grouped and spaced in that frame, as level text is on the page.
+func (s TextSpan) upright() TextSpan {
+	if s.angle == 0 {
+		return s
 	}
+	sin, cos := math.Sincos(float64(s.angle) * math.Pi / 180)
+	turn := func(x, y float64) (float64, float64) {
+		return x*cos + y*sin, y*cos - x*sin
+	}
+	s.X, s.Y = turn(s.X, s.Y)
+	s.EndX, s.endY = turn(s.EndX, s.endY)
+	return s
+}
 
-	// Group spans by Y coordinate (with tolerance).
-	// Keep tight to avoid merging overlapping text layers at similar Y positions.
-	sort.Slice(spans, func(i, j int) bool {
-		return spans[i].Y > spans[j].Y // top to bottom
+// readLines groups spans into lines, as indexes into spans, in reading order:
+// lines down the page, and each line's spans along its baseline. Spans are
+// grouped by the direction they run in before their baseline, so a label drawn
+// up the side of a drawing is one line rather than a column of one-glyph
+// lines. Redaction assembles its view of the page with this too, so the two
+// views read the page in the same order.
+func readLines(spans []TextSpan) [][]int {
+	up := make([]TextSpan, len(spans))
+	order := make([]int, len(spans))
+	for i, s := range spans {
+		up[i], order[i] = s.upright(), i
+	}
+	sort.SliceStable(order, func(a, b int) bool {
+		sa, sb := up[order[a]], up[order[b]]
+		if sa.angle != sb.angle {
+			return sa.angle < sb.angle
+		}
+		return sa.Y > sb.Y
 	})
 
+	// Measured against the first span of the line rather than the previous
+	// one, so a drifting baseline does not walk a line apart one span at a
+	// time. Kept tight so overlapping text layers stay apart.
+	var lines [][]int
+	for i, start := 1, 0; i <= len(order); i++ {
+		first := up[order[start]]
+		if i < len(order) && up[order[i]].angle == first.angle && math.Abs(up[order[i]].Y-first.Y) <= lineYTolerance {
+			continue
+		}
+		line := order[start:i:i]
+		sort.SliceStable(line, func(a, b int) bool { return up[line[a]].X < up[line[b]].X })
+		lines = append(lines, line)
+		start = i
+	}
+	sort.SliceStable(lines, func(a, b int) bool {
+		return spans[lines[a][0]].Y > spans[lines[b][0]].Y
+	})
+	return lines
+}
+
+// BuildLines groups text spans into lines and reconstructs text. A line's Y
+// is where its first span starts.
+func BuildLines(spans []TextSpan) []TextLine {
 	var lines []TextLine
-	var currentLine *TextLine
-
-	for _, span := range spans {
-		if currentLine == nil || math.Abs(span.Y-currentLine.Y) > lineYTolerance {
-			lines = append(lines, TextLine{Y: span.Y})
-			currentLine = &lines[len(lines)-1]
-		}
-		currentLine.Spans = append(currentLine.Spans, span)
-	}
-
-	// Sort spans within each line by X and build text.
-	for i := range lines {
-		sortSpansByX(lines[i].Spans)
-
+	for _, indexes := range readLines(spans) {
+		line := TextLine{Y: spans[indexes[0]].Y}
 		var buf strings.Builder
-		for j, span := range lines[i].Spans {
+		for j, i := range indexes {
 			if j > 0 {
-				buf.WriteString(spanGap(lines[i].Spans[j-1], span))
+				buf.WriteString(spanGap(spans[indexes[j-1]], spans[i]))
 			}
-			buf.WriteString(span.Text)
+			buf.WriteString(spans[i].Text)
+			line.Spans = append(line.Spans, spans[i])
 		}
-		lines[i].Text = buf.String()
+		line.Text = buf.String()
+		lines = append(lines, line)
 	}
-
 	return lines
 }
 

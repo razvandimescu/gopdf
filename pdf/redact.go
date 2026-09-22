@@ -2,7 +2,6 @@ package pdf
 
 import (
 	"fmt"
-	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -199,51 +198,31 @@ func (r *showRecorder) assembleText() (string, [][]glyph) {
 		}
 	}
 
-	order := r.readingOrder()
-	for i, index := range order {
-		run := r.runs[index]
-		if i > 0 {
-			spell(runSeparator(r.runs[order[i-1]], run), nil)
+	// Generators draw out of reading order often enough — a column at a time,
+	// or a word in pieces to kern it — and Page.Search reports what BuildLines
+	// assembled, so removal assembles the same thing, the same way.
+	spans := make([]TextSpan, len(r.runs))
+	for i, run := range r.runs {
+		spans[i] = run.TextSpan
+	}
+	for n, line := range readLines(spans) {
+		if n > 0 {
+			spell("\n", nil)
 		}
-		runes := utf8.RuneCountInString(run.Text)
-		for at, j := 0, 0; at < len(run.Text); j++ {
-			_, size := utf8.DecodeRuneInString(run.Text[at:])
-			spell(run.Text[at:at+size], run.glyphsFor(j, runes))
-			at += size
+		for i, index := range line {
+			run := r.runs[index]
+			if i > 0 {
+				spell(spanGap(spans[line[i-1]], run.TextSpan), nil)
+			}
+			runes := utf8.RuneCountInString(run.Text)
+			for at, j := 0, 0; at < len(run.Text); j++ {
+				_, size := utf8.DecodeRuneInString(run.Text[at:])
+				spell(run.Text[at:at+size], run.glyphsFor(j, runes))
+				at += size
+			}
 		}
 	}
 	return text.String(), glyphAt
-}
-
-// readingOrder indexes the runs in the order BuildLines would read them: down
-// the page by baseline, then left to right within each line. Generators draw
-// out of that order often enough — a column at a time, or a word in pieces to
-// kern it — and Page.Search reports what BuildLines assembled, so removal has
-// to assemble the same thing.
-func (r *showRecorder) readingOrder() []int {
-	order := make([]int, len(r.runs))
-	for i := range order {
-		order[i] = i
-	}
-	sort.SliceStable(order, func(a, b int) bool {
-		return r.runs[order[a]].Y > r.runs[order[b]].Y
-	})
-
-	// Grouped by the tolerance BuildLines groups by, and measured the same
-	// way: against the first run of the line rather than the previous one, so
-	// a drifting baseline does not walk a line apart one run at a time.
-	line := 0
-	for i := 1; i <= len(order); i++ {
-		if i < len(order) && math.Abs(r.runs[order[i]].Y-r.runs[order[line]].Y) <= lineYTolerance {
-			continue
-		}
-		within := order[line:i]
-		sort.SliceStable(within, func(a, b int) bool {
-			return r.runs[within[a]].X < r.runs[within[b]].X
-		})
-		line = i
-	}
-	return order
 }
 
 // glyphsFor maps the j-th of runeCount characters back to the glyphs that drew
@@ -259,15 +238,6 @@ func (r textRun) glyphsFor(j, runeCount int) []glyph {
 		to = from + 1
 	}
 	return r.glyphs[from:to]
-}
-
-// runSeparator is the whitespace BuildLines puts between two runs: a newline
-// across baselines, and along one the same gap rule the reader's view uses.
-func runSeparator(prev, cur textRun) string {
-	if math.Abs(cur.Y-prev.Y) > lineYTolerance {
-		return "\n"
-	}
-	return spanGap(prev.TextSpan, cur.TextSpan)
 }
 
 // mark marks the glyphs a rectangle takes. Marking and rewriting are separate

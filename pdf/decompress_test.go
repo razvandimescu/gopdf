@@ -3,6 +3,7 @@ package pdf
 import (
 	"bytes"
 	"compress/zlib"
+	"fmt"
 	"testing"
 )
 
@@ -48,5 +49,30 @@ func TestDecompressTruncatedBeforeAnyBlock(t *testing.T) {
 	got, err := decompress(headerOnly)
 	if err == nil {
 		t.Fatalf("expected error on header-only stream, got %d bytes", len(got))
+	}
+}
+
+// Some producers write spaces between the stream keyword and its EOL. The data
+// starts after the EOL: starting at the space corrupts every filtered stream,
+// and a page drawn by one reads as empty.
+func TestStreamKeywordFollowedBySpaces(t *testing.T) {
+	want := []byte("BT /F1 9 Tf (Moneda:) Tj ET")
+	compressed, err := flateCompress(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, eol := range []string{"\n", "\r\n", " \r\n", " \n", " \t \r\n"} {
+		data := fmt.Appendf(nil, "6 0 obj\n<< /Length %d /Filter /FlateDecode >>\nstream%s", len(compressed), eol)
+		data = append(data, compressed...)
+		data = append(data, "\nendstream\nendobj\n"...)
+		r := &Reader{data: data, cache: map[int]any{}}
+		obj, err := r.parseObjectAt(0)
+		if err != nil {
+			t.Errorf("stream%q: %v", eol, err)
+			continue
+		}
+		if s, ok := obj.(*Stream); !ok || !bytes.Equal(s.Data, want) {
+			t.Errorf("stream%q: got %v, want the decoded content", eol, obj)
+		}
 	}
 }

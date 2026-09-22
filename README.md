@@ -216,6 +216,21 @@ for _, r := range results {
 // Page 0 at (206, 691) size 70x12
 ```
 
+### Text drawn as outlines
+
+Some producers draw every glyph as a filled path, and such a page extracts as
+empty. `Page.OutlineHint` says when a page's fills repeat like glyphs, so an
+empty result comes with an explanation:
+
+```go
+hint, _ := doc.Page(0).OutlineHint()
+if hint.Possible() {
+    // this page's text is drawn as outlines, not written with text operators
+}
+```
+
+It is a hint, not a verdict: a page of varied repeated symbols satisfies it too.
+
 ### Encrypted PDFs
 
 Files encrypted with an empty user password — the common case for emailed
@@ -642,6 +657,7 @@ type Rect struct {
   candidates whose headings read as fragments rather than words. A real table
   whose columns are named in one or two characters therefore needs `-headers`
   (or `TableOpts.Headers`) to be found.
+- **Text drawn as filled outlines is not extracted.** Some producers (virtual printers re-printing a PDF, "convert text to outlines") draw every glyph as a path, and such a page extracts as empty. `Page.OutlineHint` reports when a page's fills repeat like glyphs, so an empty result can be told apart from an empty page. It is a hint: repeated icons can trigger it too (see [Text drawn as outlines](#text-drawn-as-outlines)).
 - No image extraction
 - **Images read as PNG, JPEG and GIF only** — what the standard library decodes. HEIC and AVIF need an HEVC or AV1 decoder, available only through CGo or copyleft code; WebP and TIFF would need `golang.org/x/image`. Neither fits a CGo-free MIT library with no dependencies. Unsupported formats are named in the error.
 - PDF creation supports standard 14 fonts only (no font embedding)
@@ -660,6 +676,7 @@ pdf/
   merge.go      PDF merge: size constraints (fail/truncate/shrink), stream dedup, JPEG recompression
   edit.go       Text search, text overlay, image overlay, visual redaction
   redact.go     Text removal: glyph-level content stream rewriting
+  outline.go    Filled-path capture and clustering; OutlineHint
   image.go      Image decoding (PNG/JPEG/GIF) → RGB + grayscale SMask streams
   creator.go    PDF creation from scratch (text, shapes, images, fonts)
   lexer.go      PDF byte stream tokenizer

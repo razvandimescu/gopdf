@@ -914,7 +914,7 @@ func findTablesByGaps(spans []TextSpan, opts *TableOpts) []Table {
 	rowGaps := make([][]float64, len(rows))
 	for i, row := range rows {
 		for j := 0; j < len(row.spans)-1; j++ {
-			endX := spanEndX(row.spans[j])
+			endX := row.spans[j].end()
 			startX := row.spans[j+1].X
 			if gap := startX - endX; gap > minGap {
 				rowGaps[i] = append(rowGaps[i], (endX+startX)/2)
@@ -1418,13 +1418,6 @@ func mergeCloseRows(rows []tableRow, mergeGap float64) []tableRow {
 		}
 	}
 	return merged
-}
-
-func spanEndX(sp TextSpan) float64 {
-	if sp.EndX > sp.X {
-		return sp.EndX
-	}
-	return sp.X + float64(len([]rune(sp.Text)))*sp.em()*0.5
 }
 
 func cellTexts(cells []Cell) []string {

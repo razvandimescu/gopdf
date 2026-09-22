@@ -136,58 +136,46 @@ func TestGlyphRunsEndWhereThePenLeft(t *testing.T) {
 	}
 }
 
+// scaledTf sets Tf 327.68 and scales it to 9.36pt through the CTM.
+const scaledTf = "q 0.75 0 0 0.75 0 0 cm 0.038086 0 0 0.038086 0 0 cm " +
+	"BT /F1 327.68 Tf 1 0 0 1 2520 24500 Tm "
+
 // A word gap is judged against the em as drawn along the baseline, and
 // redaction has to judge it the same way, or Page.Search finds a phrase
 // RemoveText cannot.
 func TestWordGapsFollowTheDrawnSize(t *testing.T) {
-	centredOrigin := func(content string) []byte {
-		return buildRawPDF(t, func(w *Writer, pagesRef Ref) Dict {
-			fontRef, contentRef := w.AllocRef(), w.AllocRef()
-			w.WriteObject(fontRef, Dict{
-				"Type": Name("Font"), "Subtype": Name("Type1"), "BaseFont": Name("Helvetica"),
-			})
-			w.WriteStream(contentRef, Dict{}, []byte(content))
-			page := fontPage(pagesRef, fontRef, contentRef)
-			page["MediaBox"] = Array{-595.26, -420.93, 595.26, 420.93}
-			return page
-		})
-	}
-
 	for _, tc := range []struct {
-		name string
-		data []byte
-		want string
+		name, content, want string
 	}{
 		// 0.7pt of tracking between letters at 8pt, and a word gap after them.
-		{"tracked letters", contentPDF(t,
-			"BT /F1 8 Tf 72 700 Td [(S) -88 (s) -88 (_) -88 (4) -88 (0) -300 (m) -88 (m)] TJ ET"),
+		{"tracked letters",
+			"BT /F1 8 Tf 72 700 Td [(S) -88 (s) -88 (_) -88 (4) -88 (0) -300 (m) -88 (m)] TJ ET",
 			"Ss_40 mm"},
-		// Tf 327.68 drawn at 9.36pt: a 2.8pt gap is a word break at that size.
-		{"size scaled by the CTM", contentPDF(t,
-			"q 0.75 0 0 0.75 0 0 cm 0.038086 0 0 0.038086 0 0 cm "+
-				"BT /F1 327.68 Tf 1 0 0 1 2520 24500 Tm [(1.) -300 (System)] TJ ET Q"),
-			"1. System"},
+		// A 2.8pt gap is a word break at 9.36pt.
+		{"size scaled by the CTM", scaledTf + "[(1.) -300 (System)] TJ ET Q", "1. System"},
 		// A 3pt gap on a 12pt-wide em, which is 24pt tall.
-		{"stretched vertically", contentPDF(t,
-			"q 1 0 0 2 0 0 cm BT /F1 12 Tf 72 300 Td [(Hello) -250 (World)] TJ ET Q"),
+		{"stretched vertically",
+			"q 1 0 0 2 0 0 cm BT /F1 12 Tf 72 300 Td [(Hello) -250 (World)] TJ ET Q",
 			"Hello World"},
 		// A 1.5pt gap on an em condensed to 6pt wide.
-		{"condensed by Tz", contentPDF(t,
-			"BT /F1 12 Tf 50 Tz 72 700 Td [(Hello) -250 (World)] TJ ET"),
+		{"condensed by Tz",
+			"BT /F1 12 Tf 50 Tz 72 700 Td [(Hello) -250 (World)] TJ ET",
 			"Hello World"},
-		{"left of the origin", centredOrigin(
-			"BT /F1 12 Tf -500 0 Td [(RAI981) -300 (WCH981)] TJ ET"),
+		// Where a MediaBox centred on the origin puts half the page.
+		{"left of the origin",
+			"BT /F1 12 Tf -500 700 Td [(RAI981) -300 (WCH981)] TJ ET",
 			"RAI981 WCH981"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			doc, err := OpenBytes(tc.data)
+			data := contentPDF(t, tc.content)
+			doc, err := OpenBytes(data)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if text := strings.TrimSpace(docText(t, doc)); text != tc.want {
 				t.Fatalf("got %q, want %q", text, tc.want)
 			}
-			if text := docText(t, removeText(t, tc.data, tc.want)); strings.TrimSpace(text) != "" {
+			if text := docText(t, removeText(t, data, tc.want)); strings.TrimSpace(text) != "" {
 				t.Errorf("removal assembled the page differently and left %q", text)
 			}
 		})
@@ -200,8 +188,7 @@ func TestFontSizeIsTheDrawnSize(t *testing.T) {
 		content string
 		want    float64
 	}{
-		{"scaled by the CTM", "q 0.75 0 0 0.75 0 0 cm 0.038086 0 0 0.038086 0 0 cm " +
-			"BT /F1 327.68 Tf 1 0 0 1 2520 24500 Tm (System) Tj ET Q", 9.36},
+		{"scaled by the CTM", scaledTf + "(System) Tj ET Q", 9.36},
 		{"rotated by the text matrix", "BT /F1 12 Tf 0 1 -1 0 300 100 Tm (System) Tj ET", 12},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

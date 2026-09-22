@@ -388,11 +388,11 @@ func TestBuildLines_Spacing(t *testing.T) {
 // every span after it on the line reads as one long gap. Redaction shares this
 // estimate, so both views of a page have to agree on where text ends.
 func TestSpanEndFallsBackToWidth(t *testing.T) {
-	if got := spanEnd(10, 50, 12, "Hello"); got != 50 {
+	if got := (TextSpan{X: 10, EndX: 50, FontSize: 12, Text: "Hello"}).end(); got != 50 {
 		t.Errorf("with an end of its own: got %v, want 50", got)
 	}
 	// Five characters at half an em of 12pt: 10 + 5*6.
-	if got := spanEnd(10, 0, 12, "Hello"); got != 40 {
+	if got := (TextSpan{X: 10, FontSize: 12, Text: "Hello"}).end(); got != 40 {
 		t.Errorf("without one: got %v, want 40", got)
 	}
 

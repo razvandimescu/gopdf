@@ -27,15 +27,13 @@ type showItem struct {
 	isKern bool
 }
 
-// textRun is one shown string: what it says, and the glyphs that said it. The
-// glyphs are the operation's own — the same backing array, not a copy — so
-// marking one here is marking the code that will be rewritten.
+// textRun is one shown string: the span the reader's view holds for it, and
+// the glyphs that drew it. The glyphs are the operation's own — the same
+// backing array, not a copy — so marking one here is marking the code that
+// will be rewritten.
 type textRun struct {
-	text           string
-	glyphs         []glyph
-	fontSize       float64
-	startX, startY float64
-	endX           float64
+	TextSpan
+	glyphs []glyph
 }
 
 // showOp is one text-showing operation located in the stream that holds it.
@@ -85,7 +83,7 @@ func newShowRecorder(content []byte) *showRecorder {
 // The recorder's methods are nil-safe: extraction passes a nil recorder when
 // nobody is redacting, which is every call but this file's.
 
-func (r *showRecorder) show(text string, fontSize float64, glyphs []glyph) {
+func (r *showRecorder) show(span TextSpan, glyphs []glyph) {
 	if r == nil {
 		return
 	}
@@ -95,12 +93,8 @@ func (r *showRecorder) show(text string, fontSize float64, glyphs []glyph) {
 	// never sees it — no decoder here produces one today, but the spec allows
 	// a code to stand for the empty string, and the two views must not drift
 	// apart if one ever starts to.
-	if text != "" && len(glyphs) > 0 {
-		r.runs = append(r.runs, textRun{
-			text: text, glyphs: glyphs, fontSize: fontSize,
-			startX: glyphs[0].x0, startY: glyphs[0].y0,
-			endX: glyphs[len(glyphs)-1].x1,
-		})
+	if span.Text != "" && len(glyphs) > 0 {
+		r.runs = append(r.runs, textRun{TextSpan: span, glyphs: glyphs})
 	}
 	r.pending = append(r.pending, showItem{glyphs: glyphs})
 }
@@ -211,10 +205,10 @@ func (r *showRecorder) assembleText() (string, [][]glyph) {
 		if i > 0 {
 			spell(runSeparator(r.runs[order[i-1]], run), nil)
 		}
-		runes := utf8.RuneCountInString(run.text)
-		for at, j := 0, 0; at < len(run.text); j++ {
-			_, size := utf8.DecodeRuneInString(run.text[at:])
-			spell(run.text[at:at+size], run.glyphsFor(j, runes))
+		runes := utf8.RuneCountInString(run.Text)
+		for at, j := 0, 0; at < len(run.Text); j++ {
+			_, size := utf8.DecodeRuneInString(run.Text[at:])
+			spell(run.Text[at:at+size], run.glyphsFor(j, runes))
 			at += size
 		}
 	}
@@ -232,7 +226,7 @@ func (r *showRecorder) readingOrder() []int {
 		order[i] = i
 	}
 	sort.SliceStable(order, func(a, b int) bool {
-		return r.runs[order[a]].startY > r.runs[order[b]].startY
+		return r.runs[order[a]].Y > r.runs[order[b]].Y
 	})
 
 	// Grouped by the tolerance BuildLines groups by, and measured the same
@@ -240,12 +234,12 @@ func (r *showRecorder) readingOrder() []int {
 	// a drifting baseline does not walk a line apart one run at a time.
 	line := 0
 	for i := 1; i <= len(order); i++ {
-		if i < len(order) && math.Abs(r.runs[order[i]].startY-r.runs[order[line]].startY) <= lineYTolerance {
+		if i < len(order) && math.Abs(r.runs[order[i]].Y-r.runs[order[line]].Y) <= lineYTolerance {
 			continue
 		}
 		within := order[line:i]
 		sort.SliceStable(within, func(a, b int) bool {
-			return r.runs[within[a]].startX < r.runs[within[b]].startX
+			return r.runs[within[a]].X < r.runs[within[b]].X
 		})
 		line = i
 	}
@@ -270,11 +264,10 @@ func (r textRun) glyphsFor(j, runeCount int) []glyph {
 // runSeparator is the whitespace BuildLines puts between two runs: a newline
 // across baselines, and along one the same gap rule the reader's view uses.
 func runSeparator(prev, cur textRun) string {
-	if math.Abs(cur.startY-prev.startY) > lineYTolerance {
+	if math.Abs(cur.Y-prev.Y) > lineYTolerance {
 		return "\n"
 	}
-	end := spanEnd(prev.startX, prev.endX, prev.fontSize, prev.text)
-	return spanGap(cur.startX-end, cur.fontSize)
+	return spanGap(prev.TextSpan, cur.TextSpan)
 }
 
 // mark marks the glyphs a rectangle takes. Marking and rewriting are separate

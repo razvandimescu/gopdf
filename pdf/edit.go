@@ -181,7 +181,7 @@ func rectForLineRange(line TextLine, startChar, endChar int) *Rect {
 func spanCharWidth(span TextSpan) float64 {
 	runeCount := float64(len([]rune(span.Text)))
 	if runeCount == 0 || span.EndX <= span.X {
-		return span.FontSize * 0.5
+		return span.em() * 0.5
 	}
 	return (span.EndX - span.X) / runeCount
 }

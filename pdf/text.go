@@ -12,9 +12,23 @@ import (
 type TextSpan struct {
 	X, Y     float64
 	EndX     float64 // X position after this span (for accurate gap detection)
-	FontSize float64
+	FontSize float64 // em height as drawn on the page, not the Tf operand
 	Font     string
 	Text     string
+
+	// emWidth is the em along the baseline. Horizontal scaling (Tz), or a
+	// matrix that stretches one axis more than the other, sets it apart from
+	// FontSize. Zero on spans built outside the extractor.
+	emWidth float64
+}
+
+// em is what horizontal distances along the span are judged against: word
+// gaps, and widths the span did not record.
+func (s TextSpan) em() float64 {
+	if s.emWidth > 0 {
+		return s.emWidth
+	}
+	return s.FontSize
 }
 
 // TextLine is a reconstructed line of text.
@@ -359,13 +373,33 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 		tm[5] += d * tm[1]
 	}
 
+	// drawnEm is the em as drawn on the page: its height, and its width along
+	// the baseline.
+	drawnEm := func() (height, width float64) {
+		trm := matMul6(tm, ctm)
+		return fontSize * math.Hypot(trm[2], trm[3]),
+			fontSize * th / 100 * math.Hypot(trm[0], trm[1])
+	}
+
 	showString := func(s string) {
 		// The pen advances over every code, whether or not the font gives it a
 		// Unicode meaning: a string that decodes to nothing still occupies its
 		// width, and still has glyphs redaction may need to remove.
 		x, y := applyMatrix6(ctm, tm[4], tm[5])
+		height, width := drawnEm()
 		decoded := decodeString(s)
-		rec.show(decoded, fontSize, advanceTextMatrix(s))
+		glyphs := advanceTextMatrix(s)
+		endX, _ := applyMatrix6(ctm, tm[4], tm[5])
+		span := TextSpan{
+			X:        x,
+			Y:        y,
+			EndX:     endX,
+			FontSize: height,
+			Font:     fontName,
+			Text:     decoded,
+			emWidth:  width,
+		}
+		rec.show(span, glyphs)
 		if decoded == "" {
 			return
 		}
@@ -376,15 +410,7 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 				return
 			}
 		}
-		endX, _ := applyMatrix6(ctm, tm[4], tm[5])
-		spans = append(spans, TextSpan{
-			X:        x,
-			Y:        y,
-			EndX:     endX,
-			FontSize: fontSize,
-			Font:     fontName,
-			Text:     decoded,
-		})
+		spans = append(spans, span)
 	}
 
 	// Byte offset of the first operand since the last operator: an operator
@@ -642,13 +668,15 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 				markedStack = markedStack[:len(markedStack)-1]
 				if top.hasActual && top.actualText != "" {
 					x, y := applyMatrix6(ctm, top.startX, top.startY)
+					height, width := drawnEm()
 					spans = append(spans, TextSpan{
 						X:        x,
 						Y:        y,
 						EndX:     x, // approximate
-						FontSize: fontSize,
+						FontSize: height,
 						Font:     fontName,
 						Text:     top.actualText,
+						emWidth:  width,
 					})
 				}
 			}
@@ -881,34 +909,37 @@ var contentOperators = func() map[string]bool {
 const lineYTolerance = 1.0
 
 // spanGap is the whitespace that stands in for the horizontal distance between
-// two pieces of text on one line. PDF draws words where it wants them and says
-// nothing about the spaces between; the gap is all there is to go on.
+// two spans on one line. PDF draws words where it wants them and says nothing
+// about the spaces between; the gap is all there is to go on.
 //
 // Both the reader's view of a page and redaction's view of it are assembled
 // with this rule. They have to agree: removal locates text by searching what
 // the page says, so a space one of them inserts and the other does not is a
 // query that Page.Search answers and RemoveText silently does not.
-func spanGap(gap, fontSize float64) string {
-	spaceWidth := math.Max(fontSize*0.25, 2)
+func spanGap(prev, cur TextSpan) string {
+	gap, em := cur.X-prev.end(), cur.em()
+	spaceWidth := math.Max(em*0.25, 2)
 	if gap > spaceWidth {
 		// Proportional, so tabulated columns keep their shape, capped so a
 		// wide margin does not become a wall of spaces.
 		const spaces = "          "
 		return spaces[:min(int(gap/spaceWidth), len(spaces))]
 	}
-	if gap > 0.5 {
+	// Relative to the size, so letter-spacing is not taken for word breaks:
+	// tracking of 0.7pt on an 8pt em is still one word.
+	if gap > math.Max(em*0.15, 0.5) {
 		return " "
 	}
 	return ""
 }
 
-// spanEnd is where a piece of text leaves the pen, estimated from its width
-// when it did not record an end of its own.
-func spanEnd(startX, endX, fontSize float64, text string) float64 {
-	if endX > startX {
-		return endX
+// end is where the span leaves the pen, estimated from its width when it did
+// not record an end of its own.
+func (s TextSpan) end() float64 {
+	if s.EndX > s.X {
+		return s.EndX
 	}
-	return startX + float64(utf8.RuneCountInString(text))*fontSize*0.5
+	return s.X + float64(utf8.RuneCountInString(s.Text))*s.em()*0.5
 }
 
 // BuildLines groups text spans into lines and reconstructs text.
@@ -939,13 +970,11 @@ func BuildLines(spans []TextSpan) []TextLine {
 		sortSpansByX(lines[i].Spans)
 
 		var buf strings.Builder
-		prevEnd := -1.0
-		for _, span := range lines[i].Spans {
-			if prevEnd >= 0 {
-				buf.WriteString(spanGap(span.X-prevEnd, span.FontSize))
+		for j, span := range lines[i].Spans {
+			if j > 0 {
+				buf.WriteString(spanGap(lines[i].Spans[j-1], span))
 			}
 			buf.WriteString(span.Text)
-			prevEnd = spanEnd(span.X, span.EndX, span.FontSize, span.Text)
 		}
 		lines[i].Text = buf.String()
 	}

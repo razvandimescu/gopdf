@@ -416,10 +416,11 @@ func filterNonRecordRows(t *Table, keyCol int) *Table {
 }
 
 // dropTrailer cuts what follows a digit-keyed table: the rows after its last
-// record, when a gap wider than the table's line pitch, or a page break, sets
+// record, when a gap wider than the table's line pitch on the same page sets
 // them apart. Terms and signatures after a quotation are keyed by words, and
 // so are the names after "3M" and "7-Eleven" in an alphabetical list; only the
-// gap tells the two apart, so the trailer is not cut by its shape alone.
+// gap tells the two apart, so the trailer is not cut by its shape alone. A
+// page break is no such gap: the list may simply go on over the page.
 func dropTrailer(t *Table, keyCol int) *Table {
 	last := -1
 	for i, r := range t.Rows {
@@ -448,7 +449,7 @@ func dropTrailer(t *Table, keyCol int) *Table {
 	if len(end) == 0 || len(next) == 0 {
 		return t
 	}
-	if gap := end[len(end)-1] - next[0]; gap > 0 && gap <= median(gaps)*blockGapRatio {
+	if gap := end[len(end)-1] - next[0]; gap <= median(gaps)*blockGapRatio {
 		return t
 	}
 	out := *t

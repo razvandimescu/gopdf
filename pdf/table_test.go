@@ -1552,3 +1552,11 @@ func TestDropTrailer_KeepsAnAlphabeticalList(t *testing.T) {
 		t.Errorf("got %d rows, want all 6", len(got.Rows))
 	}
 }
+
+func TestDropTrailer_KeepsAListOverAPageBreak(t *testing.T) {
+	tbl := keyedList([]string{"3M", "7-Eleven"}, 12, -1)
+	tbl.Rows = append(tbl.Rows, keyedList([]string{"Acme", "Globex", "Initech", "Umbrella"}, 12, -1).Rows...)
+	if got := dropTrailer(tbl, 0); len(got.Rows) != 6 {
+		t.Errorf("got %d rows, want all 6", len(got.Rows))
+	}
+}

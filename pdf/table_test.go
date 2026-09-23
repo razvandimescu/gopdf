@@ -1154,6 +1154,14 @@ func TestIntegration_AllQuotationPDFs(t *testing.T) {
 				t.Error("quotation table has 0 data rows")
 			}
 
+			// Items are keyed by quantity; the terms that follow the table, by words.
+			auto := FindTableAcrossPages(allPageSpans(doc), &TableOpts{AutoTune: true})
+			for ri := range auto.Rows {
+				if key := auto.CellText(ri, 0); !startsWithDigit(key) {
+					t.Errorf("row %d is not an item: %q", ri, key)
+				}
+			}
+
 			for ri, row := range tbl.Rows {
 				hasContent := false
 				for _, cell := range row.Cells {
@@ -1506,5 +1514,41 @@ func TestMergeByAnchorColumn_LinesAboveTheAnchor(t *testing.T) {
 		if got := tbl.CellByName(i, "Description"); got != w {
 			t.Errorf("row %d Description = %q, want %q", i, got, w)
 		}
+	}
+}
+
+// keyedList lays out one-line rows keyed in column 0, dy apart, with extra
+// space before row gapAt.
+func keyedList(keys []string, dy float64, gapAt int) *Table {
+	cols := []Column{{Name: "Key", X: 50}, {Name: "Text", X: 150}}
+	t := &Table{Columns: cols}
+	y := 680.0
+	for i, k := range keys {
+		if i == gapAt {
+			y -= 3 * dy
+		}
+		key, text := makeSpan(50, y, k), makeSpan(150, y, "details")
+		t.Rows = append(t.Rows, Row{Y: y, Cells: []Cell{
+			{Column: 0, Text: k, Spans: []TextSpan{key}},
+			{Column: 1, Text: "details", Spans: []TextSpan{text}},
+		}})
+		y -= dy
+	}
+	return t
+}
+
+func TestDropTrailer_TermsAfterTheTable(t *testing.T) {
+	tbl := keyedList([]string{"2.00", "1.00", "Quote Expiry:", "Pricing:", "Vesting:"}, 12, 2)
+	if got := dropTrailer(tbl, 0); len(got.Rows) != 2 {
+		t.Errorf("got %d rows, want the 2 items without the terms", len(got.Rows))
+	}
+}
+
+func TestDropTrailer_KeepsAnAlphabeticalList(t *testing.T) {
+	// Digits sort first, so the names after "3M" and "7-Eleven" are keyed by
+	// words too. No gap sets them apart, so they are the rest of the table.
+	tbl := keyedList([]string{"3M", "7-Eleven", "Acme", "Globex", "Initech", "Umbrella"}, 12, -1)
+	if got := dropTrailer(tbl, 0); len(got.Rows) != 6 {
+		t.Errorf("got %d rows, want all 6", len(got.Rows))
 	}
 }

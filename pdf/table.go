@@ -321,7 +321,8 @@ func autoTuneExtract(pages [][]TextSpan, headers []string, colOverrides []Column
 		cand.AnchorColumn = anchor
 		cand.MergeGap = 0
 		if t := FindTableAcrossPages(pages, cand); t != nil && len(t.Rows) > 0 {
-			return filterNonRecordRows(t, t.ColumnByName(anchor))
+			key := t.ColumnByName(anchor)
+			return filterNonRecordRows(dropTrailer(t, key), key)
 		}
 	}
 
@@ -412,6 +413,65 @@ func filterNonRecordRows(t *Table, keyCol int) *Table {
 	out := *t
 	out.Rows = kept
 	return &out
+}
+
+// dropTrailer cuts what follows a digit-keyed table: the rows after its last
+// record, when a gap wider than the table's line pitch, or a page break, sets
+// them apart. Terms and signatures after a quotation are keyed by words, and
+// so are the names after "3M" and "7-Eleven" in an alphabetical list; only the
+// gap tells the two apart, so the trailer is not cut by its shape alone.
+func dropTrailer(t *Table, keyCol int) *Table {
+	last := -1
+	for i, r := range t.Rows {
+		if startsWithDigit(keyCellText(r, keyCol)) {
+			last = i
+		}
+	}
+	if last < 0 || last == len(t.Rows)-1 || !digitKeyed(t.Rows[:last+1], keyCol) {
+		return t
+	}
+
+	var gaps []float64
+	above := math.Inf(-1)
+	for _, r := range t.Rows {
+		for _, y := range lineYs(r) {
+			if above > y { // a line above y on the same page
+				gaps = append(gaps, above-y)
+			}
+			above = y
+		}
+	}
+	if len(gaps) == 0 {
+		return t
+	}
+	end, next := lineYs(t.Rows[last]), lineYs(t.Rows[last+1])
+	if len(end) == 0 || len(next) == 0 {
+		return t
+	}
+	if gap := end[len(end)-1] - next[0]; gap > 0 && gap <= median(gaps)*blockGapRatio {
+		return t
+	}
+	out := *t
+	out.Rows = t.Rows[:last+1]
+	return &out
+}
+
+// lineYs lists the baselines of a row's lines, top down.
+func lineYs(r Row) []float64 {
+	var ys []float64
+	for _, c := range r.Cells {
+		for _, s := range c.Spans {
+			ys = append(ys, s.Y)
+		}
+	}
+	sort.Sort(sort.Reverse(sort.Float64Slice(ys)))
+	var lines []float64
+	for _, y := range ys {
+		if len(lines) == 0 || lines[len(lines)-1]-y > defaultYTolerance {
+			lines = append(lines, y)
+		}
+	}
+	return lines
 }
 
 // median returns the upper median of xs, which must not be empty.

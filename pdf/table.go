@@ -1340,15 +1340,12 @@ func mergeByAnchorColumn(rows []Row, columns []Column, anchor string) []Row {
 		return rows
 	}
 
+	figures := figureColumns(rows, len(columns), ai)
 	var merged []Row
 	for _, row := range rows {
-		anchorText := ""
-		if ai < len(row.Cells) {
-			anchorText = row.Cells[ai].Text
-		}
-		if anchorText != "" || len(merged) == 0 {
+		if keyCellText(row, ai) != "" || len(merged) == 0 {
 			merged = append(merged, row)
-		} else if isContinuationRow(row, ai) {
+		} else if isContinuationRow(row, ai, figures) {
 			// Append continuation text into the previous row.
 			prev := &merged[len(merged)-1]
 			for ci := range prev.Cells {
@@ -1367,10 +1364,11 @@ func mergeByAnchorColumn(rows []Row, columns []Column, anchor string) []Row {
 }
 
 // isContinuationRow returns true if the row looks like the wrapped tail of the
-// record above: it fills some cell after the anchor, and none with an amount.
-// A row carrying an amount is a record or a summary of its own — merging one
-// would run two figures into a single cell. Other numbers are text: a value
-// date or a reference number on a tail is part of the record.
+// record above: it fills some cell after the anchor, and none with a figure —
+// a number in a figure column, or an amount anywhere. A row carrying a figure
+// is a record or a summary of its own, and merging one would run two figures
+// into a single cell. A number in a text column is text: a value date or a
+// reference number on a tail is part of the record.
 //
 // Which columns wrap is a property of the document, so no single column can be
 // asked. A quotation laid out as Quantity | Product Code | Suppliers Code |
@@ -1378,19 +1376,42 @@ func mergeByAnchorColumn(rows []Row, columns []Column, anchor string) []Row {
 // column (the anchor's neighbour) dropped the tail of every wrapped cell in the
 // file: a supplier code came out as its first line ("XYZ-ECO-I302M-A-" for
 // XYZ-ECO-I302M-A-NB), with the rest of the description lost beside it.
-func isContinuationRow(row Row, anchorIdx int) bool {
+func isContinuationRow(row Row, anchorIdx int, figures []bool) bool {
 	text := false
 	for ci := anchorIdx + 1; ci < len(row.Cells); ci++ {
 		cell := row.Cells[ci].Text
 		if cell == "" {
 			continue
 		}
-		if holdsAmounts(cell) {
+		if holdsAmounts(cell) || figures[ci] && isAllNumeric(cell) {
 			return false
 		}
 		text = true
 	}
 	return text
+}
+
+// figureColumns marks the columns that the rows without an anchor fill with
+// numbers only. A column holding text on those rows (a description, a
+// reference that wraps onto words) holds numbers as text.
+func figureColumns(rows []Row, ncols, anchorIdx int) []bool {
+	numbers := make([]bool, ncols)
+	words := make([]bool, ncols)
+	for _, row := range rows {
+		if keyCellText(row, anchorIdx) != "" {
+			continue
+		}
+		for ci, c := range row.Cells {
+			if c.Text != "" {
+				numbers[ci] = numbers[ci] || isAllNumeric(c.Text)
+				words[ci] = words[ci] || !isAllNumeric(c.Text)
+			}
+		}
+	}
+	for ci := range numbers {
+		numbers[ci] = numbers[ci] && !words[ci]
+	}
+	return numbers
 }
 
 // holdsAmounts reports whether cell holds money figures and nothing else:

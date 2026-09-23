@@ -1368,10 +1368,38 @@ func TestMergeByAnchorColumn_AmountRowIsNotATail(t *testing.T) {
 	}
 }
 
+func TestMergeByAnchorColumn_IntegerAmountRowIsNotATail(t *testing.T) {
+	// Amounts need not carry decimals. What marks this one is its column,
+	// which holds only numbers.
+	spans := []TextSpan{
+		makeSpan(50, 700, "Date"),
+		makeSpan(150, 700, "Description"),
+		makeSpan(450, 700, "Amount"),
+		makeSpan(50, 680, "Jan 05"),
+		makeSpan(150, 680, "Payment"),
+		makeSpan(450, 680, "100"),
+		makeSpan(150, 668, "Total"),
+		makeSpan(450, 668, "100"),
+	}
+
+	tbl := FindTableAcrossPages([][]TextSpan{spans}, &TableOpts{
+		Headers:      []string{"Description", "Amount"},
+		AnchorColumn: "Date",
+	})
+	if tbl == nil {
+		t.Fatal("no table found")
+	}
+	if got := tbl.CellByName(0, "Amount"); got != "100" {
+		t.Errorf("Amount = %q, want %q — the total was merged in", got, "100")
+	}
+}
+
 func TestMergeByAnchorColumn_DateIsNotAnAmount(t *testing.T) {
 	// A statement's tail can carry the value date beside the rest of the
-	// description. A date is digits and separators, but it is not an amount,
-	// and treating it as one lost the whole line.
+	// description. A date is digits and separators, but the reference column
+	// it sits in also wraps onto words, so it is text, not a figure; treating
+	// it as a figure lost the whole line. (In a column whose tails are only
+	// ever numbers, a date cannot be told from an amount, and is refused.)
 	spans := []TextSpan{
 		makeSpan(50, 700, "Date"),
 		makeSpan(150, 700, "Description"),
@@ -1381,8 +1409,9 @@ func TestMergeByAnchorColumn_DateIsNotAnAmount(t *testing.T) {
 		makeSpan(150, 680, "Payment to"),
 		makeSpan(350, 680, "2025040151601958"),
 		makeSpan(450, 680, "400,00"),
-		makeSpan(150, 668, "ACME Corp"),
-		makeSpan(350, 668, "01.04.2025"),
+		makeSpan(350, 672, "Ordin de plata"),
+		makeSpan(150, 664, "ACME Corp"),
+		makeSpan(350, 664, "01.04.2025"),
 	}
 
 	tbl := FindTableAcrossPages([][]TextSpan{spans}, &TableOpts{
@@ -1395,7 +1424,7 @@ func TestMergeByAnchorColumn_DateIsNotAnAmount(t *testing.T) {
 	if got := tbl.CellByName(0, "Description"); got != "Payment to ACME Corp" {
 		t.Errorf("Description = %q, want the tail merged", got)
 	}
-	if got := tbl.CellByName(0, "Reference"); got != "2025040151601958 01.04.2025" {
+	if got := tbl.CellByName(0, "Reference"); got != "2025040151601958 Ordin de plata 01.04.2025" {
 		t.Errorf("Reference = %q, want the value date appended", got)
 	}
 }

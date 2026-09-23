@@ -244,20 +244,22 @@ func FindTableAcrossPages(pages [][]TextSpan, opts *TableOpts) *Table {
 			}
 		}
 		var result *Table
-		for i, spans := range pages {
+		for _, spans := range pages {
 			t := FindTable(spans, opts)
-			if t == nil {
-				continue
-			}
-			// On pages after the first, collect continuation rows above the
-			// header (data that spills over from the previous page's section).
-			if i > 0 && result != nil {
-				preRows := collectPreHeaderData(spans, t.Columns, opts)
-				result.Rows = append(result.Rows, preRows...)
-			}
-			if result == nil {
+			switch {
+			case result == nil:
 				result = t
-			} else {
+			case t == nil:
+				// A page with no header continues the table only when its rows are
+				// keyed like the table's records; terms, signatures and other prose
+				// after the table are keyed by words.
+				rows := collectContinuation(spans, result.Columns, opts)
+				key := max(0, result.ColumnByName(opts.AnchorColumn))
+				if digitKeyed(result.Rows, key) && digitKeyed(rows, key) {
+					result.Rows = append(result.Rows, rows...)
+				}
+			default:
+				result.Rows = append(result.Rows, collectContinuation(spans, t.Columns, opts)...)
 				result.Rows = append(result.Rows, t.Rows...)
 			}
 		}
@@ -393,20 +395,11 @@ func filterNonRecordRows(t *Table, keyCol int) *Table {
 	// and only when digit-keyed keys clearly dominate, so a digit-keyed record is
 	// never dropped. Alpha-keyed tables fall below the threshold and pass through
 	// unfiltered.
-	digit, total := 0, 0
-	for _, r := range t.Rows {
-		if v := keyCellText(r, keyCol); v != "" {
-			total++
-			if startsWithDigit(v) {
-				digit++
-			}
-		}
-	}
-	if total == 0 || float64(digit)/float64(total) < recordShapeMajority {
+	if !digitKeyed(t.Rows, keyCol) {
 		return t
 	}
 
-	kept := make([]Row, 0, digit)
+	var kept []Row
 	for _, r := range t.Rows {
 		if v := keyCellText(r, keyCol); v != "" && startsWithDigit(v) {
 			kept = append(kept, r)
@@ -415,6 +408,20 @@ func filterNonRecordRows(t *Table, keyCol int) *Table {
 	out := *t
 	out.Rows = kept
 	return &out
+}
+
+// digitKeyed reports whether digit-leading keys dominate the rows' key column.
+func digitKeyed(rows []Row, keyCol int) bool {
+	digit, total := 0, 0
+	for _, r := range rows {
+		if v := keyCellText(r, keyCol); v != "" {
+			total++
+			if startsWithDigit(v) {
+				digit++
+			}
+		}
+	}
+	return total > 0 && float64(digit)/float64(total) >= recordShapeMajority
 }
 
 func keyCellText(r Row, col int) string {
@@ -782,13 +789,14 @@ func discoverColumnsForHeaders(pages [][]TextSpan, opts *TableOpts) []Column {
 	return remapColumnsToData(columns, allDataRows)
 }
 
-// collectPreHeaderData collects data rows above the first header on a page.
-// These are continuations from the previous page's last section that spill
-// over a page break.
-func collectPreHeaderData(spans []TextSpan, columns []Column, opts *TableOpts) []Row {
+// collectContinuation collects the rows that continue the previous page's
+// section: those above the page's first header, or the whole page when it
+// has no header, as happens mid-section in statements that repeat the header
+// per section rather than per page.
+func collectContinuation(spans []TextSpan, columns []Column, opts *TableOpts) []Row {
 	ph, ok := findPageHeaders(spans, opts)
-	if !ok || ph.hi == 0 {
-		return nil
+	if !ok {
+		return collectDataRows(groupRows(spans, opts.yTol()), columns, opts)
 	}
 	return collectDataRows(ph.rows[:ph.hi], columns, opts)
 }
@@ -1332,15 +1340,12 @@ func mergeByAnchorColumn(rows []Row, columns []Column, anchor string) []Row {
 		return rows
 	}
 
+	figures := figureColumns(rows, len(columns), ai)
 	var merged []Row
 	for _, row := range rows {
-		anchorText := ""
-		if ai < len(row.Cells) {
-			anchorText = row.Cells[ai].Text
-		}
-		if anchorText != "" || len(merged) == 0 {
+		if keyCellText(row, ai) != "" || len(merged) == 0 {
 			merged = append(merged, row)
-		} else if isContinuationRow(row, ai) {
+		} else if isContinuationRow(row, ai, figures) {
 			// Append continuation text into the previous row.
 			prev := &merged[len(merged)-1]
 			for ci := range prev.Cells {
@@ -1359,9 +1364,11 @@ func mergeByAnchorColumn(rows []Row, columns []Column, anchor string) []Row {
 }
 
 // isContinuationRow returns true if the row looks like the wrapped tail of the
-// record above: every cell it fills after the anchor holds text, and none holds
-// a bare number. A row carrying an amount is a record or a summary of its own —
-// merging one would run two figures into a single cell.
+// record above: it fills some cell after the anchor, and puts no number in a
+// figure column. A row carrying a figure is a record or a summary of its own,
+// and merging one would run two figures into a single cell. A number in a text
+// column is text: a value date or a reference number on a tail is part of the
+// record.
 //
 // Which columns wrap is a property of the document, so no single column can be
 // asked. A quotation laid out as Quantity | Product Code | Suppliers Code |
@@ -1369,19 +1376,42 @@ func mergeByAnchorColumn(rows []Row, columns []Column, anchor string) []Row {
 // column (the anchor's neighbour) dropped the tail of every wrapped cell in the
 // file: a supplier code came out as its first line ("XYZ-ECO-I302M-A-" for
 // XYZ-ECO-I302M-A-NB), with the rest of the description lost beside it.
-func isContinuationRow(row Row, anchorIdx int) bool {
+func isContinuationRow(row Row, anchorIdx int, figures []bool) bool {
 	text := false
 	for ci := anchorIdx + 1; ci < len(row.Cells); ci++ {
 		cell := row.Cells[ci].Text
 		if cell == "" {
 			continue
 		}
-		if isAllNumeric(cell) {
+		if figures[ci] && isAllNumeric(cell) {
 			return false
 		}
 		text = true
 	}
 	return text
+}
+
+// figureColumns marks the columns that the rows without an anchor fill with
+// numbers only. A column holding text on those rows (a description, a
+// reference that wraps onto words) holds numbers as text.
+func figureColumns(rows []Row, ncols, anchorIdx int) []bool {
+	numbers := make([]bool, ncols)
+	words := make([]bool, ncols)
+	for _, row := range rows {
+		if keyCellText(row, anchorIdx) != "" {
+			continue
+		}
+		for ci, c := range row.Cells {
+			if c.Text != "" {
+				numbers[ci] = numbers[ci] || isAllNumeric(c.Text)
+				words[ci] = words[ci] || !isAllNumeric(c.Text)
+			}
+		}
+	}
+	for ci := range numbers {
+		numbers[ci] = numbers[ci] && !words[ci]
+	}
+	return numbers
 }
 
 func isAllNumeric(s string) bool {

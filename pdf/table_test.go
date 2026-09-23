@@ -3,6 +3,7 @@ package pdf
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -169,6 +170,45 @@ func TestFindTableAcrossPages(t *testing.T) {
 	if tbl.CellText(0, 0) != "a" || tbl.CellText(1, 0) != "d" {
 		t.Errorf("rows: [%q, %q], want [a, d]", tbl.CellText(0, 0), tbl.CellText(1, 0))
 	}
+}
+
+func TestFindTableAcrossPages_PageWithoutHeader(t *testing.T) {
+	// Statements repeat the header per section, not per page, so a page in
+	// the middle of a long section has rows and no header.
+	tbl := FindTableAcrossPages([][]TextSpan{datedPage(true, "01-04"), datedPage(false, "02-04")}, &TableOpts{
+		Headers: []string{"Date", "Amount"},
+	})
+	if tbl == nil {
+		t.Fatal("expected table")
+	}
+	if len(tbl.Rows) != 2 || tbl.CellText(1, 0) != "02-04" {
+		t.Errorf("got %d rows, want the page-2 row 02-04 after 01-04", len(tbl.Rows))
+	}
+}
+
+func TestFindTableAcrossPages_ProsePageWithoutHeader(t *testing.T) {
+	// Terms after the table also lack a header, but are keyed by words.
+	terms := []TextSpan{
+		makeSpan(50, 700, "Pricing:"),
+		makeSpan(150, 700, "All prices exclude VAT."),
+	}
+	tbl := FindTableAcrossPages([][]TextSpan{datedPage(true, "01-04"), terms}, &TableOpts{
+		Headers: []string{"Date", "Amount"},
+	})
+	if tbl == nil {
+		t.Fatal("expected table")
+	}
+	if len(tbl.Rows) != 1 {
+		t.Errorf("got %d rows, want only the 01-04 record", len(tbl.Rows))
+	}
+}
+
+func datedPage(header bool, date string) []TextSpan {
+	var spans []TextSpan
+	if header {
+		spans = append(spans, makeSpan(50, 720, "Date"), makeSpan(150, 720, "Amount"))
+	}
+	return append(spans, makeSpan(50, 700, date), makeSpan(150, 700, "10.00"))
 }
 
 // =====================================================================
@@ -984,9 +1024,31 @@ func TestIntegration_BCR_AutoTune(t *testing.T) {
 		t.Fatal("AutoTune returned nil on BCR")
 	}
 
-	// Records must be separated, not collapsed into the old ~70-row blob.
-	if len(tbl.Rows) < 150 {
-		t.Errorf("expected >= 150 rows after per-record separation, got %d", len(tbl.Rows))
+	// One row per transaction: 217 of them, 23 on page 7, which has no header.
+	if len(tbl.Rows) != 217 {
+		t.Errorf("expected 217 rows, one per transaction, got %d", len(tbl.Rows))
+	}
+
+	// Records carry their value date on a tail line of the reference column;
+	// a tail judged to be an amount is lost along with it.
+	valueDate := regexp.MustCompile(`^\d\d\.\d\d\.2025$`)
+	printed, extracted := 0, 0
+	for _, spans := range pages {
+		for _, s := range spans {
+			if valueDate.MatchString(s.Text) {
+				printed++
+			}
+		}
+	}
+	for ri := range tbl.Rows {
+		for _, w := range strings.Fields(tbl.CellText(ri, 2)) {
+			if valueDate.MatchString(w) {
+				extracted++
+			}
+		}
+	}
+	if extracted != printed {
+		t.Errorf("value dates: %d in the table, %d on the pages", extracted, printed)
 	}
 
 	// Non-record rows (repeated headers, section labels, footer prose) must be
@@ -1303,5 +1365,66 @@ func TestMergeByAnchorColumn_AmountRowIsNotATail(t *testing.T) {
 	}
 	if got := tbl.CellByName(0, "Description"); got != "Payment to ACME Corp" {
 		t.Errorf("Description = %q, want the text tail merged", got)
+	}
+}
+
+func TestMergeByAnchorColumn_IntegerAmountRowIsNotATail(t *testing.T) {
+	// Amounts need not carry decimals. What marks this one is its column,
+	// which holds only numbers.
+	spans := []TextSpan{
+		makeSpan(50, 700, "Date"),
+		makeSpan(150, 700, "Description"),
+		makeSpan(450, 700, "Amount"),
+		makeSpan(50, 680, "Jan 05"),
+		makeSpan(150, 680, "Payment"),
+		makeSpan(450, 680, "100"),
+		makeSpan(150, 668, "Total"),
+		makeSpan(450, 668, "100"),
+	}
+
+	tbl := FindTableAcrossPages([][]TextSpan{spans}, &TableOpts{
+		Headers:      []string{"Description", "Amount"},
+		AnchorColumn: "Date",
+	})
+	if tbl == nil {
+		t.Fatal("no table found")
+	}
+	if got := tbl.CellByName(0, "Amount"); got != "100" {
+		t.Errorf("Amount = %q, want %q — the total was merged in", got, "100")
+	}
+}
+
+func TestMergeByAnchorColumn_DateIsNotAnAmount(t *testing.T) {
+	// A statement's tail can carry the value date beside the rest of the
+	// description. A date is digits and separators, but the reference column
+	// it sits in also wraps onto words, so it is text, not a figure; treating
+	// it as a figure lost the whole line. (In a column whose tails are only
+	// ever numbers, a date cannot be told from an amount, and is refused.)
+	spans := []TextSpan{
+		makeSpan(50, 700, "Date"),
+		makeSpan(150, 700, "Description"),
+		makeSpan(350, 700, "Reference"),
+		makeSpan(450, 700, "Debit"),
+		makeSpan(50, 680, "01-04-2025"),
+		makeSpan(150, 680, "Payment to"),
+		makeSpan(350, 680, "2025040151601958"),
+		makeSpan(450, 680, "400,00"),
+		makeSpan(350, 672, "Ordin de plata"),
+		makeSpan(150, 664, "ACME Corp"),
+		makeSpan(350, 664, "01.04.2025"),
+	}
+
+	tbl := FindTableAcrossPages([][]TextSpan{spans}, &TableOpts{
+		Headers:      []string{"Description", "Debit"},
+		AnchorColumn: "Date",
+	})
+	if tbl == nil {
+		t.Fatal("no table found")
+	}
+	if got := tbl.CellByName(0, "Description"); got != "Payment to ACME Corp" {
+		t.Errorf("Description = %q, want the tail merged", got)
+	}
+	if got := tbl.CellByName(0, "Reference"); got != "2025040151601958 Ordin de plata 01.04.2025" {
+		t.Errorf("Reference = %q, want the value date appended", got)
 	}
 }

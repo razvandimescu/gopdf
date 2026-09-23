@@ -1364,11 +1364,11 @@ func mergeByAnchorColumn(rows []Row, columns []Column, anchor string) []Row {
 }
 
 // isContinuationRow returns true if the row looks like the wrapped tail of the
-// record above: it fills some cell after the anchor, and none with a figure —
-// a number in a figure column, or an amount anywhere. A row carrying a figure
-// is a record or a summary of its own, and merging one would run two figures
-// into a single cell. A number in a text column is text: a value date or a
-// reference number on a tail is part of the record.
+// record above: it fills some cell after the anchor, and puts no number in a
+// figure column. A row carrying a figure is a record or a summary of its own,
+// and merging one would run two figures into a single cell. A number in a text
+// column is text: a value date or a reference number on a tail is part of the
+// record.
 //
 // Which columns wrap is a property of the document, so no single column can be
 // asked. A quotation laid out as Quantity | Product Code | Suppliers Code |
@@ -1383,7 +1383,7 @@ func isContinuationRow(row Row, anchorIdx int, figures []bool) bool {
 		if cell == "" {
 			continue
 		}
-		if holdsAmounts(cell) || figures[ci] && isAllNumeric(cell) {
+		if figures[ci] && isAllNumeric(cell) {
 			return false
 		}
 		text = true
@@ -1412,18 +1412,6 @@ func figureColumns(rows []Row, ncols, anchorIdx int) []bool {
 		numbers[ci] = numbers[ci] && !words[ci]
 	}
 	return numbers
-}
-
-// holdsAmounts reports whether cell holds money figures and nothing else:
-// digits and separators ending in a two-digit decimal part (400,00, 1 000,00,
-// -262.30). Dates, reference numbers and bare integers do not qualify.
-func holdsAmounts(cell string) bool {
-	s := strings.TrimPrefix(strings.ReplaceAll(cell, " ", ""), "-")
-	n := len(s)
-	if n < 4 || !isAllNumeric(s) || !isDigit(s[0]) {
-		return false
-	}
-	return (s[n-3] == '.' || s[n-3] == ',') && isDigit(s[n-2]) && isDigit(s[n-1])
 }
 
 func isAllNumeric(s string) bool {

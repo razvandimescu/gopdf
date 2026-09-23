@@ -1428,16 +1428,3 @@ func TestMergeByAnchorColumn_DateIsNotAnAmount(t *testing.T) {
 		t.Errorf("Reference = %q, want the value date appended", got)
 	}
 }
-
-func TestHoldsAmounts(t *testing.T) {
-	for s, want := range map[string]bool{
-		"400,00": true, "1.000,00": true, "-262.30": true, "1 000,00": true, "0,51": true,
-		"100.00 200.00": true, "3.00": true,
-		"01.04.2025": false, "2025040151601958": false, "3529": false, "1.000": false,
-		"12.5": false, "Ordin 400,00": false, "": false, "-": false,
-	} {
-		if got := holdsAmounts(s); got != want {
-			t.Errorf("holdsAmounts(%q) = %v, want %v", s, got, want)
-		}
-	}
-}

@@ -3,6 +3,7 @@ package pdf
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -1028,6 +1029,28 @@ func TestIntegration_BCR_AutoTune(t *testing.T) {
 		t.Errorf("expected 217 rows, one per transaction, got %d", len(tbl.Rows))
 	}
 
+	// Records carry their value date on a tail line of the reference column;
+	// a tail judged to be an amount is lost along with it.
+	valueDate := regexp.MustCompile(`^\d\d\.\d\d\.2025$`)
+	printed, extracted := 0, 0
+	for _, spans := range pages {
+		for _, s := range spans {
+			if valueDate.MatchString(s.Text) {
+				printed++
+			}
+		}
+	}
+	for ri := range tbl.Rows {
+		for _, w := range strings.Fields(tbl.CellText(ri, 2)) {
+			if valueDate.MatchString(w) {
+				extracted++
+			}
+		}
+	}
+	if extracted != printed {
+		t.Errorf("value dates: %d in the table, %d on the pages", extracted, printed)
+	}
+
 	// Non-record rows (repeated headers, section labels, footer prose) must be
 	// filtered: every transaction is keyed by a date, so every row's key column
 	// (column 0) starts with a digit.
@@ -1342,5 +1365,50 @@ func TestMergeByAnchorColumn_AmountRowIsNotATail(t *testing.T) {
 	}
 	if got := tbl.CellByName(0, "Description"); got != "Payment to ACME Corp" {
 		t.Errorf("Description = %q, want the text tail merged", got)
+	}
+}
+
+func TestMergeByAnchorColumn_DateIsNotAnAmount(t *testing.T) {
+	// A statement's tail can carry the value date beside the rest of the
+	// description. A date is digits and separators, but it is not an amount,
+	// and treating it as one lost the whole line.
+	spans := []TextSpan{
+		makeSpan(50, 700, "Date"),
+		makeSpan(150, 700, "Description"),
+		makeSpan(350, 700, "Reference"),
+		makeSpan(450, 700, "Debit"),
+		makeSpan(50, 680, "01-04-2025"),
+		makeSpan(150, 680, "Payment to"),
+		makeSpan(350, 680, "2025040151601958"),
+		makeSpan(450, 680, "400,00"),
+		makeSpan(150, 668, "ACME Corp"),
+		makeSpan(350, 668, "01.04.2025"),
+	}
+
+	tbl := FindTableAcrossPages([][]TextSpan{spans}, &TableOpts{
+		Headers:      []string{"Description", "Debit"},
+		AnchorColumn: "Date",
+	})
+	if tbl == nil {
+		t.Fatal("no table found")
+	}
+	if got := tbl.CellByName(0, "Description"); got != "Payment to ACME Corp" {
+		t.Errorf("Description = %q, want the tail merged", got)
+	}
+	if got := tbl.CellByName(0, "Reference"); got != "2025040151601958 01.04.2025" {
+		t.Errorf("Reference = %q, want the value date appended", got)
+	}
+}
+
+func TestHoldsAmounts(t *testing.T) {
+	for s, want := range map[string]bool{
+		"400,00": true, "1.000,00": true, "-262.30": true, "1 000,00": true, "0,51": true,
+		"100.00 200.00": true, "3.00": true,
+		"01.04.2025": false, "2025040151601958": false, "3529": false, "1.000": false,
+		"12.5": false, "Ordin 400,00": false, "": false, "-": false,
+	} {
+		if got := holdsAmounts(s); got != want {
+			t.Errorf("holdsAmounts(%q) = %v, want %v", s, got, want)
+		}
 	}
 }

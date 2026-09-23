@@ -1367,9 +1367,10 @@ func mergeByAnchorColumn(rows []Row, columns []Column, anchor string) []Row {
 }
 
 // isContinuationRow returns true if the row looks like the wrapped tail of the
-// record above: every cell it fills after the anchor holds text, and none holds
-// a bare number. A row carrying an amount is a record or a summary of its own —
-// merging one would run two figures into a single cell.
+// record above: it fills some cell after the anchor, and none with an amount.
+// A row carrying an amount is a record or a summary of its own — merging one
+// would run two figures into a single cell. Other numbers are text: a value
+// date or a reference number on a tail is part of the record.
 //
 // Which columns wrap is a property of the document, so no single column can be
 // asked. A quotation laid out as Quantity | Product Code | Suppliers Code |
@@ -1384,12 +1385,24 @@ func isContinuationRow(row Row, anchorIdx int) bool {
 		if cell == "" {
 			continue
 		}
-		if isAllNumeric(cell) {
+		if holdsAmounts(cell) {
 			return false
 		}
 		text = true
 	}
 	return text
+}
+
+// holdsAmounts reports whether cell holds money figures and nothing else:
+// digits and separators ending in a two-digit decimal part (400,00, 1 000,00,
+// -262.30). Dates, reference numbers and bare integers do not qualify.
+func holdsAmounts(cell string) bool {
+	s := strings.TrimPrefix(strings.ReplaceAll(cell, " ", ""), "-")
+	n := len(s)
+	if n < 4 || !isAllNumeric(s) || !isDigit(s[0]) {
+		return false
+	}
+	return (s[n-3] == '.' || s[n-3] == ',') && isDigit(s[n-2]) && isDigit(s[n-1])
 }
 
 func isAllNumeric(s string) bool {

@@ -26,6 +26,7 @@ const (
 	anchorContinuationFrac = 0.2  // min fraction of rows with an empty key column to treat as multi-line records
 	maxAnchorEmptyFrac     = 0.95 // above this, the key column is likely mis-detected, not a real anchor
 	recordShapeMajority    = 0.6  // min fraction one key-shape class must hold before non-record rows are filtered
+	blockGapRatio          = 1.4  // a gap this many line pitches wide separates blocks of records
 )
 
 // Table is a detected table with named columns and data rows.
@@ -104,6 +105,9 @@ type TableOpts struct {
 	// AnchorColumn names a column that signals the start of a new
 	// logical row. Consecutive rows where this column is empty are
 	// merged into the previous row that had a non-empty anchor.
+	// A gap wider than the table's line spacing separates records:
+	// rows across it do not merge, and in a block of rows holding a
+	// single anchor, the rows above the anchor join it.
 	// Applied after MergeGap. Case-insensitive.
 	AnchorColumn string
 
@@ -408,6 +412,13 @@ func filterNonRecordRows(t *Table, keyCol int) *Table {
 	out := *t
 	out.Rows = kept
 	return &out
+}
+
+// median returns the upper median of xs, which must not be empty.
+func median(xs []float64) float64 {
+	sorted := append([]float64(nil), xs...)
+	sort.Float64s(sorted)
+	return sorted[len(sorted)/2]
 }
 
 // digitKeyed reports whether digit-leading keys dominate the rows' key column.
@@ -1342,25 +1353,77 @@ func mergeByAnchorColumn(rows []Row, columns []Column, anchor string) []Row {
 
 	figures := figureColumns(rows, len(columns), ai)
 	var merged []Row
-	for _, row := range rows {
-		if keyCellText(row, ai) != "" || len(merged) == 0 {
-			merged = append(merged, row)
-		} else if isContinuationRow(row, ai, figures) {
-			// Append continuation text into the previous row.
-			prev := &merged[len(merged)-1]
-			for ci := range prev.Cells {
-				if ci < len(row.Cells) && row.Cells[ci].Text != "" {
-					if prev.Cells[ci].Text != "" {
-						prev.Cells[ci].Text += " " + row.Cells[ci].Text
-					} else {
-						prev.Cells[ci].Text = row.Cells[ci].Text
-					}
-					prev.Cells[ci].Spans = append(prev.Cells[ci].Spans, row.Cells[ci].Spans...)
-				}
-			}
-		}
+	for _, block := range splitBlocks(rows) {
+		merged = append(merged, mergeBlock(block, ai, figures)...)
 	}
 	return merged
+}
+
+// splitBlocks cuts rows where the gap between two lines exceeds the table's
+// line pitch by blockGapRatio. A line belongs only to a record in its own
+// block: a page footer set well below the last record is not part of it.
+func splitBlocks(rows []Row) [][]Row {
+	if len(rows) < 2 {
+		return [][]Row{rows}
+	}
+	gaps := make([]float64, len(rows)-1)
+	for i := range gaps {
+		gaps[i] = rows[i].Y - rows[i+1].Y
+	}
+	limit := median(gaps) * blockGapRatio
+
+	var blocks [][]Row
+	start := 0
+	for i, g := range gaps {
+		if g > limit {
+			blocks = append(blocks, rows[start:i+1])
+			start = i + 1
+		}
+	}
+	return append(blocks, rows[start:])
+}
+
+// mergeBlock folds each line of a block into the record above it. A block
+// holding a single record is that record, so the lines above its anchor join
+// it too: some statements centre the date and amount on the record's
+// description. Lines that reach no record form a row of their own.
+func mergeBlock(block []Row, ai int, figures []bool) []Row {
+	anchors := 0
+	for _, row := range block {
+		if keyCellText(row, ai) != "" {
+			anchors++
+		}
+	}
+	var out []Row
+	for _, row := range block {
+		switch {
+		case keyCellText(row, ai) != "":
+			if anchors == 1 && len(out) == 1 {
+				absorbRow(&out[0], row)
+			} else {
+				out = append(out, row)
+			}
+		case !isContinuationRow(row, ai, figures):
+		case len(out) == 0:
+			out = append(out, row)
+		default:
+			absorbRow(&out[len(out)-1], row)
+		}
+	}
+	return out
+}
+
+func absorbRow(dst *Row, src Row) {
+	for ci := range dst.Cells {
+		if ci < len(src.Cells) && src.Cells[ci].Text != "" {
+			if dst.Cells[ci].Text != "" {
+				dst.Cells[ci].Text += " " + src.Cells[ci].Text
+			} else {
+				dst.Cells[ci].Text = src.Cells[ci].Text
+			}
+			dst.Cells[ci].Spans = append(dst.Cells[ci].Spans, src.Cells[ci].Spans...)
+		}
+	}
 }
 
 // isContinuationRow returns true if the row looks like the wrapped tail of the

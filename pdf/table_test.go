@@ -171,6 +171,45 @@ func TestFindTableAcrossPages(t *testing.T) {
 	}
 }
 
+func TestFindTableAcrossPages_PageWithoutHeader(t *testing.T) {
+	// Statements repeat the header per section, not per page, so a page in
+	// the middle of a long section has rows and no header.
+	tbl := FindTableAcrossPages([][]TextSpan{datedPage(true, "01-04"), datedPage(false, "02-04")}, &TableOpts{
+		Headers: []string{"Date", "Amount"},
+	})
+	if tbl == nil {
+		t.Fatal("expected table")
+	}
+	if len(tbl.Rows) != 2 || tbl.CellText(1, 0) != "02-04" {
+		t.Errorf("got %d rows, want the page-2 row 02-04 after 01-04", len(tbl.Rows))
+	}
+}
+
+func TestFindTableAcrossPages_ProsePageWithoutHeader(t *testing.T) {
+	// Terms after the table also lack a header, but are keyed by words.
+	terms := []TextSpan{
+		makeSpan(50, 700, "Pricing:"),
+		makeSpan(150, 700, "All prices exclude VAT."),
+	}
+	tbl := FindTableAcrossPages([][]TextSpan{datedPage(true, "01-04"), terms}, &TableOpts{
+		Headers: []string{"Date", "Amount"},
+	})
+	if tbl == nil {
+		t.Fatal("expected table")
+	}
+	if len(tbl.Rows) != 1 {
+		t.Errorf("got %d rows, want only the 01-04 record", len(tbl.Rows))
+	}
+}
+
+func datedPage(header bool, date string) []TextSpan {
+	var spans []TextSpan
+	if header {
+		spans = append(spans, makeSpan(50, 720, "Date"), makeSpan(150, 720, "Amount"))
+	}
+	return append(spans, makeSpan(50, 700, date), makeSpan(150, 700, "10.00"))
+}
+
 // =====================================================================
 // Approach 2: Gap-based auto-detection
 // =====================================================================
@@ -984,9 +1023,9 @@ func TestIntegration_BCR_AutoTune(t *testing.T) {
 		t.Fatal("AutoTune returned nil on BCR")
 	}
 
-	// Records must be separated, not collapsed into the old ~70-row blob.
-	if len(tbl.Rows) < 150 {
-		t.Errorf("expected >= 150 rows after per-record separation, got %d", len(tbl.Rows))
+	// One row per transaction: 217 of them, 23 on page 7, which has no header.
+	if len(tbl.Rows) != 217 {
+		t.Errorf("expected 217 rows, one per transaction, got %d", len(tbl.Rows))
 	}
 
 	// Non-record rows (repeated headers, section labels, footer prose) must be

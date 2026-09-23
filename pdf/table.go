@@ -244,20 +244,22 @@ func FindTableAcrossPages(pages [][]TextSpan, opts *TableOpts) *Table {
 			}
 		}
 		var result *Table
-		for i, spans := range pages {
+		for _, spans := range pages {
 			t := FindTable(spans, opts)
-			if t == nil {
-				continue
-			}
-			// On pages after the first, collect continuation rows above the
-			// header (data that spills over from the previous page's section).
-			if i > 0 && result != nil {
-				preRows := collectPreHeaderData(spans, t.Columns, opts)
-				result.Rows = append(result.Rows, preRows...)
-			}
-			if result == nil {
+			switch {
+			case result == nil:
 				result = t
-			} else {
+			case t == nil:
+				// A page with no header continues the table only when its rows are
+				// keyed like the table's records; terms, signatures and other prose
+				// after the table are keyed by words.
+				rows := collectContinuation(spans, result.Columns, opts)
+				key := max(0, result.ColumnByName(opts.AnchorColumn))
+				if digitKeyed(result.Rows, key) && digitKeyed(rows, key) {
+					result.Rows = append(result.Rows, rows...)
+				}
+			default:
+				result.Rows = append(result.Rows, collectContinuation(spans, t.Columns, opts)...)
 				result.Rows = append(result.Rows, t.Rows...)
 			}
 		}
@@ -393,20 +395,11 @@ func filterNonRecordRows(t *Table, keyCol int) *Table {
 	// and only when digit-keyed keys clearly dominate, so a digit-keyed record is
 	// never dropped. Alpha-keyed tables fall below the threshold and pass through
 	// unfiltered.
-	digit, total := 0, 0
-	for _, r := range t.Rows {
-		if v := keyCellText(r, keyCol); v != "" {
-			total++
-			if startsWithDigit(v) {
-				digit++
-			}
-		}
-	}
-	if total == 0 || float64(digit)/float64(total) < recordShapeMajority {
+	if !digitKeyed(t.Rows, keyCol) {
 		return t
 	}
 
-	kept := make([]Row, 0, digit)
+	var kept []Row
 	for _, r := range t.Rows {
 		if v := keyCellText(r, keyCol); v != "" && startsWithDigit(v) {
 			kept = append(kept, r)
@@ -415,6 +408,20 @@ func filterNonRecordRows(t *Table, keyCol int) *Table {
 	out := *t
 	out.Rows = kept
 	return &out
+}
+
+// digitKeyed reports whether digit-leading keys dominate the rows' key column.
+func digitKeyed(rows []Row, keyCol int) bool {
+	digit, total := 0, 0
+	for _, r := range rows {
+		if v := keyCellText(r, keyCol); v != "" {
+			total++
+			if startsWithDigit(v) {
+				digit++
+			}
+		}
+	}
+	return total > 0 && float64(digit)/float64(total) >= recordShapeMajority
 }
 
 func keyCellText(r Row, col int) string {
@@ -782,13 +789,14 @@ func discoverColumnsForHeaders(pages [][]TextSpan, opts *TableOpts) []Column {
 	return remapColumnsToData(columns, allDataRows)
 }
 
-// collectPreHeaderData collects data rows above the first header on a page.
-// These are continuations from the previous page's last section that spill
-// over a page break.
-func collectPreHeaderData(spans []TextSpan, columns []Column, opts *TableOpts) []Row {
+// collectContinuation collects the rows that continue the previous page's
+// section: those above the page's first header, or the whole page when it
+// has no header, as happens mid-section in statements that repeat the header
+// per section rather than per page.
+func collectContinuation(spans []TextSpan, columns []Column, opts *TableOpts) []Row {
 	ph, ok := findPageHeaders(spans, opts)
-	if !ok || ph.hi == 0 {
-		return nil
+	if !ok {
+		return collectDataRows(groupRows(spans, opts.yTol()), columns, opts)
 	}
 	return collectDataRows(ph.rows[:ph.hi], columns, opts)
 }

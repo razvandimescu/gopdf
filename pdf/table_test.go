@@ -1051,6 +1051,15 @@ func TestIntegration_BCR_AutoTune(t *testing.T) {
 		t.Errorf("value dates: %d in the table, %d on the pages", extracted, printed)
 	}
 
+	// Each page ends in "Pagina N din 15", set apart from the last record.
+	for ri, r := range tbl.Rows {
+		for _, c := range r.Cells {
+			if strings.Contains(c.Text, "Pagina") {
+				t.Errorf("row %d holds the page footer: %q", ri, c.Text)
+			}
+		}
+	}
+
 	// Non-record rows (repeated headers, section labels, footer prose) must be
 	// filtered: every transaction is keyed by a date, so every row's key column
 	// (column 0) starts with a digit.
@@ -1143,6 +1152,14 @@ func TestIntegration_AllQuotationPDFs(t *testing.T) {
 			}
 			if len(tbl.Rows) == 0 {
 				t.Error("quotation table has 0 data rows")
+			}
+
+			// Items are keyed by quantity; the terms that follow the table, by words.
+			auto := FindTableAcrossPages(allPageSpans(doc), &TableOpts{AutoTune: true})
+			for ri := range auto.Rows {
+				if key := auto.CellText(ri, 0); !startsWithDigit(key) {
+					t.Errorf("row %d is not an item: %q", ri, key)
+				}
 			}
 
 			for ri, row := range tbl.Rows {
@@ -1426,5 +1443,120 @@ func TestMergeByAnchorColumn_DateIsNotAnAmount(t *testing.T) {
 	}
 	if got := tbl.CellByName(0, "Reference"); got != "2025040151601958 Ordin de plata 01.04.2025" {
 		t.Errorf("Reference = %q, want the value date appended", got)
+	}
+}
+
+func TestMergeByAnchorColumn_FooterIsNotATail(t *testing.T) {
+	// A page footer set below the last record belongs to no record. Its gap is
+	// what tells it apart: half a line more than the table's line pitch.
+	spans := []TextSpan{
+		makeSpan(50, 700, "Date"),
+		makeSpan(150, 700, "Description"),
+		makeSpan(450, 700, "Debit"),
+		makeSpan(50, 680, "01-04-2025"),
+		makeSpan(150, 680, "Payment to"),
+		makeSpan(450, 680, "400,00"),
+		makeSpan(150, 672, "ACME Corp"),
+		makeSpan(50, 664, "02-04-2025"),
+		makeSpan(150, 664, "Fee for"),
+		makeSpan(450, 664, "0,51"),
+		makeSpan(150, 656, "transfer"),
+		makeSpan(270, 644, "Pagina 7 din 15"),
+	}
+
+	tbl := FindTableAcrossPages([][]TextSpan{spans}, &TableOpts{
+		Headers:      []string{"Description", "Debit"},
+		AnchorColumn: "Date",
+	})
+	if tbl == nil {
+		t.Fatal("no table found")
+	}
+	if got := tbl.CellByName(1, "Description"); got != "Fee for transfer" {
+		t.Errorf("Description = %q, want the footer kept out of the record", got)
+	}
+}
+
+func TestMergeByAnchorColumn_LinesAboveTheAnchor(t *testing.T) {
+	// Some statements centre the date and amount on the record's description,
+	// and set records apart by a gap. Each block of lines is one record, so the
+	// lines above its date belong to it, not to the record before.
+	spans := []TextSpan{
+		makeSpan(50, 700, "Date"),
+		makeSpan(150, 700, "Description"),
+		makeSpan(450, 700, "Debit"),
+		makeSpan(150, 680, "Payment 6005108396"),
+		makeSpan(50, 668, "05 ianuarie 2026"),
+		makeSpan(150, 668, "REF. 6005108396"),
+		makeSpan(450, 668, "262.30"),
+		makeSpan(150, 656, "ACME Corp"),
+		makeSpan(150, 636, "Payment 6005108397"),
+		makeSpan(50, 624, "06 ianuarie 2026"),
+		makeSpan(150, 624, "REF. 6005108397"),
+		makeSpan(450, 624, "198.00"),
+		makeSpan(150, 612, "Globex"),
+	}
+
+	tbl := FindTableAcrossPages([][]TextSpan{spans}, &TableOpts{
+		Headers:      []string{"Description", "Debit"},
+		AnchorColumn: "Date",
+	})
+	if tbl == nil {
+		t.Fatal("no table found")
+	}
+	want := []string{
+		"Payment 6005108396 REF. 6005108396 ACME Corp",
+		"Payment 6005108397 REF. 6005108397 Globex",
+	}
+	if len(tbl.Rows) != len(want) {
+		t.Fatalf("got %d rows, want %d", len(tbl.Rows), len(want))
+	}
+	for i, w := range want {
+		if got := tbl.CellByName(i, "Description"); got != w {
+			t.Errorf("row %d Description = %q, want %q", i, got, w)
+		}
+	}
+}
+
+// keyedList lays out one-line rows keyed in column 0, dy apart, with extra
+// space before row gapAt.
+func keyedList(keys []string, dy float64, gapAt int) *Table {
+	cols := []Column{{Name: "Key", X: 50}, {Name: "Text", X: 150}}
+	t := &Table{Columns: cols}
+	y := 680.0
+	for i, k := range keys {
+		if i == gapAt {
+			y -= 3 * dy
+		}
+		key, text := makeSpan(50, y, k), makeSpan(150, y, "details")
+		t.Rows = append(t.Rows, Row{Y: y, Cells: []Cell{
+			{Column: 0, Text: k, Spans: []TextSpan{key}},
+			{Column: 1, Text: "details", Spans: []TextSpan{text}},
+		}})
+		y -= dy
+	}
+	return t
+}
+
+func TestDropTrailer_TermsAfterTheTable(t *testing.T) {
+	tbl := keyedList([]string{"2.00", "1.00", "Quote Expiry:", "Pricing:", "Vesting:"}, 12, 2)
+	if got := dropTrailer(tbl, 0); len(got.Rows) != 2 {
+		t.Errorf("got %d rows, want the 2 items without the terms", len(got.Rows))
+	}
+}
+
+func TestDropTrailer_KeepsAnAlphabeticalList(t *testing.T) {
+	// Digits sort first, so the names after "3M" and "7-Eleven" are keyed by
+	// words too. No gap sets them apart, so they are the rest of the table.
+	tbl := keyedList([]string{"3M", "7-Eleven", "Acme", "Globex", "Initech", "Umbrella"}, 12, -1)
+	if got := dropTrailer(tbl, 0); len(got.Rows) != 6 {
+		t.Errorf("got %d rows, want all 6", len(got.Rows))
+	}
+}
+
+func TestDropTrailer_KeepsAListOverAPageBreak(t *testing.T) {
+	tbl := keyedList([]string{"3M", "7-Eleven"}, 12, -1)
+	tbl.Rows = append(tbl.Rows, keyedList([]string{"Acme", "Globex", "Initech", "Umbrella"}, 12, -1).Rows...)
+	if got := dropTrailer(tbl, 0); len(got.Rows) != 6 {
+		t.Errorf("got %d rows, want all 6", len(got.Rows))
 	}
 }

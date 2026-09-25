@@ -678,6 +678,8 @@ pdf/
   edit.go       Text search, text overlay, image overlay, visual redaction
   redact.go     Text removal: glyph-level content stream rewriting
   outline.go    Filled-path capture and clustering; OutlineHint
+  recover.go    Labelling outlined glyphs and reading their text (internal)
+  assemble.go   Labelled glyphs -> baselines, runs, words
   image.go      Image decoding (PNG/JPEG/GIF) → RGB + grayscale SMask streams
   creator.go    PDF creation from scratch (text, shapes, images, fonts)
   lexer.go      PDF byte stream tokenizer

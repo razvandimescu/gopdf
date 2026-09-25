@@ -1,8 +1,10 @@
 package pdf
 
 import (
+	"fmt"
 	"math"
 	"slices"
+	"strings"
 )
 
 // Some producers draw every glyph as a filled path — no text operators, no
@@ -202,12 +204,60 @@ func (f filledPath) bounds() (x0, y0, x1, y1 float64) {
 	return
 }
 
+// pdfPath writes the fill as path operators, moved so its bounds start at the
+// origin.
+func (f filledPath) pdfPath() string {
+	x0, y0, _, _ := f.bounds()
+	var b strings.Builder
+	for _, s := range f.segs {
+		for _, p := range s.points() {
+			fmt.Fprintf(&b, "%s %s ", formatOperand(p[0]-x0), formatOperand(p[1]-y0))
+		}
+		b.WriteByte(s.op)
+		b.WriteByte(' ')
+	}
+	if f.evenOdd {
+		b.WriteString("f*")
+	} else {
+		b.WriteString("f")
+	}
+	return b.String()
+}
+
+// isRect reports whether the fill is one axis-aligned rectangle, the outline
+// l, I and | share in many sans-serif faces.
+func (f filledPath) isRect() bool {
+	if len(f.segs) != 5 || f.segs[0].op != 'm' {
+		return false
+	}
+	for i := 1; i < 5; i++ {
+		a, b := f.segs[i-1].end(), f.segs[i].pts[0]
+		if f.segs[i].op != 'l' || (a[0] != b[0] && a[1] != b[1]) {
+			return false
+		}
+	}
+	return true
+}
+
 // isGlyphCandidate reports whether a fill is sized and shaped like a glyph.
 // Colour is ignored: white text on a dark cell is still text.
 func (f filledPath) isGlyphCandidate() bool {
 	x0, y0, x1, y1 := f.bounds()
 	long, short := math.Max(x1-x0, y1-y0), math.Min(x1-x0, y1-y0)
 	return short > 0 && long <= maxGlyphSize && long <= maxGlyphAspect*short
+}
+
+// glyphCandidates picks out the fills sized and shaped like glyphs, with each
+// one's ordinal in the page's paint order. OutlineHint and recovery share it,
+// so the hint describes what recovery will see.
+func glyphCandidates(fills []filledPath) (cands []filledPath, index []int) {
+	for i, f := range fills {
+		if f.isGlyphCandidate() {
+			cands = append(cands, f)
+			index = append(index, i)
+		}
+	}
+	return cands, index
 }
 
 // shapeKey is what two instances of one outline must share exactly.
@@ -311,12 +361,7 @@ func (p *Page) OutlineHint() (OutlineHint, error) {
 	if err != nil {
 		return OutlineHint{}, err
 	}
-	var cands []filledPath
-	for _, f := range fills {
-		if f.isGlyphCandidate() {
-			cands = append(cands, f)
-		}
-	}
+	cands, _ := glyphCandidates(fills)
 	_, shapes := clusterShapes(cands)
 	return OutlineHint{Candidates: len(cands), Shapes: shapes}, nil
 }

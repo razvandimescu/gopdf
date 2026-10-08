@@ -6,8 +6,13 @@ import (
 
 // Parser reads PDF objects from a Lexer.
 type Parser struct {
-	lex *Lexer
+	lex   *Lexer
+	depth int
 }
+
+// maxNesting bounds how deep arrays and dicts nest; past it the parser's
+// recursion would exhaust the stack, which recover cannot catch.
+const maxNesting = 1000
 
 // NewParser returns a Parser reading objects from data.
 func NewParser(data []byte) *Parser {
@@ -65,10 +70,15 @@ func (p *Parser) parseFromToken(tok Token) (any, error) {
 	case TNull:
 		return nil, nil
 
-	case TArrayStart:
-		return p.parseArray()
-
-	case TDictStart:
+	case TArrayStart, TDictStart:
+		if p.depth == maxNesting {
+			return nil, fmt.Errorf("nested deeper than %d at pos %d", maxNesting, p.lex.Pos())
+		}
+		p.depth++
+		defer func() { p.depth-- }()
+		if tok.Type == TArrayStart {
+			return p.parseArray()
+		}
 		return p.parseDict()
 
 	case TKeyword:

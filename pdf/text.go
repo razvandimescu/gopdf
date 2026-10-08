@@ -441,7 +441,7 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 			continue
 		case TArrayStart:
 			// Parse inline array.
-			arr := parseInlineArray(lex)
+			arr := parseInlineArray(lex, 1)
 			stack = append(stack, arr)
 			continue
 		case TDictStart:
@@ -452,7 +452,7 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 				stack = append(stack, dict)
 			} else {
 				lex.SetPos(start)
-				skipInlineDict(lex)
+				skipNested(lex, TDictStart, TDictEnd)
 			}
 			continue
 		}
@@ -684,7 +684,9 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 	return spans
 }
 
-func parseInlineArray(lex *Lexer) Array {
+// parseInlineArray reads up to the ']' that closes the array. Arrays nested
+// past maxNesting are skipped whole, so the recursion stays bounded.
+func parseInlineArray(lex *Lexer, depth int) Array {
 	var arr Array
 	for {
 		tok, err := lex.NextToken()
@@ -703,23 +705,28 @@ func parseInlineArray(lex *Lexer) Array {
 		case TName:
 			arr = append(arr, Name(tok.Str))
 		case TArrayStart:
-			arr = append(arr, parseInlineArray(lex))
+			if depth < maxNesting {
+				arr = append(arr, parseInlineArray(lex, depth+1))
+			} else {
+				skipNested(lex, TArrayStart, TArrayEnd)
+			}
 		}
 	}
 	return arr
 }
 
-func skipInlineDict(lex *Lexer) {
+// skipNested moves lex past the close that balances an open already read.
+func skipNested(lex *Lexer, open, close TokenType) {
 	depth := 1
 	for depth > 0 {
 		tok, err := lex.NextToken()
 		if err != nil || tok.Type == TEOF {
 			return
 		}
-		if tok.Type == TDictStart {
+		if tok.Type == open {
 			depth++
 		}
-		if tok.Type == TDictEnd {
+		if tok.Type == close {
 			depth--
 		}
 	}

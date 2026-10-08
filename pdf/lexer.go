@@ -314,6 +314,10 @@ func (l *Lexer) readKeyword() (Token, error) {
 		}
 		l.pos++
 	}
+	if l.pos == start {
+		l.pos++
+		return Token{}, fmt.Errorf("unexpected '%c' at pos %d", l.data[start], start)
+	}
 	s := string(l.data[start:l.pos])
 	switch s {
 	case "true":

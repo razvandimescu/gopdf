@@ -441,7 +441,7 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 			continue
 		case TArrayStart:
 			// Parse inline array.
-			arr := parseInlineArray(lex)
+			arr := parseInlineArray(lex, 0)
 			stack = append(stack, arr)
 			continue
 		case TDictStart:
@@ -684,7 +684,13 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 	return spans
 }
 
-func parseInlineArray(lex *Lexer) Array {
+// parseInlineArray reads up to the ']' that closes the array. Arrays nested
+// past maxNesting are read into the array enclosing them, so the depth of the
+// recursion stays bounded.
+func parseInlineArray(lex *Lexer, depth int) Array {
+	if depth == maxNesting {
+		return nil
+	}
 	var arr Array
 	for {
 		tok, err := lex.NextToken()
@@ -703,7 +709,7 @@ func parseInlineArray(lex *Lexer) Array {
 		case TName:
 			arr = append(arr, Name(tok.Str))
 		case TArrayStart:
-			arr = append(arr, parseInlineArray(lex))
+			arr = append(arr, parseInlineArray(lex, depth+1))
 		}
 	}
 	return arr

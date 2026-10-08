@@ -148,6 +148,10 @@ func (l *Lexer) NextToken() (Token, error) {
 	case b == '+' || b == '-' || b == '.' || isDigit(b):
 		return l.readNumber()
 
+	case isDelimiter(b):
+		l.pos++
+		return Token{}, fmt.Errorf("unexpected '%c' at pos %d", b, l.pos-1)
+
 	default:
 		return l.readKeyword()
 	}
@@ -313,10 +317,6 @@ func (l *Lexer) readKeyword() (Token, error) {
 			break
 		}
 		l.pos++
-	}
-	if l.pos == start {
-		l.pos++
-		return Token{}, fmt.Errorf("unexpected '%c' at pos %d", l.data[start], start)
 	}
 	s := string(l.data[start:l.pos])
 	switch s {

@@ -441,7 +441,7 @@ func extractTextWithResources(content []byte, fonts map[Name]Dict, reader *Reade
 			continue
 		case TArrayStart:
 			// Parse inline array.
-			arr := parseInlineArray(lex, 0)
+			arr := parseInlineArray(lex, 1)
 			stack = append(stack, arr)
 			continue
 		case TDictStart:
